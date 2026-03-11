@@ -12,7 +12,7 @@ max_poll_attempts = 200
 
 [server]
 host = "0.0.0.0"
-port = 8000
+port = 4020
 
 [debug]
 enabled = false

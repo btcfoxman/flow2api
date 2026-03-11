@@ -27,6 +27,6 @@ COPY . .
 COPY docker/entrypoint.headed.sh /usr/local/bin/entrypoint.headed.sh
 RUN chmod +x /usr/local/bin/entrypoint.headed.sh
 
-EXPOSE 8000
+EXPOSE 4020
 
 CMD ["/usr/local/bin/entrypoint.headed.sh"]

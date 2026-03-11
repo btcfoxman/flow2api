@@ -1118,7 +1118,7 @@ async def get_cache_config(token: str = Depends(verify_admin_token)):
     cache_config = await db.get_cache_config()
 
     # Calculate effective base URL
-    effective_base_url = cache_config.cache_base_url if cache_config.cache_base_url else f"http://127.0.0.1:8000"
+    effective_base_url = cache_config.cache_base_url if cache_config.cache_base_url else f"http://127.0.0.1:4020"
 
     return {
         "success": True,
