@@ -63,3 +63,4 @@ config/setting.toml
 config/setting_warp.toml
 config/setting_warp_example.toml
 
+/.venv/
