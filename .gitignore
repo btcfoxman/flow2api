@@ -64,3 +64,8 @@ config/setting_warp.toml
 config/setting_warp_example.toml
 
 /.venv/
+
+# 测试文件
+test_*
+tests/__pycache__/
+*.har

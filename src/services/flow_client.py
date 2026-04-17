@@ -15,6 +15,11 @@ from curl_cffi.requests import AsyncSession
 from ..core.logger import debug_logger
 from ..core.config import config
 
+try:
+    import httpx
+except ImportError:
+    httpx = None
+
 
 class FlowClient:
     """VideoFX API客户端"""
@@ -32,6 +37,7 @@ class FlowClient:
             "flow_request_fingerprint",
             default=None
         )
+        self._remote_browser_prefill_last_sent: Dict[str, float] = {}
 
         # Default "real browser" headers (Android Chrome style) to reduce upstream 4xx/5xx instability.
         # These will be applied as defaults (won't override caller-provided headers).
@@ -625,7 +631,7 @@ class FlowClient:
                 "toolName": "PINHOLE"
             }
         }
-        max_retries = max(2, min(4, int(getattr(config, "flow_max_retries", 3) or 3)))
+        max_retries = config.flow_max_retries
         request_timeout = max(self._get_control_plane_timeout(), min(self.timeout, 15))
         last_error: Optional[Exception] = None
 
@@ -803,11 +809,12 @@ class FlowClient:
         ext = "png" if "png" in mime_type else "jpg"
         upload_file_name = f"flow2api_upload_{int(time.time() * 1000)}.{ext}"
         new_url = f"{self.api_base_url}/flow/uploadImage"
+        normalized_project_id = str(project_id or "").strip()
         new_client_context = {
             "tool": "PINHOLE"
         }
-        if project_id:
-            new_client_context["projectId"] = project_id
+        if normalized_project_id:
+            new_client_context["projectId"] = normalized_project_id
 
         new_json_data = {
             "clientContext": new_client_context,
@@ -832,7 +839,7 @@ class FlowClient:
                 "tool": "ASSET_MANAGER"
             }
         }
-        max_retries = max(1, getattr(config, "flow_max_retries", 3))
+        max_retries = config.flow_max_retries
         last_error: Optional[Exception] = None
 
         for retry_attempt in range(max_retries):
@@ -854,6 +861,23 @@ class FlowClient:
                 raise Exception(f"Invalid upload response: missing media id, keys={list(new_result.keys())}")
             except Exception as new_upload_error:
                 last_error = new_upload_error
+                retry_reason = "网络超时" if self._is_timeout_error(new_upload_error) else self._get_retry_reason(str(new_upload_error))
+
+                # 旧接口不携带 projectId，带项目上下文的上传一旦回退就可能把图片挂到错误项目。
+                if normalized_project_id:
+                    if retry_reason and retry_attempt < max_retries - 1:
+                        debug_logger.log_warning(
+                            f"[UPLOAD] Project-scoped upload 遇到{retry_reason}，准备重试新版接口 "
+                            f"({retry_attempt + 2}/{max_retries}, project_id={normalized_project_id})..."
+                        )
+                        await asyncio.sleep(1)
+                        continue
+                    raise RuntimeError(
+                        "Project-scoped image upload failed via /flow/uploadImage; "
+                        "legacy :uploadUserImage fallback is disabled because it may attach media "
+                        f"to a different project (project_id={normalized_project_id})."
+                    ) from new_upload_error
+
                 debug_logger.log_warning(
                     f"[UPLOAD] New upload API failed, fallback to legacy endpoint: {new_upload_error}"
                 )
@@ -1082,8 +1106,8 @@ class FlowClient:
         """
         url = f"{self.api_base_url}/flow/upsampleImage"
 
-        # 403/reCAPTCHA/500 重试逻辑 - 最多重试3次
-        max_retries = 3
+        # 403/reCAPTCHA/500 重试逻辑 - 使用配置的最大重试次数
+        max_retries = config.flow_max_retries
         last_error = None
 
         for retry_attempt in range(max_retries):
@@ -1155,6 +1179,19 @@ class FlowClient:
 
     # ========== 视频生成 (使用AT) - 异步返回 ==========
 
+    def _build_video_text_input(self, prompt: str, use_v2_model_config: bool = False) -> Dict[str, Any]:
+        if use_v2_model_config:
+            return {
+                "structuredPrompt": {
+                    "parts": [{
+                        "text": prompt
+                    }]
+                }
+            }
+        return {
+            "prompt": prompt
+        }
+
     async def generate_video_text(
         self,
         at: str,
@@ -1162,6 +1199,7 @@ class FlowClient:
         prompt: str,
         model_key: str,
         aspect_ratio: str,
+        use_v2_model_config: bool = False,
         user_paygate_tier: str = "PAYGATE_TIER_ONE",
         token_id: Optional[int] = None,
         token_video_concurrency: Optional[int] = None,
@@ -1188,8 +1226,8 @@ class FlowClient:
         """
         url = f"{self.api_base_url}/video:batchAsyncGenerateVideoText"
 
-        # 403/reCAPTCHA 重试逻辑 - 最多重试3次
-        max_retries = 3
+        # 403/reCAPTCHA 重试逻辑 - 使用配置的最大重试次数
+        max_retries = config.flow_max_retries
         last_error = None
         
         for retry_attempt in range(max_retries):
@@ -1227,30 +1265,34 @@ class FlowClient:
                 raise last_error
             session_id = self._generate_session_id()
             scene_id = str(uuid.uuid4())
-
-            json_data = {
-                "clientContext": {
-                    "recaptchaContext": {
-                        "token": recaptcha_token,
-                        "applicationType": "RECAPTCHA_APPLICATION_TYPE_WEB"
-                    },
-                    "sessionId": session_id,
-                    "projectId": project_id,
-                    "tool": "PINHOLE",
-                    "userPaygateTier": user_paygate_tier
+            client_context = {
+                "recaptchaContext": {
+                    "token": recaptcha_token,
+                    "applicationType": "RECAPTCHA_APPLICATION_TYPE_WEB"
                 },
-                "requests": [{
-                    "aspectRatio": aspect_ratio,
-                    "seed": random.randint(1, 99999),
-                    "textInput": {
-                        "prompt": prompt
-                    },
-                    "videoModelKey": model_key,
-                    "metadata": {
-                        "sceneId": scene_id
-                    }
-                }]
+                "sessionId": session_id,
+                "projectId": project_id,
+                "tool": "PINHOLE",
+                "userPaygateTier": user_paygate_tier
             }
+            request_data = {
+                "aspectRatio": aspect_ratio,
+                "seed": random.randint(1, 99999),
+                "textInput": self._build_video_text_input(prompt, use_v2_model_config=use_v2_model_config),
+                "videoModelKey": model_key,
+                "metadata": {
+                    "sceneId": scene_id
+                }
+            }
+            json_data = {
+                "clientContext": client_context,
+                "requests": [request_data]
+            }
+            if use_v2_model_config:
+                json_data["mediaGenerationContext"] = {
+                    "batchId": str(uuid.uuid4())
+                }
+                json_data["useV2ModelConfig"] = True
 
             try:
                 result = await self._make_request(
@@ -1308,8 +1350,8 @@ class FlowClient:
         """
         url = f"{self.api_base_url}/video:batchAsyncGenerateVideoReferenceImages"
 
-        # 403/reCAPTCHA 重试逻辑 - 最多重试3次
-        max_retries = 3
+        # 403/reCAPTCHA 重试逻辑 - 使用配置的最大重试次数
+        max_retries = config.flow_max_retries
         last_error = None
         
         for retry_attempt in range(max_retries):
@@ -1419,6 +1461,7 @@ class FlowClient:
         aspect_ratio: str,
         start_media_id: str,
         end_media_id: str,
+        use_v2_model_config: bool = False,
         user_paygate_tier: str = "PAYGATE_TIER_ONE",
         token_id: Optional[int] = None,
         token_video_concurrency: Optional[int] = None,
@@ -1440,8 +1483,8 @@ class FlowClient:
         """
         url = f"{self.api_base_url}/video:batchAsyncGenerateVideoStartAndEndImage"
 
-        # 403/reCAPTCHA 重试逻辑 - 最多重试3次
-        max_retries = 3
+        # 403/reCAPTCHA 重试逻辑 - 使用配置的最大重试次数
+        max_retries = config.flow_max_retries
         last_error = None
         
         for retry_attempt in range(max_retries):
@@ -1479,36 +1522,40 @@ class FlowClient:
                 raise last_error
             session_id = self._generate_session_id()
             scene_id = str(uuid.uuid4())
-
-            json_data = {
-                "clientContext": {
-                    "recaptchaContext": {
-                        "token": recaptcha_token,
-                        "applicationType": "RECAPTCHA_APPLICATION_TYPE_WEB"
-                    },
-                    "sessionId": session_id,
-                    "projectId": project_id,
-                    "tool": "PINHOLE",
-                    "userPaygateTier": user_paygate_tier
+            client_context = {
+                "recaptchaContext": {
+                    "token": recaptcha_token,
+                    "applicationType": "RECAPTCHA_APPLICATION_TYPE_WEB"
                 },
-                "requests": [{
-                    "aspectRatio": aspect_ratio,
-                    "seed": random.randint(1, 99999),
-                    "textInput": {
-                        "prompt": prompt
-                    },
-                    "videoModelKey": model_key,
-                    "startImage": {
-                        "mediaId": start_media_id
-                    },
-                    "endImage": {
-                        "mediaId": end_media_id
-                    },
-                    "metadata": {
-                        "sceneId": scene_id
-                    }
-                }]
+                "sessionId": session_id,
+                "projectId": project_id,
+                "tool": "PINHOLE",
+                "userPaygateTier": user_paygate_tier
             }
+            request_data = {
+                "aspectRatio": aspect_ratio,
+                "seed": random.randint(1, 99999),
+                "textInput": self._build_video_text_input(prompt, use_v2_model_config=use_v2_model_config),
+                "videoModelKey": model_key,
+                "startImage": {
+                    "mediaId": start_media_id
+                },
+                "endImage": {
+                    "mediaId": end_media_id
+                },
+                "metadata": {
+                    "sceneId": scene_id
+                }
+            }
+            json_data = {
+                "clientContext": client_context,
+                "requests": [request_data]
+            }
+            if use_v2_model_config:
+                json_data["mediaGenerationContext"] = {
+                    "batchId": str(uuid.uuid4())
+                }
+                json_data["useV2ModelConfig"] = True
 
             try:
                 result = await self._make_request(
@@ -1546,6 +1593,7 @@ class FlowClient:
         model_key: str,
         aspect_ratio: str,
         start_media_id: str,
+        use_v2_model_config: bool = False,
         user_paygate_tier: str = "PAYGATE_TIER_ONE",
         token_id: Optional[int] = None,
         token_video_concurrency: Optional[int] = None,
@@ -1566,8 +1614,8 @@ class FlowClient:
         """
         url = f"{self.api_base_url}/video:batchAsyncGenerateVideoStartImage"
 
-        # 403/reCAPTCHA 重试逻辑 - 最多重试3次
-        max_retries = 3
+        # 403/reCAPTCHA 重试逻辑 - 使用配置的最大重试次数
+        max_retries = config.flow_max_retries
         last_error = None
         
         for retry_attempt in range(max_retries):
@@ -1605,34 +1653,38 @@ class FlowClient:
                 raise last_error
             session_id = self._generate_session_id()
             scene_id = str(uuid.uuid4())
-
-            json_data = {
-                "clientContext": {
-                    "recaptchaContext": {
-                        "token": recaptcha_token,
-                        "applicationType": "RECAPTCHA_APPLICATION_TYPE_WEB"
-                    },
-                    "sessionId": session_id,
-                    "projectId": project_id,
-                    "tool": "PINHOLE",
-                    "userPaygateTier": user_paygate_tier
+            client_context = {
+                "recaptchaContext": {
+                    "token": recaptcha_token,
+                    "applicationType": "RECAPTCHA_APPLICATION_TYPE_WEB"
                 },
-                "requests": [{
-                    "aspectRatio": aspect_ratio,
-                    "seed": random.randint(1, 99999),
-                    "textInput": {
-                        "prompt": prompt
-                    },
-                    "videoModelKey": model_key,
-                    "startImage": {
-                        "mediaId": start_media_id
-                    },
-                    # 注意: 没有endImage字段,只用首帧
-                    "metadata": {
-                        "sceneId": scene_id
-                    }
-                }]
+                "sessionId": session_id,
+                "projectId": project_id,
+                "tool": "PINHOLE",
+                "userPaygateTier": user_paygate_tier
             }
+            request_data = {
+                "aspectRatio": aspect_ratio,
+                "seed": random.randint(1, 99999),
+                "textInput": self._build_video_text_input(prompt, use_v2_model_config=use_v2_model_config),
+                "videoModelKey": model_key,
+                "startImage": {
+                    "mediaId": start_media_id
+                },
+                # 注意: 没有endImage字段,只用首帧
+                "metadata": {
+                    "sceneId": scene_id
+                }
+            }
+            json_data = {
+                "clientContext": client_context,
+                "requests": [request_data]
+            }
+            if use_v2_model_config:
+                json_data["mediaGenerationContext"] = {
+                    "batchId": str(uuid.uuid4())
+                }
+                json_data["useV2ModelConfig"] = True
 
             try:
                 result = await self._make_request(
@@ -1690,8 +1742,8 @@ class FlowClient:
         """
         url = f"{self.api_base_url}/video:batchAsyncGenerateVideoUpsampleVideo"
 
-        # 403/reCAPTCHA 重试逻辑 - 最多重试3次
-        max_retries = 3
+        # 403/reCAPTCHA 重试逻辑 - 使用配置的最大重试次数
+        max_retries = config.flow_max_retries
         last_error = None
         
         for retry_attempt in range(max_retries):
@@ -1803,7 +1855,7 @@ class FlowClient:
         json_data = {
             "operations": operations
         }
-        max_retries = max(1, getattr(config, "flow_max_retries", 3))
+        max_retries = config.flow_max_retries
         last_error: Optional[Exception] = None
 
         for retry_attempt in range(max_retries):
@@ -1979,6 +2031,7 @@ class FlowClient:
                     method="POST",
                     path=f"/api/v1/sessions/{session_id}/error",
                     json_data={"error_reason": error_reason or error_message or "upstream_error"},
+                    timeout_override=2,
                 )
             except Exception as e:
                 debug_logger.log_warning(f"[reCAPTCHA RemoteBrowser] 上报 error 失败: {e}")
@@ -1999,6 +2052,7 @@ class FlowClient:
                     method="POST",
                     path=f"/api/v1/sessions/{session_id}/finish",
                     json_data={"status": "success"},
+                    timeout_override=2,
                 )
             except Exception as e:
                 debug_logger.log_warning(f"[reCAPTCHA RemoteBrowser] 上报 finish 失败: {e}")
@@ -2027,6 +2081,72 @@ class FlowClient:
         return base_url, api_key, timeout
 
     @staticmethod
+    def _build_remote_browser_http_timeout(read_timeout: float) -> Any:
+        read_value = max(3.0, float(read_timeout))
+        write_value = min(10.0, max(3.0, read_value))
+        if httpx is None:
+            return read_value
+        return httpx.Timeout(
+            connect=2.5,
+            read=read_value,
+            write=write_value,
+            pool=2.5,
+        )
+
+    @staticmethod
+    def _parse_json_response_text(text: str) -> Optional[Any]:
+        if not text:
+            return None
+        try:
+            return json.loads(text)
+        except Exception:
+            return None
+
+    @staticmethod
+    async def _stdlib_json_http_request(
+        method: str,
+        url: str,
+        headers: Dict[str, str],
+        payload: Optional[Dict[str, Any]],
+        timeout: int,
+    ) -> tuple[int, Optional[Any], str]:
+        req_headers = dict(headers or {})
+        req_headers.setdefault("Accept", "application/json")
+        request_method = (method or "GET").upper()
+        request_data: Optional[bytes] = None
+
+        if payload is not None:
+            req_headers["Content-Type"] = "application/json; charset=utf-8"
+            if request_method != "GET":
+                request_data = json.dumps(payload).encode("utf-8")
+
+        def do_request() -> tuple[int, str]:
+            request = urllib.request.Request(
+                url=url,
+                data=request_data,
+                headers=req_headers,
+                method=request_method,
+            )
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            try:
+                with opener.open(request, timeout=max(1.0, float(timeout))) as response:
+                    status_code = int(getattr(response, "status", 0) or response.getcode() or 0)
+                    body = response.read()
+                    charset = response.headers.get_content_charset() or "utf-8"
+                    return status_code, body.decode(charset, errors="replace")
+            except urllib.error.HTTPError as exc:
+                body = exc.read()
+                charset = exc.headers.get_content_charset() if exc.headers else None
+                return int(getattr(exc, "code", 0) or 0), body.decode(charset or "utf-8", errors="replace")
+
+        try:
+            status_code, text = await asyncio.to_thread(do_request)
+        except Exception as e:
+            raise RuntimeError(f"remote_browser 请求失败: {e}") from e
+
+        return status_code, FlowClient._parse_json_response_text(text), text
+
+    @staticmethod
     async def _sync_json_http_request(
         method: str,
         url: str,
@@ -2039,8 +2159,7 @@ class FlowClient:
         request_method = (method or "GET").upper()
         request_kwargs: Dict[str, Any] = {
             "headers": req_headers,
-            "timeout": timeout,
-            "impersonate": "chrome120",
+            "timeout": FlowClient._build_remote_browser_http_timeout(timeout),
         }
 
         if payload is not None:
@@ -2048,8 +2167,19 @@ class FlowClient:
             if request_method != "GET":
                 request_kwargs["json"] = payload
 
+        if httpx is None:
+            return await FlowClient._stdlib_json_http_request(
+                method=method,
+                url=url,
+                headers=req_headers,
+                payload=payload,
+                timeout=timeout,
+            )
+
         try:
-            async with AsyncSession() as session:
+            # remote_browser 控制面只需要稳定传输 JSON，不需要浏览器指纹伪装。
+            # 使用 httpx 可以避免 curl_cffi 在当前环境下 POST body 被吞掉。
+            async with httpx.AsyncClient(follow_redirects=False, trust_env=False) as session:
                 response = await session.request(
                     method=request_method,
                     url=url,
@@ -2060,12 +2190,7 @@ class FlowClient:
 
         status_code = int(getattr(response, "status_code", 0) or 0)
         text = response.text or ""
-        parsed: Optional[Any] = None
-        if text:
-            try:
-                parsed = response.json()
-            except Exception:
-                parsed = None
+        parsed = FlowClient._parse_json_response_text(text)
 
         return status_code, parsed, text
 
@@ -2101,25 +2226,72 @@ class FlowClient:
 
         return payload
 
+    async def prefill_remote_browser_pool(
+        self,
+        project_id: str,
+        action: str = "IMAGE_GENERATION",
+        token_id: Optional[int] = None,
+        *,
+        cooldown_seconds: float = 8.0,
+    ) -> bool:
+        """让本地 remote_browser 服务提前开始补池，尽量把取 token 等待搬到前面。"""
+        if config.captcha_method != "remote_browser":
+            return False
+
+        normalized_project = str(project_id or "").strip()
+        normalized_action = str(action or "IMAGE_GENERATION").strip() or "IMAGE_GENERATION"
+        if not normalized_project:
+            return False
+
+        cache_key = f"{normalized_project}|{normalized_action}|{int(token_id or 0)}"
+        now_value = time.monotonic()
+        last_sent = float(self._remote_browser_prefill_last_sent.get(cache_key, 0.0) or 0.0)
+        if (now_value - last_sent) < max(0.5, float(cooldown_seconds)):
+            return False
+
+        try:
+            await self._call_remote_browser_service(
+                method="POST",
+                path="/api/v1/prefill",
+                json_data={
+                    "project_id": normalized_project,
+                    "action": normalized_action,
+                    "token_id": token_id,
+                },
+                timeout_override=3,
+            )
+            self._remote_browser_prefill_last_sent[cache_key] = now_value
+            return True
+        except Exception as e:
+            debug_logger.log_warning(f"[reCAPTCHA RemoteBrowser] prefill 失败: {e}")
+            return False
+
+    async def prefill_remote_browser_for_tokens(self, tokens: List[Any], action: str = "IMAGE_GENERATION") -> int:
+        if config.captcha_method != "remote_browser":
+            return 0
+
+        unique_projects: List[str] = []
+        seen_projects = set()
+        for token in tokens or []:
+            project_id = str(getattr(token, "current_project_id", "") or "").strip()
+            if not project_id or project_id in seen_projects:
+                continue
+            seen_projects.add(project_id)
+            unique_projects.append(project_id)
+
+        warmed = 0
+        for project_id in unique_projects:
+            if await self.prefill_remote_browser_pool(project_id, action=action):
+                warmed += 1
+        return warmed
+
     def _resolve_remote_browser_solve_timeout(self, action: str) -> int:
         base_timeout = max(5, int(config.remote_browser_timeout or 60))
         action_name = str(action or "").strip().upper()
 
-        if action_name == "VIDEO_GENERATION":
-            expected = max(
-                int(getattr(config, "video_timeout", 1500) or 1500) + 180,
-                int(getattr(config, "flow_timeout", 120) or 120) + 240,
-                900,
-            )
-        else:
-            expected = max(
-                int(getattr(config, "image_timeout", 300) or 300) + 180,
-                int(getattr(config, "upsample_timeout", 300) or 300) + 120,
-                int(getattr(config, "flow_timeout", 120) or 120) + 180,
-                300,
-            )
-
-        return max(base_timeout, min(expected, 3600))
+        # 这里只是拿 reCAPTCHA token，不应该跟整条生成链路共用数百秒级超时。
+        target_timeout = 45 if action_name == "VIDEO_GENERATION" else 35
+        return max(12, min(base_timeout, target_timeout))
 
     async def _get_recaptcha_token(
         self,
@@ -2143,13 +2315,18 @@ class FlowClient:
             - 其他模式: browser_id 为 None
         """
         captcha_method = config.captcha_method
+        debug_logger.log_info(f"[reCAPTCHA] 开始获取 token: method={captcha_method}, project_id={project_id}, action={action}")
 
         # 内置浏览器打码 (nodriver)
         if captcha_method == "personal":
+            debug_logger.log_info(f"[reCAPTCHA] 使用 personal 模式")
             try:
                 from .browser_captcha_personal import BrowserCaptchaService
+                debug_logger.log_info(f"[reCAPTCHA] 导入 BrowserCaptchaService 成功")
                 service = await BrowserCaptchaService.get_instance(self.db)
+                debug_logger.log_info(f"[reCAPTCHA] 获取服务实例成功，准备调用 get_token")
                 token = await service.get_token(project_id, action)
+                debug_logger.log_info(f"[reCAPTCHA] get_token 返回: {token[:50] if token else None}...")
                 fingerprint = service.get_last_fingerprint() if token else None
                 self._set_request_fingerprint(fingerprint if token else None)
                 return token, None
@@ -2266,6 +2443,8 @@ class FlowClient:
         page_action = action
 
         try:
+            # Do not use curl_cffi impersonation for captcha API JSON endpoints: some ASGI
+            # servers (for example FastAPI/Uvicorn) may receive an empty body and return 422.
             async with AsyncSession() as session:
                 create_url = f"{base_url}/createTask"
                 create_data = {
@@ -2278,7 +2457,7 @@ class FlowClient:
                     }
                 }
 
-                result = await session.post(create_url, json=create_data, impersonate="chrome110")
+                result = await session.post(create_url, json=create_data)
                 result_json = result.json()
                 task_id = result_json.get('taskId')
 
@@ -2295,7 +2474,7 @@ class FlowClient:
                         "clientKey": client_key,
                         "taskId": task_id
                     }
-                    result = await session.post(get_url, json=get_data, impersonate="chrome110")
+                    result = await session.post(get_url, json=get_data)
                     result_json = result.json()
 
                     debug_logger.log_info(f"[reCAPTCHA {method}] polling #{i+1}: {result_json}")

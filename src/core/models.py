@@ -138,6 +138,7 @@ class GenerationConfig(BaseModel):
     id: int = 1
     image_timeout: int = 300  # seconds
     video_timeout: int = 1500  # seconds
+    max_retries: int = 3  # 请求最大重试次数
 
 
 class CallLogicConfig(BaseModel):
@@ -193,6 +194,9 @@ class CaptchaConfig(BaseModel):
     browser_proxy_enabled: bool = False  # 浏览器打码是否启用代理
     browser_proxy_url: Optional[str] = None  # 浏览器打码代理URL
     browser_count: int = 1  # 浏览器打码实例数量
+    personal_project_pool_size: int = 4  # 单个 Token 默认维护的项目池数量（仅影响项目轮换）
+    personal_max_resident_tabs: int = 5  # 内置浏览器共享打码标签页数量上限
+    personal_idle_tab_ttl_seconds: int = 600  # 内置浏览器标签页空闲超时(秒)
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -220,6 +224,9 @@ class ImageConfig(BaseModel):
 
     aspectRatio: Optional[str] = None  # "16:9", "9:16", "1:1", "4:3", "3:4"
     imageSize: Optional[str] = None  # "2k", "4k"
+
+    # 兼容 OpenAI/NewAPI 等上游可能透传的 size/quality 或 snake_case 字段
+    model_config = ConfigDict(extra="allow")
 
 
 class GenerationConfigParam(BaseModel):

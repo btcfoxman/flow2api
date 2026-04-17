@@ -3,6 +3,7 @@ import asyncio
 import base64
 import json
 import time
+from pathlib import Path
 from typing import Optional, AsyncGenerator, List, Dict, Any
 from ..core.logger import debug_logger
 from ..core.config import config
@@ -243,38 +244,6 @@ MODEL_CONFIG = {
         "supports_images": False
     },
 
-    # veo_2_1_fast_d_15_t2v (需要新增横竖屏)
-    "veo_2_1_fast_d_15_t2v_portrait": {
-        "type": "video",
-        "video_type": "t2v",
-        "model_key": "veo_2_1_fast_d_15_t2v",
-        "aspect_ratio": "VIDEO_ASPECT_RATIO_PORTRAIT",
-        "supports_images": False
-    },
-    "veo_2_1_fast_d_15_t2v_landscape": {
-        "type": "video",
-        "video_type": "t2v",
-        "model_key": "veo_2_1_fast_d_15_t2v",
-        "aspect_ratio": "VIDEO_ASPECT_RATIO_LANDSCAPE",
-        "supports_images": False
-    },
-
-    # veo_2_0_t2v (需要新增横竖屏)
-    "veo_2_0_t2v_portrait": {
-        "type": "video",
-        "video_type": "t2v",
-        "model_key": "veo_2_0_t2v",
-        "aspect_ratio": "VIDEO_ASPECT_RATIO_PORTRAIT",
-        "supports_images": False
-    },
-    "veo_2_0_t2v_landscape": {
-        "type": "video",
-        "video_type": "t2v",
-        "model_key": "veo_2_0_t2v",
-        "aspect_ratio": "VIDEO_ASPECT_RATIO_LANDSCAPE",
-        "supports_images": False
-    },
-
     # veo_3_1_t2v_fast_ultra (横竖屏)
     "veo_3_1_t2v_fast_portrait_ultra": {
         "type": "video",
@@ -322,6 +291,25 @@ MODEL_CONFIG = {
         "aspect_ratio": "VIDEO_ASPECT_RATIO_LANDSCAPE",
         "supports_images": False
     },
+    # veo_3_1_t2v_lite (横竖屏，来自 labs.google.har)
+    "veo_3_1_t2v_lite_portrait": {
+        "type": "video",
+        "video_type": "t2v",
+        "model_key": "veo_3_1_t2v_lite",
+        "aspect_ratio": "VIDEO_ASPECT_RATIO_PORTRAIT",
+        "supports_images": False,
+        "use_v2_model_config": True,
+        "allow_tier_upgrade": False
+    },
+    "veo_3_1_t2v_lite_landscape": {
+        "type": "video",
+        "video_type": "t2v",
+        "model_key": "veo_3_1_t2v_lite",
+        "aspect_ratio": "VIDEO_ASPECT_RATIO_LANDSCAPE",
+        "supports_images": False,
+        "use_v2_model_config": True,
+        "allow_tier_upgrade": False
+    },
 
     # ========== 首尾帧模型 (I2V - Image to Video) ==========
     # 支持1-2张图片：1张作为首帧，2张作为首尾帧
@@ -340,46 +328,6 @@ MODEL_CONFIG = {
         "type": "video",
         "video_type": "i2v",
         "model_key": "veo_3_1_i2v_s_fast_fl",
-        "aspect_ratio": "VIDEO_ASPECT_RATIO_LANDSCAPE",
-        "supports_images": True,
-        "min_images": 1,
-        "max_images": 2
-    },
-
-    # veo_2_1_fast_d_15_i2v (需要新增横竖屏)
-    "veo_2_1_fast_d_15_i2v_portrait": {
-        "type": "video",
-        "video_type": "i2v",
-        "model_key": "veo_2_1_fast_d_15_i2v",
-        "aspect_ratio": "VIDEO_ASPECT_RATIO_PORTRAIT",
-        "supports_images": True,
-        "min_images": 1,
-        "max_images": 2
-    },
-    "veo_2_1_fast_d_15_i2v_landscape": {
-        "type": "video",
-        "video_type": "i2v",
-        "model_key": "veo_2_1_fast_d_15_i2v",
-        "aspect_ratio": "VIDEO_ASPECT_RATIO_LANDSCAPE",
-        "supports_images": True,
-        "min_images": 1,
-        "max_images": 2
-    },
-
-    # veo_2_0_i2v (需要新增横竖屏)
-    "veo_2_0_i2v_portrait": {
-        "type": "video",
-        "video_type": "i2v",
-        "model_key": "veo_2_0_i2v",
-        "aspect_ratio": "VIDEO_ASPECT_RATIO_PORTRAIT",
-        "supports_images": True,
-        "min_images": 1,
-        "max_images": 2
-    },
-    "veo_2_0_i2v_landscape": {
-        "type": "video",
-        "video_type": "i2v",
-        "model_key": "veo_2_0_i2v",
         "aspect_ratio": "VIDEO_ASPECT_RATIO_LANDSCAPE",
         "supports_images": True,
         "min_images": 1,
@@ -444,6 +392,52 @@ MODEL_CONFIG = {
         "supports_images": True,
         "min_images": 1,
         "max_images": 2
+    },
+    # veo_3_1_i2v_lite (横竖屏，仅首帧，来自 labs.google.har)
+    "veo_3_1_i2v_lite_portrait": {
+        "type": "video",
+        "video_type": "i2v",
+        "model_key": "veo_3_1_i2v_lite",
+        "aspect_ratio": "VIDEO_ASPECT_RATIO_PORTRAIT",
+        "supports_images": True,
+        "min_images": 1,
+        "max_images": 1,
+        "use_v2_model_config": True,
+        "allow_tier_upgrade": False
+    },
+    "veo_3_1_i2v_lite_landscape": {
+        "type": "video",
+        "video_type": "i2v",
+        "model_key": "veo_3_1_i2v_lite",
+        "aspect_ratio": "VIDEO_ASPECT_RATIO_LANDSCAPE",
+        "supports_images": True,
+        "min_images": 1,
+        "max_images": 1,
+        "use_v2_model_config": True,
+        "allow_tier_upgrade": False
+    },
+    # veo_3_1_interpolation_lite (横竖屏，首尾帧，来自 labs.google.har)
+    "veo_3_1_interpolation_lite_portrait": {
+        "type": "video",
+        "video_type": "i2v",
+        "model_key": "veo_3_1_interpolation_lite",
+        "aspect_ratio": "VIDEO_ASPECT_RATIO_PORTRAIT",
+        "supports_images": True,
+        "min_images": 2,
+        "max_images": 2,
+        "use_v2_model_config": True,
+        "allow_tier_upgrade": False
+    },
+    "veo_3_1_interpolation_lite_landscape": {
+        "type": "video",
+        "video_type": "i2v",
+        "model_key": "veo_3_1_interpolation_lite",
+        "aspect_ratio": "VIDEO_ASPECT_RATIO_LANDSCAPE",
+        "supports_images": True,
+        "min_images": 2,
+        "max_images": 2,
+        "use_v2_model_config": True,
+        "allow_tier_upgrade": False
     },
 
     # ========== 多图生成 (R2V - Reference Images to Video) ==========
@@ -674,13 +668,14 @@ class GenerationHandler:
     """统一生成处理器"""
 
     def __init__(self, flow_client, token_manager, load_balancer, db, concurrency_manager, proxy_manager):
+        cache_dir = Path(__file__).resolve().parents[2] / "tmp"
         self.flow_client = flow_client
         self.token_manager = token_manager
         self.load_balancer = load_balancer
         self.db = db
         self.concurrency_manager = concurrency_manager
         self.file_cache = FileCache(
-            cache_dir="tmp",
+            cache_dir=str(cache_dir),
             default_timeout=config.cache_timeout,
             proxy_manager=proxy_manager,
             flow_client=flow_client,
@@ -695,6 +690,7 @@ class GenerationHandler:
         return {
             "url": None,
             "generated_assets": None,
+            "base_url": None,
         }
 
     def _mark_generation_failed(self, generation_result: Optional[Dict[str, Any]], error_message: str):
@@ -717,6 +713,26 @@ class GenerationHandler:
         if len(text) <= max_length:
             return text
         return f"{text[:max_length - 3]}..."
+
+    def _resolve_video_model_key_for_tier(self, model_config: Dict[str, Any], user_tier: str) -> tuple[str, Optional[str]]:
+        """根据账号层级调整视频模型 key。"""
+        model_key = model_config["model_key"]
+        allow_tier_upgrade = bool(model_config.get("allow_tier_upgrade", True))
+
+        if user_tier == "PAYGATE_TIER_TWO":
+            if allow_tier_upgrade and "ultra" not in model_key:
+                if "_fl" in model_key:
+                    model_key = model_key.replace("_fl", "_ultra_fl")
+                else:
+                    model_key = model_key + "_ultra"
+                return model_key, f"TIER_TWO 账号自动切换到 ultra 模型: {model_key}"
+            return model_key, None
+
+        if user_tier == "PAYGATE_TIER_ONE" and "ultra" in model_key:
+            model_key = model_key.replace("_ultra_fl", "_fl").replace("_ultra", "")
+            return model_key, f"TIER_ONE 账号自动切换到标准模型: {model_key}"
+
+        return model_key, None
 
     async def _fail_video_task(self, operations: Optional[List[Dict[str, Any]]], error_message: str):
         """将视频任务收口到失败态，避免残留 processing。"""
@@ -759,7 +775,8 @@ class GenerationHandler:
         model: str,
         prompt: str,
         images: Optional[List[bytes]] = None,
-        stream: bool = False
+        stream: bool = False,
+        base_url_override: Optional[str] = None
     ) -> AsyncGenerator:
         """统一生成入口
 
@@ -781,6 +798,7 @@ class GenerationHandler:
         }
         generation_result = self._create_generation_result()
         response_state = self._create_response_state()
+        response_state["base_url"] = (base_url_override or "").strip().rstrip("/") or None
         request_log_state: Dict[str, Any] = {"id": None, "progress": 0}
 
         # 防止并发链路复用到上一次请求的指纹上下文
@@ -926,6 +944,12 @@ class GenerationHandler:
                 status_text="project_ready",
                 progress=22,
                 response_extra={"project_id": project_id},
+            )
+            prefill_action = "IMAGE_GENERATION" if generation_type == "image" else "VIDEO_GENERATION"
+            await self.flow_client.prefill_remote_browser_pool(
+                project_id=project_id,
+                action=prefill_action,
+                token_id=token.id,
             )
 
             # 5. 根据类型处理
@@ -1225,8 +1249,8 @@ class GenerationHandler:
                 if stream:
                     yield self._create_stream_chunk(f"正在放大图片到 {resolution_name}...\n")
 
-                # 4K/2K 图片重试逻辑 - 最多重试3次
-                max_retries = 3
+                # 4K/2K 图片重试逻辑 - 使用配置的最大重试次数
+                max_retries = config.flow_max_retries
                 for retry_attempt in range(max_retries):
                     try:
                         # 调用 upsample API
@@ -1265,7 +1289,7 @@ class GenerationHandler:
                                 if stream:
                                     yield self._create_stream_chunk(f"缓存 {resolution_name} 图片中...\n")
                                 cached_filename = await self.file_cache.cache_base64_image(encoded_image, resolution_name)
-                                local_url = f"{self._get_base_url()}/tmp/{cached_filename}"
+                                local_url = f"{self._get_base_url(response_state)}/tmp/{cached_filename}"
                                 response_state["url"] = local_url
                                 response_state["generated_assets"]["upscaled_image"]["local_url"] = local_url
                                 response_state["generated_assets"]["upscaled_image"]["url"] = local_url
@@ -1345,7 +1369,7 @@ class GenerationHandler:
                     yield self._create_stream_chunk("正在缓存 1K 图片文件...\n")
                 try:
                     cached_filename = await self.file_cache.download_and_cache(image_url, "image")
-                    local_url = f"{self._get_base_url()}/tmp/{cached_filename}"
+                    local_url = f"{self._get_base_url(response_state)}/tmp/{cached_filename}"
                     if stream:
                         yield self._create_stream_chunk("✅ 1K 图片缓存成功,准备返回缓存地址...\n")
                 except Exception as e:
@@ -1421,42 +1445,15 @@ class GenerationHandler:
             supports_images = model_config.get("supports_images", False)
             min_images = model_config.get("min_images", 0)
             max_images = model_config.get("max_images", 0)
+            use_v2_model_config = bool(model_config.get("use_v2_model_config", False))
 
             # 根据账号tier自动调整模型 key
-            model_key = model_config["model_key"]
             user_tier = normalized_tier
-
-            # TIER_TWO 账号需要使用 ultra 版本的模型
-            if user_tier == "PAYGATE_TIER_TWO":
-                # 如果模型 key 不包含 ultra，自动添加
-                if "ultra" not in model_key:
-                    # veo_3_1_i2v_s_fast_fl -> veo_3_1_i2v_s_fast_ultra_fl
-                    # veo_3_1_i2v_s_fast_portrait_fl -> veo_3_1_i2v_s_fast_portrait_ultra_fl
-                    # veo_3_1_t2v_fast -> veo_3_1_t2v_fast_ultra
-                    # veo_3_1_t2v_fast_portrait -> veo_3_1_t2v_fast_portrait_ultra
-                    # veo_3_1_r2v_fast_landscape -> veo_3_1_r2v_fast_landscape_ultra
-                    if "_fl" in model_key:
-                        model_key = model_key.replace("_fl", "_ultra_fl")
-                    else:
-                        # 直接在末尾添加 _ultra
-                        model_key = model_key + "_ultra"
-                    
-                    if stream:
-                        yield self._create_stream_chunk(f"TIER_TWO 账号自动切换到 ultra 模型: {model_key}\n")
-                    debug_logger.log_info(f"[VIDEO] TIER_TWO 账号，模型自动调整: {model_config['model_key']} -> {model_key}")
-
-            # TIER_ONE 账号需要使用非 ultra 版本
-            elif user_tier == "PAYGATE_TIER_ONE":
-                # 如果模型 key 包含 ultra，需要移除（避免用户误用）
-                if "ultra" in model_key:
-                    # veo_3_1_i2v_s_fast_ultra_fl -> veo_3_1_i2v_s_fast_fl
-                    # veo_3_1_t2v_fast_ultra -> veo_3_1_t2v_fast
-                    # veo_3_1_r2v_fast_landscape_ultra -> veo_3_1_r2v_fast_landscape
-                    model_key = model_key.replace("_ultra_fl", "_fl").replace("_ultra", "")
-                    
-                    if stream:
-                        yield self._create_stream_chunk(f"TIER_ONE 账号自动切换到标准模型: {model_key}\n")
-                    debug_logger.log_info(f"[VIDEO] TIER_ONE 账号，模型自动调整: {model_config['model_key']} -> {model_key}")
+            model_key, tier_message = self._resolve_video_model_key_for_tier(model_config, user_tier)
+            if tier_message and stream:
+                yield self._create_stream_chunk(f"{tier_message}\n")
+            if model_key != model_config["model_key"]:
+                debug_logger.log_info(f"[VIDEO] 账号层级自动调整模型: {model_config['model_key']} -> {model_key}")
 
             # 更新 model_config 中的 model_key
             model_config = dict(model_config)  # 创建副本避免修改原配置
@@ -1556,6 +1553,7 @@ class GenerationHandler:
                         aspect_ratio=model_config["aspect_ratio"],
                         start_media_id=start_media_id,
                         end_media_id=end_media_id,
+                        use_v2_model_config=use_v2_model_config,
                         user_paygate_tier=normalized_tier,
                         token_id=token.id,
                         token_video_concurrency=token.video_concurrency,
@@ -1575,6 +1573,7 @@ class GenerationHandler:
                         model_key=actual_model_key,
                         aspect_ratio=model_config["aspect_ratio"],
                         start_media_id=start_media_id,
+                        use_v2_model_config=use_v2_model_config,
                         user_paygate_tier=normalized_tier,
                         token_id=token.id,
                         token_video_concurrency=token.video_concurrency,
@@ -1602,6 +1601,7 @@ class GenerationHandler:
                     prompt=prompt,
                     model_key=model_config["model_key"],
                     aspect_ratio=model_config["aspect_ratio"],
+                    use_v2_model_config=use_v2_model_config,
                     user_paygate_tier=normalized_tier,
                     token_id=token.id,
                     token_video_concurrency=token.video_concurrency,
@@ -1775,7 +1775,7 @@ class GenerationHandler:
                             if stream:
                                 yield self._create_stream_chunk("正在缓存视频文件...\n")
                             cached_filename = await self.file_cache.download_and_cache(video_url, "video")
-                            local_url = f"{self._get_base_url()}/tmp/{cached_filename}"
+                            local_url = f"{self._get_base_url(response_state)}/tmp/{cached_filename}"
                             if stream:
                                 yield self._create_stream_chunk("✅ 视频缓存成功,准备返回缓存地址...\n")
                         except Exception as e:
@@ -1957,13 +1957,24 @@ class GenerationHandler:
 
         return json.dumps(error, ensure_ascii=False)
 
-    def _get_base_url(self) -> str:
+    def _get_base_url(self, response_state: Optional[Dict[str, Any]] = None) -> str:
         """获取基础URL用于缓存文件访问"""
-        # 优先使用配置的cache_base_url
+        # 已配置缓存访问域名时，始终优先使用它，避免被请求 Host/IP 覆盖。
         if config.cache_base_url:
-            return config.cache_base_url
-        # 否则使用服务器地址
-        return f"http://{config.server_host}:{config.server_port}"
+            return config.cache_base_url.rstrip("/")
+
+        request_base_url = ""
+        if isinstance(response_state, dict):
+            request_base_url = (response_state.get("base_url") or "").strip().rstrip("/")
+        if request_base_url:
+            return request_base_url
+
+        # 回退到服务地址，避免把监听地址 0.0.0.0 / :: 直接返回给客户端
+        server_host = (config.server_host or "").strip()
+        if server_host in {"", "0.0.0.0", "::", "[::]"}:
+            server_host = "127.0.0.1"
+
+        return f"http://{server_host}:{config.server_port}"
 
     async def _update_request_log_progress(
         self,

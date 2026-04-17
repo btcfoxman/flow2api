@@ -72,6 +72,7 @@ docker-compose -f docker-compose.warp.yml logs -f
 > 适用于你有虚拟化桌面需求、希望在容器里启用有头浏览器打码的场景。  
 > 该模式默认启动 `Xvfb + Fluxbox` 实现容器内部可视化，并设置 `ALLOW_DOCKER_HEADED_CAPTCHA=true`。  
 > 仅开放应用端口，不提供任何远程桌面连接端口。
+> `personal` 内置浏览器现在默认按有头模式启动；如需临时切回无头，可额外设置环境变量 `PERSONAL_BROWSER_HEADLESS=true`。
 
 ```bash
 # 启动有头模式（首次建议带 --build）
@@ -113,6 +114,15 @@ python main.py
 
 - **用户名**: `admin`
 - **密码**: `admin`
+
+### 模型测试页面
+
+访问 **http://localhost:8000/test** 可打开内置的模型测试页面，支持：
+
+- 按分类浏览所有可用模型（图片生成、文/图生视频、多图视频、视频放大等）
+- 输入提示词一键测试，流式显示生成进度
+- 图生图 / 图生视频场景支持上传图片
+- 生成完成后直接预览图片或视频
 
 ## 📋 支持的模型
 
@@ -164,16 +174,14 @@ python main.py
 |---------|---------|--------|
 | `veo_3_1_t2v_fast_portrait` | 文生视频 | 竖屏 |
 | `veo_3_1_t2v_fast_landscape` | 文生视频 | 横屏 |
-| `veo_2_1_fast_d_15_t2v_portrait` | 文生视频 | 竖屏 |
-| `veo_2_1_fast_d_15_t2v_landscape` | 文生视频 | 横屏 |
-| `veo_2_0_t2v_portrait` | 文生视频 | 竖屏 |
-| `veo_2_0_t2v_landscape` | 文生视频 | 横屏 |
 | `veo_3_1_t2v_fast_portrait_ultra` | 文生视频 | 竖屏 |
 | `veo_3_1_t2v_fast_ultra` | 文生视频 | 横屏 |
 | `veo_3_1_t2v_fast_portrait_ultra_relaxed` | 文生视频 | 竖屏 |
 | `veo_3_1_t2v_fast_ultra_relaxed` | 文生视频 | 横屏 |
 | `veo_3_1_t2v_portrait` | 文生视频 | 竖屏 |
 | `veo_3_1_t2v_landscape` | 文生视频 | 横屏 |
+| `veo_3_1_t2v_lite_portrait` | 文生视频 Lite | 竖屏 |
+| `veo_3_1_t2v_lite_landscape` | 文生视频 Lite | 横屏 |
 
 #### 首尾帧模型 (I2V - Image to Video)
 📸 **支持1-2张图片：1张作为首帧，2张作为首尾帧**
@@ -181,21 +189,23 @@ python main.py
 > 💡 **自动适配**：系统会根据图片数量自动选择对应的 model_key
 > - **单帧模式**（1张图）：使用首帧生成视频
 > - **双帧模式**（2张图）：使用首帧+尾帧生成过渡视频
+> - `veo_3_1_i2v_lite_*` 仅支持 **1 张** 首帧图片
+> - `veo_3_1_interpolation_lite_*` 仅支持 **2 张** 首尾帧图片
 
 | 模型名称 | 说明| 尺寸 |
 |---------|---------|--------|
 | `veo_3_1_i2v_s_fast_portrait_fl` | 图生视频 | 竖屏 |
 | `veo_3_1_i2v_s_fast_fl` | 图生视频 | 横屏 |
-| `veo_2_1_fast_d_15_i2v_portrait` | 图生视频 | 竖屏 |
-| `veo_2_1_fast_d_15_i2v_landscape` | 图生视频 | 横屏 |
-| `veo_2_0_i2v_portrait` | 图生视频 | 竖屏 |
-| `veo_2_0_i2v_landscape` | 图生视频 | 横屏 |
 | `veo_3_1_i2v_s_fast_portrait_ultra_fl` | 图生视频 | 竖屏 |
 | `veo_3_1_i2v_s_fast_ultra_fl` | 图生视频 | 横屏 |
 | `veo_3_1_i2v_s_fast_portrait_ultra_relaxed` | 图生视频 | 竖屏 |
 | `veo_3_1_i2v_s_fast_ultra_relaxed` | 图生视频 | 横屏 |
 | `veo_3_1_i2v_s_portrait` | 图生视频 | 竖屏 |
 | `veo_3_1_i2v_s_landscape` | 图生视频 | 横屏 |
+| `veo_3_1_i2v_lite_portrait` | 图生视频 Lite（仅首帧） | 竖屏 |
+| `veo_3_1_i2v_lite_landscape` | 图生视频 Lite（仅首帧） | 横屏 |
+| `veo_3_1_interpolation_lite_portrait` | 图生视频 Lite（首尾帧过渡） | 竖屏 |
+| `veo_3_1_interpolation_lite_landscape` | 图生视频 Lite（首尾帧过渡） | 横屏 |
 
 #### 多图生成 (R2V - Reference Images to Video)
 🖼️ **支持多张图片**

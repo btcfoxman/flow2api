@@ -130,16 +130,24 @@ class Database:
         if count[0] == 0:
             image_timeout = 300
             video_timeout = 1500
+            max_retries = 3
 
             if config_dict:
                 generation_config = config_dict.get("generation", {})
+                flow_config = config_dict.get("flow", {})
                 image_timeout = generation_config.get("image_timeout", 300)
                 video_timeout = generation_config.get("video_timeout", 1500)
+                max_retries = flow_config.get("max_retries", 3)
+
+            try:
+                max_retries = max(1, int(max_retries))
+            except Exception:
+                max_retries = 3
 
             await db.execute("""
-                INSERT INTO generation_config (id, image_timeout, video_timeout)
-                VALUES (1, ?, ?)
-            """, (image_timeout, video_timeout))
+                INSERT INTO generation_config (id, image_timeout, video_timeout, max_retries)
+                VALUES (1, ?, ?, ?)
+            """, (image_timeout, video_timeout, max_retries))
 
         # Ensure call_logic_config has a row
         cursor = await db.execute("SELECT COUNT(*) FROM call_logic_config")
@@ -214,6 +222,10 @@ class Database:
             remote_browser_base_url = ""
             remote_browser_api_key = ""
             remote_browser_timeout = 60
+            browser_count = 1
+            personal_project_pool_size = 4
+            personal_max_resident_tabs = 5
+            personal_idle_tab_ttl_seconds = 600
 
             if config_dict:
                 captcha_config = config_dict.get("captcha", {})
@@ -223,17 +235,39 @@ class Database:
                 remote_browser_base_url = captcha_config.get("remote_browser_base_url", "")
                 remote_browser_api_key = captcha_config.get("remote_browser_api_key", "")
                 remote_browser_timeout = captcha_config.get("remote_browser_timeout", 60)
+                browser_count = captcha_config.get("browser_count", 1)
+                personal_project_pool_size = captcha_config.get("personal_project_pool_size", 4)
+                personal_max_resident_tabs = captcha_config.get("personal_max_resident_tabs", 5)
+                personal_idle_tab_ttl_seconds = captcha_config.get("personal_idle_tab_ttl_seconds", 600)
             try:
                 remote_browser_timeout = max(5, int(remote_browser_timeout))
             except Exception:
                 remote_browser_timeout = 60
+            try:
+                browser_count = max(1, int(browser_count))
+            except Exception:
+                browser_count = 1
+            try:
+                personal_project_pool_size = max(1, min(50, int(personal_project_pool_size)))
+            except Exception:
+                personal_project_pool_size = 4
+            try:
+                personal_max_resident_tabs = max(1, min(50, int(personal_max_resident_tabs)))
+            except Exception:
+                personal_max_resident_tabs = 5
+            try:
+                personal_idle_tab_ttl_seconds = max(60, int(personal_idle_tab_ttl_seconds))
+            except Exception:
+                personal_idle_tab_ttl_seconds = 600
 
             await db.execute("""
                 INSERT INTO captcha_config (
                     id, captcha_method, yescaptcha_api_key, yescaptcha_base_url,
-                    remote_browser_base_url, remote_browser_api_key, remote_browser_timeout
+                    remote_browser_base_url, remote_browser_api_key, remote_browser_timeout,
+                    browser_count, personal_project_pool_size,
+                    personal_max_resident_tabs, personal_idle_tab_ttl_seconds
                 )
-                VALUES (1, ?, ?, ?, ?, ?, ?)
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 captcha_method,
                 yescaptcha_api_key,
@@ -241,6 +275,10 @@ class Database:
                 remote_browser_base_url,
                 remote_browser_api_key,
                 remote_browser_timeout,
+                browser_count,
+                personal_project_pool_size,
+                personal_max_resident_tabs,
+                personal_idle_tab_ttl_seconds,
             ))
 
         # Ensure plugin_config has a row
@@ -402,6 +440,20 @@ class Database:
                         except Exception as e:
                             print(f"  ✗ Failed to add column '{col_name}': {e}")
 
+            # Check and add missing columns to generation_config table
+            if await self._table_exists(db, "generation_config"):
+                generation_columns_to_add = [
+                    ("max_retries", "INTEGER DEFAULT 3"),
+                ]
+
+                for col_name, col_type in generation_columns_to_add:
+                    if not await self._column_exists(db, "generation_config", col_name):
+                        try:
+                            await db.execute(f"ALTER TABLE generation_config ADD COLUMN {col_name} {col_type}")
+                            print(f"  ✓ Added column '{col_name}' to generation_config table")
+                        except Exception as e:
+                            print(f"  ✗ Failed to add column '{col_name}': {e}")
+
             # Check and add missing columns to captcha_config table
             if await self._table_exists(db, "captcha_config"):
                 captcha_columns_to_add = [
@@ -456,6 +508,22 @@ class Database:
                         try:
                             await db.execute(f"ALTER TABLE plugin_config ADD COLUMN {col_name} {col_type}")
                             print(f"  ✓ Added column '{col_name}' to plugin_config table")
+                        except Exception as e:
+                            print(f"  ✗ Failed to add column '{col_name}': {e}")
+
+            # Check and add missing columns to captcha_config table
+            if await self._table_exists(db, "captcha_config"):
+                captcha_columns_to_add = [
+                    ("personal_project_pool_size", "INTEGER DEFAULT 4"),
+                    ("personal_max_resident_tabs", "INTEGER DEFAULT 5"),
+                    ("personal_idle_tab_ttl_seconds", "INTEGER DEFAULT 600"),
+                ]
+
+                for col_name, col_type in captcha_columns_to_add:
+                    if not await self._column_exists(db, "captcha_config", col_name):
+                        try:
+                            await db.execute(f"ALTER TABLE captcha_config ADD COLUMN {col_name} {col_type}")
+                            print(f"  ✓ Added column '{col_name}' to captcha_config table")
                         except Exception as e:
                             print(f"  ✗ Failed to add column '{col_name}': {e}")
 
@@ -601,6 +669,7 @@ class Database:
                     id INTEGER PRIMARY KEY DEFAULT 1,
                     image_timeout INTEGER DEFAULT 300,
                     video_timeout INTEGER DEFAULT 1500,
+                    max_retries INTEGER DEFAULT 3,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
@@ -662,6 +731,9 @@ class Database:
                     browser_proxy_enabled BOOLEAN DEFAULT 0,
                     browser_proxy_url TEXT,
                     browser_count INTEGER DEFAULT 1,
+                    personal_project_pool_size INTEGER DEFAULT 4,
+                    personal_max_resident_tabs INTEGER DEFAULT 5,
+                    personal_idle_tab_ttl_seconds INTEGER DEFAULT 600,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -928,6 +1000,8 @@ class Database:
     async def delete_token(self, token_id: int):
         """Delete token and related data"""
         async with self._connect(write=True) as db:
+            await db.execute("UPDATE request_logs SET token_id = NULL WHERE token_id = ?", (token_id,))
+            await db.execute("DELETE FROM tasks WHERE token_id = ?", (token_id,))
             await db.execute("DELETE FROM token_stats WHERE token_id = ?", (token_id,))
             await db.execute("DELETE FROM projects WHERE token_id = ?", (token_id,))
             await db.execute("DELETE FROM tokens WHERE id = ?", (token_id,))
@@ -1241,14 +1315,49 @@ class Database:
                 return GenerationConfig(**dict(row))
             return None
 
-    async def update_generation_config(self, image_timeout: int, video_timeout: int):
+    async def update_generation_config(
+        self,
+        image_timeout: Optional[int] = None,
+        video_timeout: Optional[int] = None,
+        max_retries: Optional[int] = None,
+    ):
         """Update generation configuration"""
         async with self._connect(write=True) as db:
-            await db.execute("""
-                UPDATE generation_config
-                SET image_timeout = ?, video_timeout = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE id = 1
-            """, (image_timeout, video_timeout))
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT * FROM generation_config WHERE id = 1")
+            row = await cursor.fetchone()
+            current = dict(row) if row else {}
+
+            normalized_image_timeout = (
+                image_timeout
+                if image_timeout is not None
+                else current.get("image_timeout", 300)
+            )
+            normalized_video_timeout = (
+                video_timeout
+                if video_timeout is not None
+                else current.get("video_timeout", 1500)
+            )
+            try:
+                normalized_max_retries = (
+                    max(1, int(max_retries))
+                    if max_retries is not None
+                    else max(1, int(current.get("max_retries", 3)))
+                )
+            except Exception:
+                normalized_max_retries = 3
+
+            if row:
+                await db.execute("""
+                    UPDATE generation_config
+                    SET image_timeout = ?, video_timeout = ?, max_retries = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = 1
+                """, (normalized_image_timeout, normalized_video_timeout, normalized_max_retries))
+            else:
+                await db.execute("""
+                    INSERT INTO generation_config (id, image_timeout, video_timeout, max_retries)
+                    VALUES (1, ?, ?, ?)
+                """, (normalized_image_timeout, normalized_video_timeout, normalized_max_retries))
             await db.commit()
 
     async def get_call_logic_config(self) -> CallLogicConfig:
@@ -1480,6 +1589,7 @@ class Database:
         if generation_config:
             config.set_image_timeout(generation_config.image_timeout)
             config.set_video_timeout(generation_config.video_timeout)
+            config.set_flow_max_retries(generation_config.max_retries)
 
         # Reload call logic config
         call_logic_config = await self.get_call_logic_config()
@@ -1506,6 +1616,9 @@ class Database:
             config.set_remote_browser_base_url(captcha_config.remote_browser_base_url)
             config.set_remote_browser_api_key(captcha_config.remote_browser_api_key)
             config.set_remote_browser_timeout(captcha_config.remote_browser_timeout)
+            config.set_personal_project_pool_size(captcha_config.personal_project_pool_size)
+            config.set_personal_max_resident_tabs(captcha_config.personal_max_resident_tabs)
+            config.set_personal_idle_tab_ttl_seconds(captcha_config.personal_idle_tab_ttl_seconds)
 
     # Cache config operations
     async def get_cache_config(self) -> CacheConfig:
@@ -1637,7 +1750,10 @@ class Database:
         remote_browser_timeout: int = None,
         browser_proxy_enabled: bool = None,
         browser_proxy_url: str = None,
-        browser_count: int = None
+        browser_count: int = None,
+        personal_project_pool_size: int = None,
+        personal_max_resident_tabs: int = None,
+        personal_idle_tab_ttl_seconds: int = None
     ):
         """Update captcha configuration"""
         async with self._connect(write=True) as db:
@@ -1662,7 +1778,13 @@ class Database:
                 new_proxy_enabled = browser_proxy_enabled if browser_proxy_enabled is not None else current.get("browser_proxy_enabled", False)
                 new_proxy_url = browser_proxy_url if browser_proxy_url is not None else current.get("browser_proxy_url")
                 new_browser_count = browser_count if browser_count is not None else current.get("browser_count", 1)
+                new_personal_project_pool_size = personal_project_pool_size if personal_project_pool_size is not None else current.get("personal_project_pool_size", 4)
+                new_personal_max_tabs = personal_max_resident_tabs if personal_max_resident_tabs is not None else current.get("personal_max_resident_tabs", 5)
+                new_personal_idle_ttl = personal_idle_tab_ttl_seconds if personal_idle_tab_ttl_seconds is not None else current.get("personal_idle_tab_ttl_seconds", 600)
                 new_remote_timeout = max(5, int(new_remote_timeout)) if new_remote_timeout is not None else 60
+                new_personal_project_pool_size = max(1, min(50, int(new_personal_project_pool_size)))
+                new_personal_max_tabs = max(1, min(50, int(new_personal_max_tabs)))  # 限制1-50
+                new_personal_idle_ttl = max(60, int(new_personal_idle_ttl))  # 最少60秒
 
                 await db.execute("""
                     UPDATE captcha_config
@@ -1671,12 +1793,16 @@ class Database:
                         ezcaptcha_api_key = ?, ezcaptcha_base_url = ?,
                         capsolver_api_key = ?, capsolver_base_url = ?,
                         remote_browser_base_url = ?, remote_browser_api_key = ?, remote_browser_timeout = ?,
-                        browser_proxy_enabled = ?, browser_proxy_url = ?, browser_count = ?, updated_at = CURRENT_TIMESTAMP
+                        browser_proxy_enabled = ?, browser_proxy_url = ?, browser_count = ?,
+                        personal_project_pool_size = ?,
+                        personal_max_resident_tabs = ?, personal_idle_tab_ttl_seconds = ?,
+                        updated_at = CURRENT_TIMESTAMP
                     WHERE id = 1
                 """, (new_method, new_yes_key, new_yes_url, new_cap_key, new_cap_url,
                       new_ez_key, new_ez_url, new_cs_key, new_cs_url,
                       (new_remote_base_url or "").strip(), (new_remote_api_key or "").strip(), new_remote_timeout,
-                      new_proxy_enabled, new_proxy_url, new_browser_count))
+                      new_proxy_enabled, new_proxy_url, new_browser_count, new_personal_project_pool_size,
+                      new_personal_max_tabs, new_personal_idle_ttl))
             else:
                 new_method = captcha_method if captcha_method is not None else "yescaptcha"
                 new_yes_key = yescaptcha_api_key if yescaptcha_api_key is not None else ""
@@ -1693,19 +1819,28 @@ class Database:
                 new_proxy_enabled = browser_proxy_enabled if browser_proxy_enabled is not None else False
                 new_proxy_url = browser_proxy_url
                 new_browser_count = browser_count if browser_count is not None else 1
+                new_personal_project_pool_size = personal_project_pool_size if personal_project_pool_size is not None else 4
+                new_personal_max_tabs = personal_max_resident_tabs if personal_max_resident_tabs is not None else 5
+                new_personal_idle_ttl = personal_idle_tab_ttl_seconds if personal_idle_tab_ttl_seconds is not None else 600
                 new_remote_timeout = max(5, int(new_remote_timeout))
+                new_personal_project_pool_size = max(1, min(50, int(new_personal_project_pool_size)))
+                new_personal_max_tabs = max(1, min(50, int(new_personal_max_tabs)))
+                new_personal_idle_ttl = max(60, int(new_personal_idle_ttl))
 
                 await db.execute("""
                     INSERT INTO captcha_config (id, captcha_method, yescaptcha_api_key, yescaptcha_base_url,
                         capmonster_api_key, capmonster_base_url, ezcaptcha_api_key, ezcaptcha_base_url,
                         capsolver_api_key, capsolver_base_url,
                         remote_browser_base_url, remote_browser_api_key, remote_browser_timeout,
-                        browser_proxy_enabled, browser_proxy_url, browser_count)
-                    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        browser_proxy_enabled, browser_proxy_url, browser_count,
+                        personal_project_pool_size,
+                        personal_max_resident_tabs, personal_idle_tab_ttl_seconds)
+                    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (new_method, new_yes_key, new_yes_url, new_cap_key, new_cap_url,
                       new_ez_key, new_ez_url, new_cs_key, new_cs_url,
                       (new_remote_base_url or "").strip(), (new_remote_api_key or "").strip(), new_remote_timeout,
-                      new_proxy_enabled, new_proxy_url, new_browser_count))
+                      new_proxy_enabled, new_proxy_url, new_browser_count, new_personal_project_pool_size,
+                      new_personal_max_tabs, new_personal_idle_ttl))
 
             await db.commit()
 
