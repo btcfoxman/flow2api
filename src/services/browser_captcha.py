@@ -450,7 +450,8 @@ if DOCKER_HEADED_BLOCKED and not _is_adspower_enabled():
     print("[BrowserCaptcha] ⚠️ 检测到 Docker 环境，默认禁用有头浏览器打码")
     print("[BrowserCaptcha] 如需启用请设置 ALLOW_DOCKER_HEADED_CAPTCHA=true，并提供 DISPLAY/Xvfb")
 else:
-    if IS_DOCKER and ALLOW_DOCKER_HEADED:
+    initial_adspower_enabled = _is_adspower_enabled()
+    if IS_DOCKER and ALLOW_DOCKER_HEADED and not initial_adspower_enabled:
         debug_logger.log_warning(
             "[BrowserCaptcha] Docker 有头浏览器打码白名单已启用，请确保 DISPLAY/Xvfb 可用"
         )
@@ -460,7 +461,8 @@ else:
             from playwright.async_api import async_playwright, Route, BrowserContext
             PLAYWRIGHT_AVAILABLE = True
             # 检查并安装浏览器
-            _ensure_browser_installed()
+            if not initial_adspower_enabled:
+                _ensure_browser_installed()
         except ImportError as e:
             debug_logger.log_error(f"[BrowserCaptcha] playwright 导入失败: {e}")
             print(f"[BrowserCaptcha] ❌ playwright 导入失败: {e}")
