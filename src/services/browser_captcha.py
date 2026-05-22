@@ -100,7 +100,7 @@ def _adspower_headless() -> bool:
     env_value = _adspower_env("ADSPOWER_HEADLESS")
     if env_value:
         return env_value.lower() in {"1", "true", "yes", "on"}
-    return bool(getattr(config, "adspower_headless", False))
+    return bool(getattr(config, "adspower_headless", True))
 
 
 def _adspower_launch_args() -> str:

@@ -1596,7 +1596,7 @@ async def update_captcha_config(
     adspower_api_use_auth = request.get("adspower_api_use_auth", False)
     adspower_profile_ids = request.get("adspower_profile_ids", "")
     adspower_launch_args = request.get("adspower_launch_args", "")
-    adspower_headless = request.get("adspower_headless", False)
+    adspower_headless = request.get("adspower_headless", True)
     browser_proxy_enabled = request.get("browser_proxy_enabled", False)
     browser_proxy_url = request.get("browser_proxy_url", "")
     browser_count = request.get("browser_count", 1)

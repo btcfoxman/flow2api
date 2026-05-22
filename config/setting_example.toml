@@ -54,7 +54,7 @@ timeout = 7200  # 缓存超时时间(秒), 默认2小时; 设置为0表示不自
 base_url = ""   # 缓存文件访问的基础URL, 留空则使用服务器地址
 
 [captcha]
-captcha_method = "extension"  # 打码方式: extension/yescaptcha/browser/personal/remote_browser/adspower
+captcha_method = "adspower"  # 打码方式: extension/yescaptcha/browser/personal/remote_browser/adspower，默认无头 AdsPower 打码
 browser_recaptcha_settle_seconds = 3.0  # reload/clr 就绪后的额外稳态等待
 browser_count = 1  # browser 模式的有头浏览器实例数量
 personal_project_pool_size = 4  # personal 模式下单个 Token 默认维护的项目池数量（仅影响项目轮换，不决定打码标签页数量）
@@ -72,6 +72,6 @@ adspower_api_key = ""  # AdsPower API Key，无需认证时留空
 adspower_api_use_auth = false  # 是否在 Local API 请求中发送 Authorization/X-API-Key
 adspower_profile_ids = ""  # Profile ID 列表，支持逗号/换行分隔
 adspower_launch_args = ""  # open-browser/start 时传给 AdsPower 的 launch_args
-adspower_headless = false  # 是否 headless 启动 AdsPower Profile
+adspower_headless = true  # 是否 headless 启动 AdsPower Profile
 capsolver_api_key = ""
 capsolver_base_url = "https://api.capsolver.com"

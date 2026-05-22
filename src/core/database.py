@@ -221,7 +221,7 @@ class Database:
         cursor = await db.execute("SELECT COUNT(*) FROM captcha_config")
         count = await cursor.fetchone()
         if count[0] == 0:
-            captcha_method = "browser"
+            captcha_method = "adspower"
             yescaptcha_api_key = ""
             yescaptcha_base_url = "https://api.yescaptcha.com"
             yescaptcha_task_type = DEFAULT_YESCAPTCHA_TASK_TYPE
@@ -233,7 +233,7 @@ class Database:
             adspower_api_use_auth = False
             adspower_profile_ids = ""
             adspower_launch_args = ""
-            adspower_headless = False
+            adspower_headless = True
             browser_count = 1
             personal_project_pool_size = 4
             personal_max_resident_tabs = 5
@@ -242,7 +242,7 @@ class Database:
 
             if config_dict:
                 captcha_config = config_dict.get("captcha", {})
-                captcha_method = captcha_config.get("captcha_method", "browser")
+                captcha_method = captcha_config.get("captcha_method", "adspower")
                 yescaptcha_api_key = captcha_config.get("yescaptcha_api_key", "")
                 yescaptcha_base_url = captcha_config.get("yescaptcha_base_url", "https://api.yescaptcha.com")
                 yescaptcha_task_type = normalize_yescaptcha_task_type(captcha_config.get("yescaptcha_task_type"))
@@ -254,7 +254,7 @@ class Database:
                 adspower_api_use_auth = captcha_config.get("adspower_api_use_auth", False)
                 adspower_profile_ids = captcha_config.get("adspower_profile_ids", "")
                 adspower_launch_args = captcha_config.get("adspower_launch_args", "")
-                adspower_headless = captcha_config.get("adspower_headless", False)
+                adspower_headless = captcha_config.get("adspower_headless", True)
                 browser_count = captcha_config.get("browser_count", 1)
                 personal_project_pool_size = captcha_config.get("personal_project_pool_size", 4)
                 personal_max_resident_tabs = captcha_config.get("personal_max_resident_tabs", 5)
@@ -392,7 +392,7 @@ class Database:
                 await db.execute("""
                     CREATE TABLE captcha_config (
                         id INTEGER PRIMARY KEY DEFAULT 1,
-                        captcha_method TEXT DEFAULT 'browser',
+                        captcha_method TEXT DEFAULT 'adspower',
                         yescaptcha_api_key TEXT DEFAULT '',
                         yescaptcha_base_url TEXT DEFAULT 'https://api.yescaptcha.com',
                         yescaptcha_task_type TEXT DEFAULT 'RecaptchaV3TaskProxylessM1',
@@ -410,7 +410,7 @@ class Database:
                         adspower_api_use_auth BOOLEAN DEFAULT 0,
                         adspower_profile_ids TEXT DEFAULT '',
                         adspower_launch_args TEXT DEFAULT '',
-                        adspower_headless BOOLEAN DEFAULT 0,
+                        adspower_headless BOOLEAN DEFAULT 1,
                         website_key TEXT DEFAULT '6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV',
                         page_action TEXT DEFAULT 'IMAGE_GENERATION',
                         browser_proxy_enabled BOOLEAN DEFAULT 0,
@@ -525,7 +525,7 @@ class Database:
                     ("adspower_api_use_auth", "BOOLEAN DEFAULT 0"),
                     ("adspower_profile_ids", "TEXT DEFAULT ''"),
                     ("adspower_launch_args", "TEXT DEFAULT ''"),
-                    ("adspower_headless", "BOOLEAN DEFAULT 0"),
+                    ("adspower_headless", "BOOLEAN DEFAULT 1"),
                 ]
 
                 for col_name, col_type in captcha_columns_to_add:
@@ -772,7 +772,7 @@ class Database:
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS captcha_config (
                     id INTEGER PRIMARY KEY DEFAULT 1,
-                    captcha_method TEXT DEFAULT 'browser',
+                    captcha_method TEXT DEFAULT 'adspower',
                     yescaptcha_api_key TEXT DEFAULT '',
                     yescaptcha_base_url TEXT DEFAULT 'https://api.yescaptcha.com',
                     yescaptcha_task_type TEXT DEFAULT 'RecaptchaV3TaskProxylessM1',
@@ -790,7 +790,7 @@ class Database:
                     adspower_api_use_auth BOOLEAN DEFAULT 0,
                     adspower_profile_ids TEXT DEFAULT '',
                     adspower_launch_args TEXT DEFAULT '',
-                    adspower_headless BOOLEAN DEFAULT 0,
+                    adspower_headless BOOLEAN DEFAULT 1,
                     website_key TEXT DEFAULT '6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV',
                     page_action TEXT DEFAULT 'IMAGE_GENERATION',
 
@@ -1860,7 +1860,7 @@ class Database:
 
             if row:
                 current = dict(row)
-                new_method = captcha_method if captcha_method is not None else current.get("captcha_method", "yescaptcha")
+                new_method = captcha_method if captcha_method is not None else current.get("captcha_method", "adspower")
                 new_yes_key = yescaptcha_api_key if yescaptcha_api_key is not None else current.get("yescaptcha_api_key", "")
                 new_yes_url = yescaptcha_base_url if yescaptcha_base_url is not None else current.get("yescaptcha_base_url", "https://api.yescaptcha.com")
                 new_yes_task_type = normalize_yescaptcha_task_type(
@@ -1880,7 +1880,7 @@ class Database:
                 new_adspower_api_use_auth = adspower_api_use_auth if adspower_api_use_auth is not None else current.get("adspower_api_use_auth", False)
                 new_adspower_profile_ids = adspower_profile_ids if adspower_profile_ids is not None else current.get("adspower_profile_ids", "")
                 new_adspower_launch_args = adspower_launch_args if adspower_launch_args is not None else current.get("adspower_launch_args", "")
-                new_adspower_headless = adspower_headless if adspower_headless is not None else current.get("adspower_headless", False)
+                new_adspower_headless = adspower_headless if adspower_headless is not None else current.get("adspower_headless", True)
                 new_proxy_enabled = browser_proxy_enabled if browser_proxy_enabled is not None else current.get("browser_proxy_enabled", False)
                 new_proxy_url = browser_proxy_url if browser_proxy_url is not None else current.get("browser_proxy_url")
                 new_browser_count = browser_count if browser_count is not None else current.get("browser_count", 1)
@@ -1929,7 +1929,7 @@ class Database:
                       new_proxy_enabled, new_proxy_url, new_browser_count, new_personal_project_pool_size,
                       new_personal_max_tabs, new_personal_fresh_restart_every, new_personal_idle_ttl))
             else:
-                new_method = captcha_method if captcha_method is not None else "yescaptcha"
+                new_method = captcha_method if captcha_method is not None else "adspower"
                 new_yes_key = yescaptcha_api_key if yescaptcha_api_key is not None else ""
                 new_yes_url = yescaptcha_base_url if yescaptcha_base_url is not None else "https://api.yescaptcha.com"
                 new_yes_task_type = normalize_yescaptcha_task_type(yescaptcha_task_type)
@@ -1947,7 +1947,7 @@ class Database:
                 new_adspower_api_use_auth = adspower_api_use_auth if adspower_api_use_auth is not None else False
                 new_adspower_profile_ids = adspower_profile_ids if adspower_profile_ids is not None else ""
                 new_adspower_launch_args = adspower_launch_args if adspower_launch_args is not None else ""
-                new_adspower_headless = adspower_headless if adspower_headless is not None else False
+                new_adspower_headless = adspower_headless if adspower_headless is not None else True
                 new_proxy_enabled = browser_proxy_enabled if browser_proxy_enabled is not None else False
                 new_proxy_url = browser_proxy_url
                 new_browser_count = browser_count if browser_count is not None else 1

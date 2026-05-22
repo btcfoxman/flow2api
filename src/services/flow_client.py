@@ -916,7 +916,7 @@ class FlowClient:
         max_retries = config.flow_max_retries
         last_error: Optional[Exception] = None
 
-        captcha_method = getattr(config, "captcha_method", "personal")
+        captcha_method = getattr(config, "captcha_method", "adspower")
         if captcha_method == "personal":
             try:
                 from .browser_captcha_personal import BrowserCaptchaService

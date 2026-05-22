@@ -386,7 +386,7 @@ class Config:
     @property
     def captcha_method(self) -> str:
         """Get captcha method"""
-        return self._config.get("captcha", {}).get("captcha_method", "yescaptcha")
+        return self._config.get("captcha", {}).get("captcha_method", "adspower")
 
     def set_captcha_method(self, method: str):
         """Set captcha method"""
@@ -700,7 +700,7 @@ class Config:
     @property
     def adspower_headless(self) -> bool:
         """Whether AdsPower should start profiles in headless mode."""
-        return bool(self._config.get("captcha", {}).get("adspower_headless", False))
+        return bool(self._config.get("captcha", {}).get("adspower_headless", True))
 
     def set_adspower_headless(self, enabled: bool):
         """Set AdsPower headless startup flag."""
