@@ -714,6 +714,12 @@ class FlowClient:
                 result = await self._make_request(
                     method="POST",
                     url=url,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Origin": "https://labs.google",
+                        "Referer": "https://labs.google/fx/tools/flow",
+                        "sec-fetch-site": "same-origin",
+                    },
                     json_data=json_data,
                     use_st=True,
                     st_token=st,

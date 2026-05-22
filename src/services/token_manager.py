@@ -215,7 +215,7 @@ class TokenManager:
         """Add a new token and prepare its pooled projects."""
         existing_token = await self.db.get_token_by_st(st)
         if existing_token:
-            raise ValueError(f"Token ??????: {existing_token.email}?")
+            raise ValueError(f"Token already exists: {existing_token.email}")
 
         debug_logger.log_info(f"[ADD_TOKEN] Converting ST to AT...")
         try:
@@ -232,7 +232,7 @@ class TokenManager:
                 except Exception:
                     pass
         except Exception as e:
-            raise ValueError(f"ST?AT??: {str(e)}")
+            raise ValueError(f"ST to AT failed: {str(e)}")
 
         try:
             credits_result = await self.flow_client.get_credits(at)
@@ -267,7 +267,7 @@ class TokenManager:
                     tool_name="PINHOLE"
                 ))
             except Exception as e:
-                raise ValueError(f"??????: {str(e)}")
+                raise ValueError(f"Create Flow project failed: {str(e)}")
 
         token = Token(
             st=st,

@@ -509,6 +509,53 @@ class VeoLiteFlowClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("x-browser-year", captured["headers"])
         self.assertNotIn("sec-fetch-site", captured["headers"])
 
+    async def test_create_project_uses_labs_same_origin_headers(self):
+        captured = {}
+
+        class FakeResponse:
+            status_code = 200
+            headers = {}
+            text = '{"result":{"data":{"json":{"result":{"projectId":"project-1"}}}}}'
+
+            def json(self):
+                return {
+                    "result": {
+                        "data": {
+                            "json": {
+                                "result": {
+                                    "projectId": "project-1",
+                                }
+                            }
+                        }
+                    }
+                }
+
+        class FakeSession:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def post(self, url, headers, json, proxy, timeout, impersonate):
+                captured["url"] = url
+                captured["headers"] = headers
+                captured["json"] = json
+                return FakeResponse()
+
+        with patch("src.services.flow_client.AsyncSession", FakeSession):
+            project_id = await self.client.create_project("session-token", "Project 1")
+
+        self.assertEqual(project_id, "project-1")
+        self.assertTrue(captured["url"].endswith("/trpc/project.createProject"))
+        self.assertEqual(captured["headers"]["Cookie"], "__Secure-next-auth.session-token=session-token")
+        self.assertEqual(captured["headers"]["Origin"], "https://labs.google")
+        self.assertEqual(captured["headers"]["Referer"], "https://labs.google/fx/tools/flow")
+        self.assertEqual(captured["headers"]["sec-fetch-site"], "same-origin")
+
     async def test_generate_video_start_end_uses_v2_payload_for_interpolation_lite(self):
         captured = {}
 
