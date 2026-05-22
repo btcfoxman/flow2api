@@ -1,6 +1,6 @@
 import types
 import unittest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from src.core.model_resolver import resolve_model_name
 from src.services.flow_client import FlowClient
@@ -46,6 +46,14 @@ class VeoLiteModelResolverTests(unittest.TestCase):
         )
 
         self.assertEqual(resolved, "veo_3_1_i2v_s_6s_1080p")
+
+    def test_resolve_abra_r2v_direct_model(self):
+        resolved = resolve_model_name(
+            "abra_r2v_10s",
+            model_config=MODEL_CONFIG,
+        )
+
+        self.assertEqual(resolved, "abra_r2v_10s")
 
 
 class VeoLiteGenerationHandlerTests(unittest.TestCase):
@@ -131,6 +139,20 @@ class VeoLiteGenerationHandlerTests(unittest.TestCase):
         for alias, target in expected_aliases.items():
             self.assertIn(alias, MODEL_CONFIG)
             self.assertEqual(MODEL_CONFIG[alias], MODEL_CONFIG[target])
+
+    def test_abra_r2v_is_direct_public_model_without_replacing_existing_r2v(self):
+        cfg = MODEL_CONFIG["abra_r2v_10s"]
+
+        self.assertEqual(cfg["model_key"], "abra_r2v_10s")
+        self.assertEqual(cfg["video_type"], "r2v")
+        self.assertEqual(cfg["aspect_ratio"], "VIDEO_ASPECT_RATIO_PORTRAIT")
+        self.assertTrue(cfg["use_v2_model_config"])
+        self.assertTrue(cfg["suppress_scene_id_metadata"])
+        self.assertEqual(
+            MODEL_CONFIG["veo_3_1_r2v_fast_portrait"]["model_key"],
+            "veo_3_1_r2v_fast_portrait",
+        )
+        self.assertNotEqual(MODEL_CONFIG["veo_3_1_r2v_fast"]["model_key"], "abra_r2v_10s")
 
     def test_direct_upsampler_keys_are_not_public_models(self):
         self.assertNotIn("veo_3_1_upsampler_4k", MODEL_CONFIG)
@@ -277,6 +299,216 @@ class VeoLiteFlowClientTests(unittest.IsolatedAsyncioTestCase):
             "https://flow-content.google/video/11111111-1111-1111-1111-111111111111?token=abc",
         )
 
+    async def test_generate_video_reference_images_uses_abra_capture_payload(self):
+        captured = {}
+
+        async def fake_make_request(method, url, json_data, use_at, at_token, **kwargs):
+            captured["url"] = url
+            captured["json_data"] = json_data
+            captured["headers"] = kwargs.get("headers")
+            captured["apply_default_client_headers"] = kwargs.get("apply_default_client_headers")
+            return {
+                "workflows": [
+                    {
+                        "name": "workflow-1",
+                        "metadata": {"primaryMediaId": "media-1"},
+                        "projectId": "project-1",
+                    }
+                ],
+                "media": [
+                    {
+                        "name": "media-1",
+                        "projectId": "project-1",
+                        "workflowId": "workflow-1",
+                        "mediaMetadata": {
+                            "mediaStatus": {
+                                "mediaGenerationStatus": "MEDIA_GENERATION_STATUS_SCHEDULED"
+                            }
+                        },
+                    }
+                ],
+            }
+
+        self.client._make_request = AsyncMock(side_effect=fake_make_request)
+
+        result = await self.client.generate_video_reference_images(
+            at="at-token",
+            project_id="project-1",
+            prompt="show product",
+            model_key="abra_r2v_10s",
+            aspect_ratio="VIDEO_ASPECT_RATIO_PORTRAIT",
+            reference_images=[
+                {"mediaId": "image-1", "imageUsageType": "IMAGE_USAGE_TYPE_ASSET"},
+                {"mediaId": "image-2", "imageUsageType": "IMAGE_USAGE_TYPE_ASSET"},
+            ],
+        )
+
+        self.assertTrue(captured["url"].endswith("/video:batchAsyncGenerateVideoReferenceImages"))
+        self.assertEqual(captured["headers"]["Content-Type"], "text/plain;charset=UTF-8")
+        self.assertEqual(captured["headers"]["Referer"], "https://labs.google/")
+        self.assertFalse(captured["apply_default_client_headers"])
+        json_data = captured["json_data"]
+        request_data = json_data["requests"][0]
+        self.assertTrue(json_data["useV2ModelConfig"])
+        self.assertEqual(
+            json_data["mediaGenerationContext"]["audioFailurePreference"],
+            "BLOCK_SILENCED_VIDEOS",
+        )
+        self.assertEqual(request_data["videoModelKey"], "abra_r2v_10s")
+        self.assertEqual(request_data["aspectRatio"], "VIDEO_ASPECT_RATIO_PORTRAIT")
+        self.assertEqual(request_data["metadata"], {})
+        self.assertEqual(
+            request_data["referenceImages"][0]["imageUsageType"],
+            "IMAGE_USAGE_TYPE_ASSET",
+        )
+        self.assertEqual(result["operations"][0]["operation"]["name"], "media-1")
+        self.assertEqual(result["operations"][0]["workflowId"], "workflow-1")
+
+    async def test_successful_media_status_without_fife_url_keeps_media_and_workflow_metadata(self):
+        result = self.client._normalize_video_generation_response(
+            {
+                "workflows": [
+                    {
+                        "name": "workflow-1",
+                        "metadata": {"primaryMediaId": "media-1"},
+                        "projectId": "project-1",
+                    }
+                ],
+                "media": [
+                    {
+                        "name": "media-1",
+                        "projectId": "project-1",
+                        "workflowId": "workflow-1",
+                        "mediaMetadata": {
+                            "mediaStatus": {
+                                "mediaGenerationStatus": "MEDIA_GENERATION_STATUS_SUCCESSFUL"
+                            }
+                        },
+                        "video": {
+                            "generatedVideo": {
+                                "aspectRatio": "VIDEO_ASPECT_RATIO_PORTRAIT"
+                            },
+                            "operation": {"name": "media-1"},
+                        },
+                    }
+                ],
+            }
+        )
+
+        operation = result["operations"][0]
+        self.assertEqual(operation["operation"]["name"], "media-1")
+        self.assertEqual(operation["workflowId"], "workflow-1")
+        self.assertEqual(operation["status"], "MEDIA_GENERATION_STATUS_SUCCESSFUL")
+        self.assertEqual(
+            operation["operation"]["metadata"]["video"]["mediaGenerationId"],
+            "media-1",
+        )
+        self.assertEqual(
+            operation["operation"]["metadata"]["video"]["workflowId"],
+            "workflow-1",
+        )
+
+    async def test_get_media_url_redirect_uses_observed_redirect_headers(self):
+        captured = {}
+
+        class FakeResponse:
+            status_code = 307
+            headers = {
+                "location": "https://flow-content.google/video/media-1?token=abc"
+            }
+            text = ""
+
+        class FakeSession:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def get(self, url, headers, proxy, timeout, allow_redirects, impersonate):
+                captured["url"] = url
+                captured["headers"] = headers
+                captured["allow_redirects"] = allow_redirects
+                return FakeResponse()
+
+        with patch("src.services.flow_client.AsyncSession", FakeSession):
+            result = await self.client.get_media_url_redirect(
+                st="session-token",
+                media_id="media-1",
+                project_id="project-1",
+            )
+
+        self.assertEqual(result, "https://flow-content.google/video/media-1?token=abc")
+        self.assertTrue(captured["url"].endswith("/trpc/media.getMediaUrlRedirect?name=media-1"))
+        self.assertFalse(captured["allow_redirects"])
+        self.assertEqual(
+            captured["headers"]["Referer"],
+            "https://labs.google/fx/zh/tools/flow/project/project-1",
+        )
+        self.assertEqual(
+            captured["headers"]["Cookie"],
+            "__Secure-next-auth.session-token=session-token",
+        )
+        self.assertEqual(captured["headers"]["Accept-Encoding"], "identity;q=1, *;q=0")
+        self.assertEqual(captured["headers"]["Range"], "bytes=0-")
+        self.assertNotIn("Accept", captured["headers"])
+
+    async def test_make_request_can_skip_unobserved_synthetic_browser_headers(self):
+        captured = {}
+
+        class FakeResponse:
+            status_code = 200
+            headers = {}
+            text = "{}"
+
+            def json(self):
+                return {}
+
+        class FakeSession:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def post(self, url, headers, json, proxy, timeout, impersonate):
+                captured["headers"] = headers
+                return FakeResponse()
+
+        self.client._set_request_fingerprint({
+            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+            "accept_language": "en-US",
+            "sec_ch_ua": '"Google Chrome";v="135", "Not-A.Brand";v="8", "Chromium";v="135"',
+            "sec_ch_ua_mobile": "?0",
+            "sec_ch_ua_platform": '"Windows"',
+        })
+
+        with patch("src.services.flow_client.AsyncSession", FakeSession):
+            await self.client._make_request(
+                method="POST",
+                url="https://aisandbox-pa.googleapis.com/v1/video:batchAsyncGenerateVideoReferenceImages",
+                headers={
+                    "Content-Type": "text/plain;charset=UTF-8",
+                    "Referer": "https://labs.google/",
+                },
+                json_data={},
+                use_at=True,
+                at_token="at-token",
+                apply_default_client_headers=False,
+            )
+
+        self.assertEqual(captured["headers"]["Referer"], "https://labs.google/")
+        self.assertEqual(captured["headers"]["sec-ch-ua-platform"], '"Windows"')
+        self.assertNotIn("x-browser-channel", captured["headers"])
+        self.assertNotIn("x-browser-year", captured["headers"])
+        self.assertNotIn("sec-fetch-site", captured["headers"])
+
     async def test_generate_video_start_end_uses_v2_payload_for_interpolation_lite(self):
         captured = {}
 
@@ -309,6 +541,44 @@ class VeoLiteFlowClientTests(unittest.IsolatedAsyncioTestCase):
             request_data["textInput"]["structuredPrompt"]["parts"][0]["text"],
             "变身猫猫",
         )
+
+
+class CookieCompatibilityTests(unittest.TestCase):
+    def test_flow_client_builds_cookie_header_from_full_cookie_header(self):
+        client = FlowClient(proxy_manager=None)
+
+        cookie_header = client._build_labs_cookie_header(
+            "__Host-next-auth.csrf-token=csrf; "
+            "__Secure-next-auth.callback-url=https%3A%2F%2Flabs.google%2F; "
+            "email=user@example.com; "
+            "__Secure-next-auth.session-token=session; "
+            "EMAIL=user@example.com"
+        )
+
+        self.assertIn("__Secure-next-auth.session-token=session", cookie_header)
+        self.assertIn("__Host-next-auth.csrf-token=csrf", cookie_header)
+        self.assertIn("__Secure-next-auth.callback-url=https%3A%2F%2Flabs.google%2F", cookie_header)
+
+    def test_flow_client_builds_cookie_header_from_cookies_json_payload(self):
+        client = FlowClient(proxy_manager=None)
+
+        cookie_header = client._build_labs_cookie_header(
+            [
+                {"name": "_ga", "value": "GA1.1.1.1", "domain": ".labs.google", "path": "/"},
+                {
+                    "name": "__Secure-next-auth.session-token",
+                    "value": "session",
+                    "domain": "labs.google",
+                    "path": "/",
+                    "secure": True,
+                    "httpOnly": True,
+                    "sameSite": "Lax",
+                },
+            ]
+        )
+
+        self.assertIn("_ga=GA1.1.1.1", cookie_header)
+        self.assertIn("__Secure-next-auth.session-token=session", cookie_header)
 
 
 if __name__ == "__main__":

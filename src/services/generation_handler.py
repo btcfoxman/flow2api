@@ -896,6 +896,18 @@ def _apply_veo_3_1_model_updates():
     add_alias("veo_3_1_r2v_fast_landscape_ultra_4k", "veo_3_1_r2v_fast_ultra_4k")
     add_alias("veo_3_1_r2v_fast_landscape_ultra_1080p", "veo_3_1_r2v_fast_ultra_1080p")
 
+    MODEL_CONFIG["abra_r2v_10s"] = {
+        "type": "video",
+        "video_type": "r2v",
+        "model_key": "abra_r2v_10s",
+        "aspect_ratio": "VIDEO_ASPECT_RATIO_PORTRAIT",
+        "supports_images": True,
+        "min_images": 0,
+        "max_images": 3,
+        "use_v2_model_config": True,
+        "suppress_scene_id_metadata": True,
+    }
+
 
 _apply_veo_3_1_model_updates()
 
@@ -1860,6 +1872,7 @@ class GenerationHandler:
                     user_paygate_tier=normalized_tier,
                     token_id=token.id,
                     token_video_concurrency=token.video_concurrency,
+                    suppress_scene_id_metadata=bool(model_config.get("suppress_scene_id_metadata", False)),
                 )
 
             # Extend: 视频续写
@@ -2024,6 +2037,28 @@ class GenerationHandler:
                     _uuid_match = _re.search(r'/video/([0-9a-f-]{36})', video_url or '')
                     video_media_id = _uuid_match.group(1) if _uuid_match else video_info.get("mediaGenerationId", "")
                     aspect_ratio = video_info.get("aspectRatio", "VIDEO_ASPECT_RATIO_LANDSCAPE")
+                    workflow_id = (
+                        video_info.get("workflowId")
+                        or operation.get("workflowId")
+                        or operation.get("workflowName")
+                    )
+
+                    if not video_url and video_media_id:
+                        if workflow_id:
+                            try:
+                                await self.flow_client.update_flow_workflow_primary_media(
+                                    at=token.at,
+                                    project_id=project_id,
+                                    workflow_id=workflow_id,
+                                    media_id=video_media_id,
+                                )
+                            except Exception as e:
+                                debug_logger.log_warning(f"[VIDEO] workflow primaryMediaId update failed, continuing: {e}")
+                        video_url = await self.flow_client.get_media_url_redirect(
+                            st=token.st,
+                            media_id=video_media_id,
+                            project_id=project_id,
+                        )
 
                     if not video_url:
                         error_msg = "视频生成失败: 视频URL为空"

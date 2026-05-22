@@ -178,7 +178,7 @@ const MODEL_CATEGORIES = {
   "Imagen 4.0 图片": { filter: m => m.startsWith("imagen-4.0") },
   "Veo 3.1 文生视频 (T2V)": { filter: m => m.startsWith("veo_3_1_t2v") && !m.includes("4k") && !m.includes("1080p") },
   "Veo 3.1 图生视频 (I2V)": { filter: m => m.startsWith("veo_3_1_i2v") && !m.includes("4k") && !m.includes("1080p") },
-  "Veo 3.1 多图视频 (R2V)": { filter: m => m.startsWith("veo_3_1_r2v") && !m.includes("4k") && !m.includes("1080p") },
+  "Veo 3.1 多图视频 (R2V)": { filter: m => (m.startsWith("veo_3_1_r2v") || m === "abra_r2v_10s") && !m.includes("4k") && !m.includes("1080p") },
   "视频放大 (Upsample)": { filter: m => m.includes("4k") || m.includes("1080p") },
 };
 
@@ -235,6 +235,7 @@ const FALLBACK_MODELS = {
   "veo_3_1_i2v_s_6s_1080p": "Video upsample alias - generate 6s then upscale to 1080P",
   "veo_3_1_i2v_s_landscape_6s_1080p": "Video upsample alias - generate 6s landscape then upscale to 1080P",
   "veo_3_1_r2v_fast": "Video generation (alias) - supports landscape/portrait via generationConfig",
+  "abra_r2v_10s": "Video generation - observed Labs R2V modelKey, portrait reference images",
   "veo_3_1_r2v_fast_landscape": "Video generation - R2V fast landscape",
   "veo_3_1_r2v_fast_ultra": "Video generation (alias) - supports landscape/portrait via generationConfig",
   "veo_3_1_r2v_fast_landscape_ultra": "Video generation - R2V fast ultra landscape",

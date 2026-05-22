@@ -6,6 +6,7 @@ import os
 import sys
 import subprocess
 import signal
+import json
 # 修复 Windows 上 playwright 的 asyncio 兼容性问题
 os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "0")
 
@@ -17,9 +18,243 @@ import uuid
 from typing import Optional, Dict, Any, List, Union
 from datetime import datetime
 from urllib.parse import urlparse, unquote, parse_qs
+import urllib.parse
+import urllib.request
 
 from ..core.logger import debug_logger
 from ..core.config import config
+
+RECAPTCHA_RESOURCE_HOST_MARKERS = (
+    "google.com",
+    "gstatic.com",
+    "gstatic.cn",
+    "recaptcha.net",
+)
+
+
+def _is_recaptcha_resource_url(url: str) -> bool:
+    return any(host in (url or "") for host in RECAPTCHA_RESOURCE_HOST_MARKERS)
+
+
+def _adspower_env(name: str, default: str = "") -> str:
+    return (os.environ.get(name, default) or "").strip()
+
+
+def _adspower_config_value(name: str, default: str = "") -> str:
+    value = getattr(config, name, default)
+    return str(value if value is not None else default).strip()
+
+
+def parse_adspower_profile_ids(raw: str) -> List[str]:
+    """Parse comma/newline/semicolon separated AdsPower profile IDs."""
+    if not raw:
+        return []
+    profile_ids: List[str] = []
+    for item in re.split(r"[\s,;]+", str(raw)):
+        item = item.strip()
+        if item and item not in profile_ids:
+            profile_ids.append(item)
+    return profile_ids
+
+
+def _adspower_profile_ids() -> List[str]:
+    configured = _adspower_config_value("adspower_profile_ids")
+    env_multi = _adspower_env("ADSPOWER_PROFILE_IDS")
+    env_single = _adspower_env("ADSPOWER_PROFILE_ID")
+    return (
+        parse_adspower_profile_ids(configured)
+        or parse_adspower_profile_ids(env_multi)
+        or parse_adspower_profile_ids(env_single)
+    )
+
+
+def _adspower_profile_id_for_slot(slot_id: int) -> str:
+    profile_ids = _adspower_profile_ids()
+    if not profile_ids:
+        return ""
+    return profile_ids[max(0, int(slot_id)) % len(profile_ids)]
+
+
+def _is_adspower_enabled() -> bool:
+    method = str(getattr(config, "captcha_method", "") or "").strip().lower()
+    return method == "adspower" or bool(_adspower_profile_ids())
+
+
+def _adspower_api_base_url() -> str:
+    configured = _adspower_config_value("adspower_api_url")
+    return (_adspower_env("ADSPOWER_API_URL") or configured or "http://127.0.0.1:50325").rstrip("/")
+
+
+def _adspower_api_key() -> str:
+    return _adspower_env("ADSPOWER_API_KEY") or _adspower_config_value("adspower_api_key")
+
+
+def _adspower_use_auth() -> bool:
+    env_value = _adspower_env("ADSPOWER_API_USE_AUTH")
+    if env_value:
+        return env_value.lower() in {"1", "true", "yes", "on"}
+    return bool(getattr(config, "adspower_api_use_auth", False))
+
+
+def _adspower_headless() -> bool:
+    env_value = _adspower_env("ADSPOWER_HEADLESS")
+    if env_value:
+        return env_value.lower() in {"1", "true", "yes", "on"}
+    return bool(getattr(config, "adspower_headless", False))
+
+
+def _adspower_launch_args() -> str:
+    return _adspower_env("ADSPOWER_LAUNCH_ARGS") or _adspower_config_value("adspower_launch_args")
+
+
+def _adspower_request_timeout() -> int:
+    value = _adspower_env("ADSPOWER_API_TIMEOUT", "15")
+    try:
+        return max(5, min(120, int(value)))
+    except Exception:
+        return 15
+
+
+def _adspower_request_json(method: str, path: str, params: Optional[Dict[str, Any]] = None, body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    base_url = _adspower_api_base_url()
+    url = f"{base_url}{path}"
+    if params:
+        url = f"{url}?{urllib.parse.urlencode(params)}"
+
+    headers = {"Content-Type": "application/json"}
+    api_key = _adspower_api_key()
+    if api_key and _adspower_use_auth():
+        headers["Authorization"] = f"Bearer {api_key}"
+        headers["X-API-Key"] = api_key
+
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+
+    request = urllib.request.Request(url, data=data, headers=headers, method=method.upper())
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(request, timeout=_adspower_request_timeout()) as response:
+        raw = response.read().decode("utf-8", errors="replace")
+    try:
+        return json.loads(raw or "{}")
+    except Exception:
+        return {"code": response.status, "msg": raw}
+
+
+def _adspower_response_success(payload: Dict[str, Any]) -> bool:
+    code = payload.get("code")
+    if str(code).strip() in {"0", "200"}:
+        return True
+    if payload.get("success") is True:
+        return True
+    status = str(payload.get("status") or "").strip().lower()
+    return status in {"ok", "success"}
+
+
+def _adspower_message(payload: Dict[str, Any]) -> str:
+    for key in ("msg", "message", "error", "error_msg"):
+        value = payload.get(key)
+        if value:
+            return str(value)
+    return json.dumps(payload, ensure_ascii=False)[:500]
+
+
+def _extract_adspower_ws_endpoint(payload: Any) -> Optional[str]:
+    if payload is None:
+        return None
+    if isinstance(payload, str):
+        return payload if payload.startswith(("ws://", "wss://")) else None
+    if isinstance(payload, dict):
+        for key in (
+            "puppeteer",
+            "playwright",
+            "cdp",
+            "devtools",
+            "browserWSEndpoint",
+            "browser_ws_endpoint",
+            "ws",
+            "wsEndpoint",
+            "ws_endpoint",
+            "debug_ws",
+            "debugWs",
+            "webSocketDebuggerUrl",
+            "websocketDebuggerUrl",
+        ):
+            endpoint = _extract_adspower_ws_endpoint(payload.get(key))
+            if endpoint:
+                return endpoint
+        return _extract_adspower_ws_endpoint(payload.get("data"))
+    if isinstance(payload, list):
+        for item in payload:
+            endpoint = _extract_adspower_ws_endpoint(item)
+            if endpoint:
+                return endpoint
+    return None
+
+
+def _extract_adspower_value(payload: Any, keys: List[str]) -> Optional[str]:
+    if payload is None:
+        return None
+    if isinstance(payload, dict):
+        for key in keys:
+            value = payload.get(key)
+            if value not in (None, ""):
+                return str(value)
+        nested = _extract_adspower_value(payload.get("data"), keys)
+        if nested:
+            return nested
+    if isinstance(payload, list):
+        for item in payload:
+            nested = _extract_adspower_value(item, keys)
+            if nested:
+                return nested
+    return None
+
+
+def _extract_adspower_http_endpoint(payload: Any) -> Optional[str]:
+    value = _extract_adspower_value(
+        payload,
+        ["http", "httpEndpoint", "http_endpoint", "debug_http", "debugHttp", "debugging_address"],
+    )
+    if not value:
+        return None
+    value = value.strip()
+    return value if value.startswith(("http://", "https://")) else f"http://{value}"
+
+
+def _adspower_debug_ws_from_port(port: str, host: str = "127.0.0.1") -> Optional[str]:
+    if not str(port or "").isdigit():
+        return None
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    for suffix in ("/json/version", "/json/list"):
+        try:
+            with opener.open(f"http://{host}:{port}{suffix}", timeout=3) as response:
+                payload = json.loads(response.read().decode("utf-8", errors="replace") or "{}")
+            endpoint = _extract_adspower_ws_endpoint(payload)
+            if endpoint:
+                return endpoint
+        except Exception:
+            continue
+    return None
+
+
+def _resolve_adspower_cdp_url(payload: Dict[str, Any]) -> Optional[str]:
+    ws_endpoint = _extract_adspower_ws_endpoint(payload)
+    if ws_endpoint:
+        return ws_endpoint
+
+    http_endpoint = _extract_adspower_http_endpoint(payload)
+    if http_endpoint:
+        return http_endpoint
+
+    debug_port = _extract_adspower_value(payload, ["debug_port", "debugPort", "port", "cdp_port"])
+    if debug_port:
+        ws_endpoint = _adspower_debug_ws_from_port(debug_port)
+        if ws_endpoint:
+            return ws_endpoint
+        return f"http://127.0.0.1:{debug_port}"
+
+    return None
 
 
 # ==================== Docker 环境检测 ====================
@@ -182,7 +417,32 @@ Route = None
 BrowserContext = None
 PLAYWRIGHT_AVAILABLE = False
 
-if DOCKER_HEADED_BLOCKED:
+
+def _load_playwright_runtime(install_browser: bool = True) -> bool:
+    global async_playwright, Route, BrowserContext, PLAYWRIGHT_AVAILABLE
+
+    if PLAYWRIGHT_AVAILABLE and async_playwright is not None:
+        return True
+    if not _ensure_playwright_installed():
+        return False
+    try:
+        from playwright.async_api import async_playwright as imported_async_playwright
+        from playwright.async_api import BrowserContext as imported_browser_context
+        from playwright.async_api import Route as imported_route
+
+        async_playwright = imported_async_playwright
+        BrowserContext = imported_browser_context
+        Route = imported_route
+        PLAYWRIGHT_AVAILABLE = True
+        if install_browser:
+            _ensure_browser_installed()
+        return True
+    except ImportError as e:
+        debug_logger.log_error(f"[BrowserCaptcha] playwright import failed: {e}")
+        print(f"[BrowserCaptcha] playwright import failed: {e}")
+        return False
+
+if DOCKER_HEADED_BLOCKED and not _is_adspower_enabled():
     debug_logger.log_warning(
         "[BrowserCaptcha] 检测到 Docker 环境，默认禁用有头浏览器打码。"
         "如需启用请设置 ALLOW_DOCKER_HEADED_CAPTCHA=true，并提供 DISPLAY/Xvfb。"
@@ -615,6 +875,14 @@ class TokenBrowser:
         }
 
         try:
+            if _is_adspower_enabled():
+                browser, context = await self._connect_adspower_browser(playwright)
+                debug_logger.log_info(
+                    f"[BrowserCaptcha] Token-{self.token_id} AdsPower browser connected "
+                    f"(profile_id={_adspower_profile_id_for_slot(self.token_id)}, proxy={'yes' if raw_proxy_url else 'no'})"
+                )
+                return playwright, browser, context
+
             browser_args = [
                 '--disable-blink-features=AutomationControlled',
                 '--disable-quic',
@@ -682,6 +950,58 @@ class TokenBrowser:
             if manage_slot_pid:
                 self._write_pid_file(None)
             raise
+
+    def _start_adspower_profile(self) -> Dict[str, Any]:
+        profile_id = _adspower_profile_id_for_slot(self.token_id)
+        if not profile_id:
+            raise RuntimeError("AdsPower profile IDs are empty")
+
+        launch_args = _adspower_launch_args()
+        headless = _adspower_headless()
+
+        def with_options(payload: Dict[str, Any]) -> Dict[str, Any]:
+            payload = dict(payload)
+            if launch_args:
+                payload["launch_args"] = launch_args
+            if headless:
+                payload["headless"] = True
+            return payload
+
+        attempts = [
+            ("POST", "/api/v2/browser-profile/start", None, with_options({"profile_id": profile_id})),
+            ("POST", "/api/v2/browser-profile/start", None, with_options({"user_id": profile_id})),
+            ("GET", "/api/v1/browser/start", with_options({"user_id": profile_id}), None),
+            ("GET", "/api/v1/browser/start", with_options({"id": profile_id}), None),
+            ("POST", "/api/v1/browser/start", None, with_options({"user_id": profile_id})),
+            ("POST", "/api/v1/browser/start", None, with_options({"id": profile_id})),
+        ]
+
+        last_message = ""
+        for method, path, params, body in attempts:
+            try:
+                payload = _adspower_request_json(method, path, params=params, body=body)
+            except Exception as exc:
+                last_message = f"{type(exc).__name__}: {str(exc)[:200]}"
+                continue
+            if _adspower_response_success(payload):
+                return payload
+            last_message = _adspower_message(payload)
+
+        raise RuntimeError(f"AdsPower start failed: {last_message or 'unknown error'}")
+
+    async def _connect_adspower_browser(self, playwright) -> tuple:
+        payload = await asyncio.to_thread(self._start_adspower_profile)
+        cdp_url = _resolve_adspower_cdp_url(payload)
+        if not cdp_url:
+            raise RuntimeError(f"AdsPower start response missing CDP endpoint: {json.dumps(payload, ensure_ascii=False)[:500]}")
+
+        browser = await playwright.chromium.connect_over_cdp(cdp_url, timeout=30000)
+        contexts = list(getattr(browser, "contexts", None) or [])
+        if contexts:
+            context = contexts[0]
+        else:
+            context = await browser.new_context()
+        return browser, context
 
     async def _recycle_browser_locked(self, reason: str = "unknown", rotate_profile: bool = True):
         """Recycle the shared browser instance and reset its state."""
@@ -1144,7 +1464,7 @@ class TokenBrowser:
                     }})();
                     </script></head><body></body></html>"""
                     await route.fulfill(status=200, content_type="text/html", body=html)
-                elif any(d in route.request.url for d in ["google.com", "gstatic.com", "recaptcha.net"]):
+                elif _is_recaptcha_resource_url(route.request.url):
                     await route.continue_()
                 else:
                     await route.abort()
@@ -1152,7 +1472,7 @@ class TokenBrowser:
             def handle_request_failed(request):
                 try:
                     failed_url = request.url or ""
-                    if not any(d in failed_url for d in ["google.com", "gstatic.com", "recaptcha.net"]):
+                    if not _is_recaptcha_resource_url(failed_url):
                         return
                     failure = request.failure or ""
                     debug_logger.log_warning(
@@ -1247,7 +1567,7 @@ class TokenBrowser:
             def handle_request_failed(request):
                 try:
                     failed_url = request.url or ""
-                    if not any(d in failed_url for d in ["google.com", "gstatic.com", "recaptcha.net", "antcpt.com"]):
+                    if not (_is_recaptcha_resource_url(failed_url) or "antcpt.com" in failed_url):
                         return
                     failure = request.failure or ""
                     debug_logger.log_warning(
@@ -1687,12 +2007,15 @@ class BrowserCaptchaService:
     
     def _check_available(self):
         """检查服务是否可用"""
-        if DOCKER_HEADED_BLOCKED:
+        adspower_mode = _is_adspower_enabled()
+        if adspower_mode and (not PLAYWRIGHT_AVAILABLE or async_playwright is None):
+            _load_playwright_runtime(install_browser=False)
+        if DOCKER_HEADED_BLOCKED and not adspower_mode:
             raise RuntimeError(
                 "检测到 Docker 环境，默认禁用有头浏览器打码。"
                 "如需启用请设置环境变量 ALLOW_DOCKER_HEADED_CAPTCHA=true，并提供 DISPLAY/Xvfb。"
             )
-        if IS_DOCKER and not os.environ.get("DISPLAY"):
+        if IS_DOCKER and not os.environ.get("DISPLAY") and not adspower_mode:
             raise RuntimeError(
                 "Docker 有头浏览器打码已启用，但 DISPLAY 未设置。"
                 "请设置 DISPLAY（例如 :99）并启动 Xvfb。"
@@ -1709,6 +2032,13 @@ class BrowserCaptchaService:
             try:
                 captcha_config = await self.db.get_captcha_config()
                 self._browser_count = max(1, captcha_config.browser_count)
+                if (captcha_config.captcha_method or "").strip().lower() == "adspower":
+                    profile_count = len(parse_adspower_profile_ids(captcha_config.adspower_profile_ids))
+                    if profile_count > 0 and self._browser_count > profile_count:
+                        debug_logger.log_warning(
+                            f"[BrowserCaptcha] AdsPower browser_count={self._browser_count} exceeds profile_count={profile_count}; clamped to profile_count"
+                        )
+                        self._browser_count = profile_count
                 debug_logger.log_info(f"[BrowserCaptcha] 浏览器数量配置: {self._browser_count}")
             except Exception as e:
                 debug_logger.log_warning(f"[BrowserCaptcha] 加载 browser_count 配置失败: {e}，使用默认值 1")

@@ -178,7 +178,7 @@ class CaptchaConfig(BaseModel):
     """Captcha configuration"""
 
     id: int = 1
-    captcha_method: str = "browser"  # yescaptcha/capmonster/ezcaptcha/capsolver/browser/personal/remote_browser
+    captcha_method: str = "browser"  # yescaptcha/capmonster/ezcaptcha/capsolver/browser/personal/remote_browser/adspower
     yescaptcha_api_key: str = ""
     yescaptcha_base_url: str = "https://api.yescaptcha.com"
     yescaptcha_task_type: str = "RecaptchaV3TaskProxylessM1"
@@ -191,6 +191,12 @@ class CaptchaConfig(BaseModel):
     remote_browser_base_url: str = ""
     remote_browser_api_key: str = ""
     remote_browser_timeout: int = 60
+    adspower_api_url: str = "http://127.0.0.1:50325"
+    adspower_api_key: str = ""
+    adspower_api_use_auth: bool = False
+    adspower_profile_ids: str = ""
+    adspower_launch_args: str = ""
+    adspower_headless: bool = False
     website_key: str = "6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV"
     page_action: str = "IMAGE_GENERATION"
     browser_proxy_enabled: bool = False  # 浏览器打码是否启用代理

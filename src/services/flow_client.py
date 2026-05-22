@@ -14,6 +14,7 @@ import urllib.request
 from curl_cffi.requests import AsyncSession
 from ..core.logger import debug_logger
 from ..core.config import config, get_yescaptcha_min_score
+from .browser_cookie_utils import serialize_cookie_header
 
 try:
     import httpx
@@ -102,6 +103,20 @@ class FlowClient:
         """清理请求链路绑定的浏览器指纹。"""
         self._set_request_fingerprint(None)
 
+    def _build_labs_cookie_header(self, st_token: Any) -> str:
+        """Build a Labs Cookie header from a raw ST, Cookie header, or browser cookie JSON."""
+        if st_token is None:
+            return ""
+
+        cookie_header = serialize_cookie_header(st_token)
+        if cookie_header and "__Secure-next-auth.session-token=" in cookie_header:
+            return cookie_header
+
+        session_token = str(st_token or "").strip()
+        if not session_token:
+            return ""
+        return f"__Secure-next-auth.session-token={session_token}"
+
     async def _make_request(
         self,
         method: str,
@@ -116,7 +131,8 @@ class FlowClient:
         use_media_proxy: bool = False,
         respect_fingerprint_proxy: bool = True,
         force_no_proxy: bool = False,
-        allow_urllib_fallback: bool = True
+        allow_urllib_fallback: bool = True,
+        apply_default_client_headers: bool = True
     ) -> Dict[str, Any]:
         """统一HTTP请求处理
 
@@ -133,6 +149,7 @@ class FlowClient:
             use_media_proxy: 是否使用图片上传/下载代理
             respect_fingerprint_proxy: 是否优先使用打码浏览器指纹里的代理
             allow_urllib_fallback: curl_cffi 网络失败时是否允许 urllib 二次兜底
+            apply_default_client_headers: 是否注入本地合成的 Chromium 默认请求头
         """
         fingerprint = self._request_fingerprint_ctx.get()
 
@@ -159,7 +176,7 @@ class FlowClient:
 
         # ST认证 - 使用Cookie
         if use_st and st_token:
-            headers["Cookie"] = f"__Secure-next-auth.session-token={st_token}"
+            headers["Cookie"] = self._build_labs_cookie_header(st_token)
 
         # AT认证 - 使用Bearer
         if use_at and at_token:
@@ -177,10 +194,8 @@ class FlowClient:
         if isinstance(fingerprint, dict):
             fingerprint_user_agent = fingerprint.get("user_agent")
 
-        headers.update({
-            "Content-Type": "application/json",
-            "User-Agent": fingerprint_user_agent or self._generate_user_agent(account_id)
-        })
+        headers.setdefault("Content-Type", "application/json")
+        headers["User-Agent"] = fingerprint_user_agent or self._generate_user_agent(account_id)
 
         # 若存在打码浏览器指纹，覆盖关键客户端提示头，保证提交请求与打码时一致。
         if isinstance(fingerprint, dict):
@@ -193,9 +208,10 @@ class FlowClient:
             if fingerprint.get("sec_ch_ua_platform"):
                 headers["sec-ch-ua-platform"] = fingerprint["sec_ch_ua_platform"]
 
-        # Add default Chromium/Android client headers (do not override explicitly provided values).
-        for key, value in self._default_client_headers.items():
-            headers.setdefault(key, value)
+        if apply_default_client_headers:
+            # Add default Chromium client headers (do not override explicitly provided values).
+            for key, value in self._default_client_headers.items():
+                headers.setdefault(key, value)
 
         # Dynamic fix for sec-ch-ua headers when fingerprint is missing to avoid UA/Platform mismatch
         if not isinstance(fingerprint, dict) or not fingerprint.get("sec_ch_ua_platform"):
@@ -232,10 +248,20 @@ class FlowClient:
 
         try:
             async with AsyncSession(trust_env=False) as session:
-                if method.upper() == "GET":
+                request_method = method.upper()
+                if request_method == "GET":
                     response = await session.get(
                         url,
                         headers=headers,
+                        proxy=proxy_url,
+                        timeout=request_timeout,
+                        impersonate="chrome124"
+                    )
+                elif request_method == "PATCH":
+                    response = await session.patch(
+                        url,
+                        headers=headers,
+                        json=json_data,
                         proxy=proxy_url,
                         timeout=request_timeout,
                         impersonate="chrome124"
@@ -479,11 +505,16 @@ class FlowClient:
                 self._make_request(
                     method="POST",
                     url=url,
+                    headers={
+                        "Content-Type": "text/plain;charset=UTF-8",
+                        "Referer": "https://labs.google/",
+                    },
                     json_data=json_data,
                     use_at=True,
                     at_token=at,
                     timeout=timeout,
-                    allow_urllib_fallback=False
+                    allow_urllib_fallback=False,
+                    apply_default_client_headers=False,
                 ),
                 timeout=timeout + 5
             )
@@ -854,7 +885,6 @@ class FlowClient:
         new_url = f"{self.api_base_url}/flow/uploadImage"
         normalized_project_id = str(project_id or "").strip()
         new_client_context = {
-            "sessionId": self._generate_session_id(),
             "tool": "PINHOLE"
         }
         if normalized_project_id:
@@ -904,10 +934,15 @@ class FlowClient:
                 new_result = await self._make_request(
                     method="POST",
                     url=new_url,
+                    headers={
+                        "Content-Type": "text/plain;charset=UTF-8",
+                        "Referer": "https://labs.google/",
+                    },
                     json_data=new_json_data,
                     use_at=True,
                     at_token=at,
-                    use_media_proxy=True
+                    use_media_proxy=True,
+                    apply_default_client_headers=False,
                 )
                 media_id = (
                     self._extract_media_name(new_result.get("media"))
@@ -1315,6 +1350,7 @@ class FlowClient:
         self,
         media: Dict[str, Any],
         fallback_project_id: Optional[str] = None,
+        workflow: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         if not isinstance(media, dict):
             return None
@@ -1330,7 +1366,8 @@ class FlowClient:
         if not operation_name:
             return None
 
-        project_id = media.get("projectId") or fallback_project_id
+        project_id = media.get("projectId") or (workflow or {}).get("projectId") or fallback_project_id
+        workflow_id = media.get("workflowId") or (workflow or {}).get("name")
         status, status_block = self._extract_video_status_from_media(media)
         operation: Dict[str, Any] = {
             "operation": {
@@ -1342,6 +1379,8 @@ class FlowClient:
             operation["mediaName"] = media_name
         if project_id:
             operation["projectId"] = project_id
+        if workflow_id:
+            operation["workflowId"] = workflow_id
 
         scene_id = (
             media.get("sceneId")
@@ -1361,6 +1400,8 @@ class FlowClient:
             video_metadata["fifeUrl"] = video_url
         if media_name:
             video_metadata["mediaGenerationId"] = media_name
+        if workflow_id:
+            video_metadata["workflowId"] = workflow_id
         if aspect_ratio:
             video_metadata["aspectRatio"] = aspect_ratio
         if video_metadata:
@@ -1394,6 +1435,7 @@ class FlowClient:
             if media_operation:
                 operation.setdefault("mediaName", media_operation.get("mediaName"))
                 operation.setdefault("projectId", media_operation.get("projectId"))
+                operation.setdefault("workflowId", media_operation.get("workflowId"))
                 operation.setdefault("status", media_operation.get("status"))
                 operation.setdefault("sceneId", media_operation.get("sceneId"))
                 if "metadata" not in operation_body and (media_operation.get("operation") or {}).get("metadata"):
@@ -1417,9 +1459,24 @@ class FlowClient:
         normalized = dict(result)
         media_items = normalized.get("media")
         media_operations: List[Dict[str, Any]] = []
+        workflow_by_media_name: Dict[str, Dict[str, Any]] = {}
+        workflows = normalized.get("workflows")
+        if isinstance(workflows, list):
+            for workflow in workflows:
+                if not isinstance(workflow, dict):
+                    continue
+                metadata = workflow.get("metadata") if isinstance(workflow.get("metadata"), dict) else {}
+                primary_media_id = metadata.get("primaryMediaId")
+                if isinstance(primary_media_id, str) and primary_media_id.strip():
+                    workflow_by_media_name[primary_media_id.strip()] = workflow
         if isinstance(media_items, list):
             for media in media_items:
-                operation = self._media_to_video_operation(media, fallback_project_id=fallback_project_id)
+                media_name = self._extract_media_name(media)
+                operation = self._media_to_video_operation(
+                    media,
+                    fallback_project_id=fallback_project_id,
+                    workflow=workflow_by_media_name.get(media_name or ""),
+                )
                 if operation:
                     media_operations.append(operation)
 
@@ -1599,6 +1656,7 @@ class FlowClient:
         user_paygate_tier: str = "PAYGATE_TIER_ONE",
         token_id: Optional[int] = None,
         token_video_concurrency: Optional[int] = None,
+        suppress_scene_id_metadata: bool = False,
     ) -> dict:
         """图生视频,返回task_id
 
@@ -1656,6 +1714,9 @@ class FlowClient:
             session_id = self._generate_session_id()
             batch_id = str(uuid.uuid4())
             scene_id = str(uuid.uuid4())
+            request_metadata = {}
+            if not suppress_scene_id_metadata and str(model_key or "") != "abra_r2v_10s":
+                request_metadata["sceneId"] = scene_id
 
             json_data = {
                 "mediaGenerationContext": self._build_video_media_generation_context(batch_id),
@@ -1681,9 +1742,7 @@ class FlowClient:
                     },
                     "videoModelKey": model_key,
                     "referenceImages": reference_images,
-                    "metadata": {
-                        "sceneId": scene_id
-                    }
+                    "metadata": request_metadata
                 }],
                 "useV2ModelConfig": True
             }
@@ -2430,6 +2489,132 @@ class FlowClient:
 
     # ========== 媒体删除 (使用ST) ==========
 
+    async def update_flow_workflow_primary_media(
+        self,
+        at: str,
+        project_id: str,
+        workflow_id: str,
+        media_id: str,
+    ) -> dict:
+        """Update Flow workflow primary media after async video generation completes."""
+        normalized_workflow_id = str(workflow_id or "").strip()
+        normalized_media_id = str(media_id or "").strip()
+        normalized_project_id = str(project_id or "").strip()
+        if not normalized_workflow_id or not normalized_media_id or not normalized_project_id:
+            return {}
+
+        url = f"{self.api_base_url}/flowWorkflows/{quote(normalized_workflow_id, safe='')}"
+        json_data = {
+            "workflow": {
+                "name": normalized_workflow_id,
+                "projectId": normalized_project_id,
+                "metadata": {
+                    "primaryMediaId": normalized_media_id,
+                },
+            },
+            "updateMask": "metadata.primaryMediaId",
+        }
+        return await self._make_request(
+            method="PATCH",
+            url=url,
+            headers={
+                "Content-Type": "text/plain;charset=UTF-8",
+                "Referer": "https://labs.google/",
+            },
+            json_data=json_data,
+            use_at=True,
+            at_token=at,
+            timeout=self._get_video_poll_timeout(),
+            allow_urllib_fallback=False,
+            apply_default_client_headers=False,
+        )
+
+    async def get_media_url_redirect(
+        self,
+        st: str,
+        media_id: str,
+        media_url_type: Optional[str] = None,
+        project_id: Optional[str] = None,
+    ) -> str:
+        """Resolve Labs media.getMediaUrlRedirect and return the signed flow-content URL."""
+        normalized_media_id = str(media_id or "").strip()
+        if not normalized_media_id:
+            raise RuntimeError("media_id is required")
+
+        url = (
+            f"{self.labs_base_url}/trpc/media.getMediaUrlRedirect"
+            f"?name={quote(normalized_media_id, safe='')}"
+        )
+        if media_url_type:
+            url += f"&mediaUrlType={quote(str(media_url_type), safe='')}"
+
+        fingerprint = self._request_fingerprint_ctx.get()
+        proxy_url = None
+        if self.proxy_manager:
+            if isinstance(fingerprint, dict) and "proxy_url" in fingerprint:
+                proxy_url = fingerprint.get("proxy_url")
+                if proxy_url == "":
+                    proxy_url = None
+            elif hasattr(self.proxy_manager, "get_request_proxy_url"):
+                proxy_url = await self.proxy_manager.get_request_proxy_url()
+            else:
+                proxy_url = await self.proxy_manager.get_proxy_url()
+
+        account_id = str(st or "")[:16] or None
+        normalized_project_id = str(project_id or "").strip()
+        referer = "https://labs.google/"
+        if normalized_project_id:
+            referer = f"https://labs.google/fx/zh/tools/flow/project/{quote(normalized_project_id, safe='')}"
+        headers = {
+            "Referer": referer,
+            "Cookie": self._build_labs_cookie_header(st),
+            "User-Agent": self._generate_user_agent(account_id),
+            "Accept-Encoding": "identity;q=1, *;q=0",
+            "Range": "bytes=0-",
+        }
+        if isinstance(fingerprint, dict):
+            if fingerprint.get("user_agent"):
+                headers["User-Agent"] = str(fingerprint["user_agent"])
+            if fingerprint.get("sec_ch_ua"):
+                headers["sec-ch-ua"] = str(fingerprint["sec_ch_ua"])
+            if fingerprint.get("sec_ch_ua_mobile"):
+                headers["sec-ch-ua-mobile"] = str(fingerprint["sec_ch_ua_mobile"])
+            if fingerprint.get("sec_ch_ua_platform"):
+                headers["sec-ch-ua-platform"] = str(fingerprint["sec_ch_ua_platform"])
+
+        timeout = self._get_video_poll_timeout()
+        start_time = time.time()
+        try:
+            async with AsyncSession(trust_env=False) as session:
+                response = await session.get(
+                    url,
+                    headers=headers,
+                    proxy=proxy_url,
+                    timeout=timeout,
+                    allow_redirects=False,
+                    impersonate="chrome124",
+                )
+        except Exception as e:
+            raise RuntimeError(f"media.getMediaUrlRedirect request failed: {e}") from e
+
+        duration_ms = (time.time() - start_time) * 1000
+        if config.debug_enabled:
+            debug_logger.log_response(
+                status_code=response.status_code,
+                headers=dict(response.headers),
+                body=response.text,
+                duration_ms=duration_ms,
+            )
+
+        location = response.headers.get("location") or response.headers.get("Location")
+        if 300 <= response.status_code < 400 and location:
+            return str(location)
+        if response.status_code >= 400:
+            raise RuntimeError(f"media.getMediaUrlRedirect HTTP {response.status_code}: {response.text[:200]}")
+        if location:
+            return str(location)
+        raise RuntimeError(f"media.getMediaUrlRedirect missing Location header (status={response.status_code})")
+
     async def delete_media(self, st: str, media_names: List[str]):
         """删除媒体
 
@@ -2549,7 +2734,7 @@ class FlowClient:
             error_reason: 已归类的错误原因
             error_message: 原始错误文本
         """
-        if config.captcha_method == "browser":
+        if config.captcha_method in {"browser", "adspower"}:
             try:
                 from .browser_captcha import BrowserCaptchaService
                 service = await BrowserCaptchaService.get_instance(self.db)
@@ -2595,7 +2780,7 @@ class FlowClient:
 
     async def _notify_browser_captcha_request_finished(self, browser_id: Optional[Union[int, str]] = None):
         """通知有头浏览器：上游图片/视频请求已结束，可关闭对应打码浏览器。"""
-        if config.captcha_method == "browser":
+        if config.captcha_method in {"browser", "adspower"}:
             try:
                 from .browser_captcha import BrowserCaptchaService
                 service = await BrowserCaptchaService.get_instance(self.db)
@@ -2930,7 +3115,7 @@ class FlowClient:
                 self._set_request_fingerprint(None)
                 return None, None
         # 有头浏览器打码 (playwright)
-        elif captcha_method == "browser":
+        elif captcha_method in {"browser", "adspower"}:
             try:
                 from .browser_captcha import BrowserCaptchaService
                 service = await BrowserCaptchaService.get_instance(self.db)

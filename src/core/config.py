@@ -642,6 +642,72 @@ class Config:
             normalized = 60
         self._config["captcha"]["remote_browser_timeout"] = normalized
 
+    @property
+    def adspower_api_url(self) -> str:
+        """Get AdsPower local API URL."""
+        return (self._config.get("captcha", {}).get("adspower_api_url", "http://127.0.0.1:50325") or "").strip()
+
+    def set_adspower_api_url(self, api_url: str):
+        """Set AdsPower local API URL."""
+        if "captcha" not in self._config:
+            self._config["captcha"] = {}
+        self._config["captcha"]["adspower_api_url"] = (api_url or "").strip()
+
+    @property
+    def adspower_api_key(self) -> str:
+        """Get AdsPower API key."""
+        return (self._config.get("captcha", {}).get("adspower_api_key", "") or "").strip()
+
+    def set_adspower_api_key(self, api_key: str):
+        """Set AdsPower API key."""
+        if "captcha" not in self._config:
+            self._config["captcha"] = {}
+        self._config["captcha"]["adspower_api_key"] = (api_key or "").strip()
+
+    @property
+    def adspower_api_use_auth(self) -> bool:
+        """Whether to send the AdsPower API key as auth headers."""
+        return bool(self._config.get("captcha", {}).get("adspower_api_use_auth", False))
+
+    def set_adspower_api_use_auth(self, enabled: bool):
+        """Set whether AdsPower API requests include auth headers."""
+        if "captcha" not in self._config:
+            self._config["captcha"] = {}
+        self._config["captcha"]["adspower_api_use_auth"] = bool(enabled)
+
+    @property
+    def adspower_profile_ids(self) -> str:
+        """Comma/newline separated AdsPower profile IDs for concurrent slots."""
+        return self._config.get("captcha", {}).get("adspower_profile_ids", "") or ""
+
+    def set_adspower_profile_ids(self, profile_ids: str):
+        """Set comma/newline separated AdsPower profile IDs."""
+        if "captcha" not in self._config:
+            self._config["captcha"] = {}
+        self._config["captcha"]["adspower_profile_ids"] = profile_ids or ""
+
+    @property
+    def adspower_launch_args(self) -> str:
+        """Extra launch_args passed to AdsPower profile startup."""
+        return self._config.get("captcha", {}).get("adspower_launch_args", "") or ""
+
+    def set_adspower_launch_args(self, launch_args: str):
+        """Set AdsPower launch_args."""
+        if "captcha" not in self._config:
+            self._config["captcha"] = {}
+        self._config["captcha"]["adspower_launch_args"] = launch_args or ""
+
+    @property
+    def adspower_headless(self) -> bool:
+        """Whether AdsPower should start profiles in headless mode."""
+        return bool(self._config.get("captcha", {}).get("adspower_headless", False))
+
+    def set_adspower_headless(self, enabled: bool):
+        """Set AdsPower headless startup flag."""
+        if "captcha" not in self._config:
+            self._config["captcha"] = {}
+        self._config["captcha"]["adspower_headless"] = bool(enabled)
+
 
 # Global config instance
 config = Config()

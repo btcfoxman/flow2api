@@ -2,14 +2,26 @@ version: '3.8'
 
 services:
   flow2api:
-    image: ghcr.io/thesmallhancat/flow2api:latest
-    container_name: flow2api
+    image: ${IMAGE_REGISTRY:-ghcr.io}/${IMAGE_NAMESPACE:-btcfoxman}/${IMAGE_REPOSITORY:-flow2api}:${IMAGE_TAG:-latest}
+    container_name: ${FLOW2API_CONTAINER_NAME:-flow2api}
+    env_file:
+      - .env
     ports:
-      - "4020:4020"
+      - "${FLOW2API_HOST_PORT:-4020}:4020"
     volumes:
       - ./data:/app/data
       - ./tmp:/app/tmp
       - ./config/setting.toml:/app/config/setting.toml
     environment:
-      - PYTHONUNBUFFERED=1
+      TZ: ${TZ:-Asia/Taipei}
+      PYTHONUNBUFFERED: "1"
+      ALLOW_DOCKER_HEADED_CAPTCHA: ${ALLOW_DOCKER_HEADED_CAPTCHA:-true}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - my-shared-net
     restart: unless-stopped
+
+networks:
+  my-shared-net:
+    external: true

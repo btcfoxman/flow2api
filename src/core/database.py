@@ -228,6 +228,12 @@ class Database:
             remote_browser_base_url = ""
             remote_browser_api_key = ""
             remote_browser_timeout = 60
+            adspower_api_url = "http://127.0.0.1:50325"
+            adspower_api_key = ""
+            adspower_api_use_auth = False
+            adspower_profile_ids = ""
+            adspower_launch_args = ""
+            adspower_headless = False
             browser_count = 1
             personal_project_pool_size = 4
             personal_max_resident_tabs = 5
@@ -243,6 +249,12 @@ class Database:
                 remote_browser_base_url = captcha_config.get("remote_browser_base_url", "")
                 remote_browser_api_key = captcha_config.get("remote_browser_api_key", "")
                 remote_browser_timeout = captcha_config.get("remote_browser_timeout", 60)
+                adspower_api_url = captcha_config.get("adspower_api_url", "http://127.0.0.1:50325")
+                adspower_api_key = captcha_config.get("adspower_api_key", "")
+                adspower_api_use_auth = captcha_config.get("adspower_api_use_auth", False)
+                adspower_profile_ids = captcha_config.get("adspower_profile_ids", "")
+                adspower_launch_args = captcha_config.get("adspower_launch_args", "")
+                adspower_headless = captcha_config.get("adspower_headless", False)
                 browser_count = captcha_config.get("browser_count", 1)
                 personal_project_pool_size = captcha_config.get("personal_project_pool_size", 4)
                 personal_max_resident_tabs = captcha_config.get("personal_max_resident_tabs", 5)
@@ -278,11 +290,13 @@ class Database:
                     id, captcha_method, yescaptcha_api_key, yescaptcha_base_url,
                     yescaptcha_task_type,
                     remote_browser_base_url, remote_browser_api_key, remote_browser_timeout,
+                    adspower_api_url, adspower_api_key, adspower_api_use_auth,
+                    adspower_profile_ids, adspower_launch_args, adspower_headless,
                     browser_count, personal_project_pool_size,
                     personal_max_resident_tabs, browser_personal_fresh_restart_every_n_solves,
                     personal_idle_tab_ttl_seconds
                 )
-                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 captcha_method,
                 yescaptcha_api_key,
@@ -291,6 +305,12 @@ class Database:
                 remote_browser_base_url,
                 remote_browser_api_key,
                 remote_browser_timeout,
+                (adspower_api_url or "").strip() or "http://127.0.0.1:50325",
+                (adspower_api_key or "").strip(),
+                bool(adspower_api_use_auth),
+                adspower_profile_ids or "",
+                adspower_launch_args or "",
+                bool(adspower_headless),
                 browser_count,
                 personal_project_pool_size,
                 personal_max_resident_tabs,
@@ -385,6 +405,12 @@ class Database:
                         remote_browser_base_url TEXT DEFAULT '',
                         remote_browser_api_key TEXT DEFAULT '',
                         remote_browser_timeout INTEGER DEFAULT 60,
+                        adspower_api_url TEXT DEFAULT 'http://127.0.0.1:50325',
+                        adspower_api_key TEXT DEFAULT '',
+                        adspower_api_use_auth BOOLEAN DEFAULT 0,
+                        adspower_profile_ids TEXT DEFAULT '',
+                        adspower_launch_args TEXT DEFAULT '',
+                        adspower_headless BOOLEAN DEFAULT 0,
                         website_key TEXT DEFAULT '6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV',
                         page_action TEXT DEFAULT 'IMAGE_GENERATION',
                         browser_proxy_enabled BOOLEAN DEFAULT 0,
@@ -494,6 +520,12 @@ class Database:
                     ("remote_browser_base_url", "TEXT DEFAULT ''"),
                     ("remote_browser_api_key", "TEXT DEFAULT ''"),
                     ("remote_browser_timeout", "INTEGER DEFAULT 60"),
+                    ("adspower_api_url", "TEXT DEFAULT 'http://127.0.0.1:50325'"),
+                    ("adspower_api_key", "TEXT DEFAULT ''"),
+                    ("adspower_api_use_auth", "BOOLEAN DEFAULT 0"),
+                    ("adspower_profile_ids", "TEXT DEFAULT ''"),
+                    ("adspower_launch_args", "TEXT DEFAULT ''"),
+                    ("adspower_headless", "BOOLEAN DEFAULT 0"),
                 ]
 
                 for col_name, col_type in captcha_columns_to_add:
@@ -753,6 +785,12 @@ class Database:
                     remote_browser_base_url TEXT DEFAULT '',
                     remote_browser_api_key TEXT DEFAULT '',
                     remote_browser_timeout INTEGER DEFAULT 60,
+                    adspower_api_url TEXT DEFAULT 'http://127.0.0.1:50325',
+                    adspower_api_key TEXT DEFAULT '',
+                    adspower_api_use_auth BOOLEAN DEFAULT 0,
+                    adspower_profile_ids TEXT DEFAULT '',
+                    adspower_launch_args TEXT DEFAULT '',
+                    adspower_headless BOOLEAN DEFAULT 0,
                     website_key TEXT DEFAULT '6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV',
                     page_action TEXT DEFAULT 'IMAGE_GENERATION',
 
@@ -1657,6 +1695,12 @@ class Database:
             config.set_remote_browser_base_url(captcha_config.remote_browser_base_url)
             config.set_remote_browser_api_key(captcha_config.remote_browser_api_key)
             config.set_remote_browser_timeout(captcha_config.remote_browser_timeout)
+            config.set_adspower_api_url(captcha_config.adspower_api_url)
+            config.set_adspower_api_key(captcha_config.adspower_api_key)
+            config.set_adspower_api_use_auth(captcha_config.adspower_api_use_auth)
+            config.set_adspower_profile_ids(captcha_config.adspower_profile_ids)
+            config.set_adspower_launch_args(captcha_config.adspower_launch_args)
+            config.set_adspower_headless(captcha_config.adspower_headless)
             config.set_browser_count(captcha_config.browser_count)
             config.set_personal_project_pool_size(captcha_config.personal_project_pool_size)
             config.set_personal_max_resident_tabs(captcha_config.personal_max_resident_tabs)
@@ -1794,6 +1838,12 @@ class Database:
         remote_browser_base_url: str = None,
         remote_browser_api_key: str = None,
         remote_browser_timeout: int = None,
+        adspower_api_url: str = None,
+        adspower_api_key: str = None,
+        adspower_api_use_auth: bool = None,
+        adspower_profile_ids: str = None,
+        adspower_launch_args: str = None,
+        adspower_headless: bool = None,
         browser_proxy_enabled: bool = None,
         browser_proxy_url: str = None,
         browser_count: int = None,
@@ -1825,6 +1875,12 @@ class Database:
                 new_remote_base_url = remote_browser_base_url if remote_browser_base_url is not None else current.get("remote_browser_base_url", "")
                 new_remote_api_key = remote_browser_api_key if remote_browser_api_key is not None else current.get("remote_browser_api_key", "")
                 new_remote_timeout = remote_browser_timeout if remote_browser_timeout is not None else current.get("remote_browser_timeout", 60)
+                new_adspower_api_url = adspower_api_url if adspower_api_url is not None else current.get("adspower_api_url", "http://127.0.0.1:50325")
+                new_adspower_api_key = adspower_api_key if adspower_api_key is not None else current.get("adspower_api_key", "")
+                new_adspower_api_use_auth = adspower_api_use_auth if adspower_api_use_auth is not None else current.get("adspower_api_use_auth", False)
+                new_adspower_profile_ids = adspower_profile_ids if adspower_profile_ids is not None else current.get("adspower_profile_ids", "")
+                new_adspower_launch_args = adspower_launch_args if adspower_launch_args is not None else current.get("adspower_launch_args", "")
+                new_adspower_headless = adspower_headless if adspower_headless is not None else current.get("adspower_headless", False)
                 new_proxy_enabled = browser_proxy_enabled if browser_proxy_enabled is not None else current.get("browser_proxy_enabled", False)
                 new_proxy_url = browser_proxy_url if browser_proxy_url is not None else current.get("browser_proxy_url")
                 new_browser_count = browser_count if browser_count is not None else current.get("browser_count", 1)
@@ -1851,6 +1907,8 @@ class Database:
                         ezcaptcha_api_key = ?, ezcaptcha_base_url = ?,
                         capsolver_api_key = ?, capsolver_base_url = ?,
                         remote_browser_base_url = ?, remote_browser_api_key = ?, remote_browser_timeout = ?,
+                        adspower_api_url = ?, adspower_api_key = ?, adspower_api_use_auth = ?,
+                        adspower_profile_ids = ?, adspower_launch_args = ?, adspower_headless = ?,
                         browser_proxy_enabled = ?, browser_proxy_url = ?, browser_count = ?,
                         personal_project_pool_size = ?,
                         personal_max_resident_tabs = ?,
@@ -1862,6 +1920,12 @@ class Database:
                       new_cap_key, new_cap_url,
                       new_ez_key, new_ez_url, new_cs_key, new_cs_url,
                       (new_remote_base_url or "").strip(), (new_remote_api_key or "").strip(), new_remote_timeout,
+                      (new_adspower_api_url or "").strip() or "http://127.0.0.1:50325",
+                      (new_adspower_api_key or "").strip(),
+                      bool(new_adspower_api_use_auth),
+                      new_adspower_profile_ids or "",
+                      new_adspower_launch_args or "",
+                      bool(new_adspower_headless),
                       new_proxy_enabled, new_proxy_url, new_browser_count, new_personal_project_pool_size,
                       new_personal_max_tabs, new_personal_fresh_restart_every, new_personal_idle_ttl))
             else:
@@ -1878,6 +1942,12 @@ class Database:
                 new_remote_base_url = remote_browser_base_url if remote_browser_base_url is not None else ""
                 new_remote_api_key = remote_browser_api_key if remote_browser_api_key is not None else ""
                 new_remote_timeout = remote_browser_timeout if remote_browser_timeout is not None else 60
+                new_adspower_api_url = adspower_api_url if adspower_api_url is not None else "http://127.0.0.1:50325"
+                new_adspower_api_key = adspower_api_key if adspower_api_key is not None else ""
+                new_adspower_api_use_auth = adspower_api_use_auth if adspower_api_use_auth is not None else False
+                new_adspower_profile_ids = adspower_profile_ids if adspower_profile_ids is not None else ""
+                new_adspower_launch_args = adspower_launch_args if adspower_launch_args is not None else ""
+                new_adspower_headless = adspower_headless if adspower_headless is not None else False
                 new_proxy_enabled = browser_proxy_enabled if browser_proxy_enabled is not None else False
                 new_proxy_url = browser_proxy_url
                 new_browser_count = browser_count if browser_count is not None else 1
@@ -1902,15 +1972,23 @@ class Database:
                         capmonster_api_key, capmonster_base_url, ezcaptcha_api_key, ezcaptcha_base_url,
                         capsolver_api_key, capsolver_base_url,
                         remote_browser_base_url, remote_browser_api_key, remote_browser_timeout,
+                        adspower_api_url, adspower_api_key, adspower_api_use_auth,
+                        adspower_profile_ids, adspower_launch_args, adspower_headless,
                         browser_proxy_enabled, browser_proxy_url, browser_count,
                         personal_project_pool_size,
                         personal_max_resident_tabs, browser_personal_fresh_restart_every_n_solves,
                         personal_idle_tab_ttl_seconds)
-                    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (new_method, new_yes_key, new_yes_url, new_yes_task_type,
                       new_cap_key, new_cap_url,
                       new_ez_key, new_ez_url, new_cs_key, new_cs_url,
                       (new_remote_base_url or "").strip(), (new_remote_api_key or "").strip(), new_remote_timeout,
+                      (new_adspower_api_url or "").strip() or "http://127.0.0.1:50325",
+                      (new_adspower_api_key or "").strip(),
+                      bool(new_adspower_api_use_auth),
+                      new_adspower_profile_ids or "",
+                      new_adspower_launch_args or "",
+                      bool(new_adspower_headless),
                       new_proxy_enabled, new_proxy_url, new_browser_count, new_personal_project_pool_size,
                       new_personal_max_tabs, new_personal_fresh_restart_every, new_personal_idle_ttl))
 

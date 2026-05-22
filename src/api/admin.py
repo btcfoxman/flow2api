@@ -1576,7 +1576,7 @@ async def update_captcha_config(
     token: str = Depends(verify_admin_token)
 ):
     """Update captcha configuration"""
-    from ..services.browser_captcha import validate_browser_proxy_url
+    from ..services.browser_captcha import parse_adspower_profile_ids, validate_browser_proxy_url
 
     captcha_method = request.get("captcha_method")
     yescaptcha_api_key = request.get("yescaptcha_api_key")
@@ -1591,6 +1591,12 @@ async def update_captcha_config(
     remote_browser_base_url = request.get("remote_browser_base_url")
     remote_browser_api_key = request.get("remote_browser_api_key")
     remote_browser_timeout = request.get("remote_browser_timeout", 60)
+    adspower_api_url = request.get("adspower_api_url", "http://127.0.0.1:50325")
+    adspower_api_key = request.get("adspower_api_key", "")
+    adspower_api_use_auth = request.get("adspower_api_use_auth", False)
+    adspower_profile_ids = request.get("adspower_profile_ids", "")
+    adspower_launch_args = request.get("adspower_launch_args", "")
+    adspower_headless = request.get("adspower_headless", False)
     browser_proxy_enabled = request.get("browser_proxy_enabled", False)
     browser_proxy_url = request.get("browser_proxy_url", "")
     browser_count = request.get("browser_count", 1)
@@ -1613,6 +1619,13 @@ async def update_captcha_config(
             remote_browser_base_url = _normalize_http_base_url(remote_browser_base_url)
         except RuntimeError as e:
             return {"success": False, "message": str(e)}
+    if adspower_api_url:
+        try:
+            adspower_api_url = _normalize_http_base_url(adspower_api_url)
+        except RuntimeError as e:
+            return {"success": False, "message": str(e)}
+    else:
+        adspower_api_url = "http://127.0.0.1:50325"
 
     try:
         remote_browser_timeout = max(5, int(remote_browser_timeout or 60))
@@ -1636,6 +1649,13 @@ async def update_captcha_config(
         if not (remote_browser_api_key or "").strip():
             return {"success": False, "message": "remote_browser 模式需要配置远程打码服务 API Key"}
 
+    if captcha_method == "adspower":
+        adspower_profiles = parse_adspower_profile_ids(adspower_profile_ids)
+        if not adspower_profiles:
+            return {"success": False, "message": "AdsPower mode requires at least one Profile ID"}
+        if browser_count > len(adspower_profiles):
+            browser_count = len(adspower_profiles)
+
     await db.update_captcha_config(
         captcha_method=captcha_method,
         yescaptcha_api_key=yescaptcha_api_key,
@@ -1650,6 +1670,12 @@ async def update_captcha_config(
         remote_browser_base_url=remote_browser_base_url,
         remote_browser_api_key=remote_browser_api_key,
         remote_browser_timeout=remote_browser_timeout,
+        adspower_api_url=adspower_api_url,
+        adspower_api_key=adspower_api_key,
+        adspower_api_use_auth=adspower_api_use_auth,
+        adspower_profile_ids=adspower_profile_ids,
+        adspower_launch_args=adspower_launch_args,
+        adspower_headless=adspower_headless,
         browser_proxy_enabled=browser_proxy_enabled,
         browser_proxy_url=browser_proxy_url if browser_proxy_enabled else None,
         browser_count=browser_count,
@@ -1663,7 +1689,7 @@ async def update_captcha_config(
     await db.reload_config_to_memory()
 
     # 如果使用 browser 打码，热重载浏览器数量配置
-    if captcha_method == "browser":
+    if captcha_method in {"browser", "adspower"}:
         try:
             from ..services.browser_captcha import BrowserCaptchaService
             service = await BrowserCaptchaService.get_instance(db)
@@ -1701,6 +1727,12 @@ async def get_captcha_config(token: str = Depends(verify_admin_token)):
         "remote_browser_base_url": captcha_config.remote_browser_base_url,
         "remote_browser_api_key": captcha_config.remote_browser_api_key,
         "remote_browser_timeout": captcha_config.remote_browser_timeout,
+        "adspower_api_url": captcha_config.adspower_api_url,
+        "adspower_api_key": captcha_config.adspower_api_key,
+        "adspower_api_use_auth": captcha_config.adspower_api_use_auth,
+        "adspower_profile_ids": captcha_config.adspower_profile_ids,
+        "adspower_launch_args": captcha_config.adspower_launch_args,
+        "adspower_headless": captcha_config.adspower_headless,
         "browser_proxy_enabled": captcha_config.browser_proxy_enabled,
         "browser_proxy_url": captcha_config.browser_proxy_url or "",
         "browser_count": captcha_config.browser_count,
@@ -1741,12 +1773,12 @@ async def test_captcha_score(
     verify_proxy_source = "none"
     verify_proxy_url = ""
     verify_impersonate = "chrome120"
-    page_verify_only = captcha_method in {"browser", "personal", "remote_browser"}
+    page_verify_only = captcha_method in {"browser", "personal", "remote_browser", "adspower"}
     verify_mode = "browser_page" if page_verify_only else "server_post"
 
     try:
         token_start = time.time()
-        if captcha_method == "browser":
+        if captcha_method in {"browser", "adspower"}:
             from ..services.browser_captcha import BrowserCaptchaService
             service = await BrowserCaptchaService.get_instance(db)
             score_payload, browser_id = await service.get_custom_score(

@@ -37,7 +37,13 @@ class FlowClientUploadImageTests(unittest.IsolatedAsyncioTestCase):
             request_calls[0]["json_data"]["clientContext"]["projectId"],
             "project-123",
         )
-        self.assertIn("sessionId", request_calls[0]["json_data"]["clientContext"])
+        self.assertNotIn("sessionId", request_calls[0]["json_data"]["clientContext"])
+        self.assertEqual(
+            request_calls[0]["headers"]["Content-Type"],
+            "text/plain;charset=UTF-8",
+        )
+        self.assertEqual(request_calls[0]["headers"]["Referer"], "https://labs.google/")
+        self.assertFalse(request_calls[0]["apply_default_client_headers"])
 
     async def test_project_scoped_upload_accepts_media_list_response(self):
         client = FlowClient(proxy_manager=None)
