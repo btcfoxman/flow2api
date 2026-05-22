@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from src.services.browser_captcha import _adspower_profile_proxy_url
+from src.services.browser_captcha import _adspower_profile_proxy_url, _stop_adspower_profile
 
 
 class AdsPowerProfileProxyTests(unittest.TestCase):
@@ -55,3 +55,23 @@ class AdsPowerProfileProxyTests(unittest.TestCase):
                 _adspower_profile_proxy_url("profile-1"),
                 "http://adspower-cli:8080",
             )
+
+    def test_stop_profile_tries_legacy_stop_params(self):
+        calls = []
+
+        def fake_request(method, path, params=None, body=None):
+            calls.append((method, path, params, body))
+            if params == {"id": "kwrxc3b"}:
+                return {"code": 0}
+            return {"code": 1, "msg": "not found"}
+
+        with patch("src.services.browser_captcha._adspower_request_json", side_effect=fake_request):
+            self.assertTrue(_stop_adspower_profile("kwrxc3b"))
+
+        self.assertEqual(
+            calls,
+            [
+                ("GET", "/api/v1/browser/stop", {"user_id": "kwrxc3b"}, None),
+                ("GET", "/api/v1/browser/stop", {"id": "kwrxc3b"}, None),
+            ],
+        )

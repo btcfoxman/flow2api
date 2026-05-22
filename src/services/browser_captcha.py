@@ -350,6 +350,39 @@ def _resolve_adspower_cdp_url(payload: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _stop_adspower_profile(profile_id: str) -> bool:
+    """Best-effort stop for an AdsPower profile after captcha rejection."""
+    normalized_profile_id = str(profile_id or "").strip()
+    if not normalized_profile_id:
+        return False
+
+    attempts = (
+        ("GET", "/api/v1/browser/stop", {"user_id": normalized_profile_id}, None),
+        ("GET", "/api/v1/browser/stop", {"id": normalized_profile_id}, None),
+        ("POST", "/api/v1/browser/stop", None, {"user_id": normalized_profile_id}),
+        ("POST", "/api/v1/browser/stop", None, {"id": normalized_profile_id}),
+        ("POST", "/api/v2/browser-profile/stop", None, {"profile_id": normalized_profile_id}),
+        ("POST", "/api/v2/browser-profile/stop", None, {"user_id": normalized_profile_id}),
+    )
+
+    last_message = ""
+    for method, path, params, body in attempts:
+        try:
+            payload = _adspower_request_json(method, path, params=params, body=body)
+        except Exception as exc:
+            last_message = f"{type(exc).__name__}: {str(exc)[:200]}"
+            continue
+        if _adspower_response_success(payload):
+            return True
+        last_message = _adspower_message(payload)
+
+    debug_logger.log_warning(
+        f"[BrowserCaptcha] AdsPower profile stop failed: profile_id={normalized_profile_id}, "
+        f"reason={last_message or 'unknown error'}"
+    )
+    return False
+
+
 # ==================== Docker 环境检测 ====================
 def _is_running_in_docker() -> bool:
     """检测是否在 Docker 容器中运行"""
@@ -1113,6 +1146,7 @@ class TokenBrowser:
 
     async def _recycle_browser_locked(self, reason: str = "unknown", rotate_profile: bool = True):
         """Recycle the shared browser instance and reset its state."""
+        adspower_profile_id = _adspower_profile_id_for_slot(self.token_id) if _is_adspower_enabled() else ""
         playwright = self._shared_playwright
         browser = self._shared_browser
         context = self._shared_context
@@ -1137,6 +1171,13 @@ class TokenBrowser:
                 f"[BrowserCaptcha] Token-{self.token_id} shared browser recycled, reason={reason}"
             )
         await self._close_browser(playwright, browser, context, browser_pid=browser_pid)
+        if adspower_profile_id and had_browser:
+            stop_ok = await asyncio.to_thread(_stop_adspower_profile, adspower_profile_id)
+            if stop_ok:
+                debug_logger.log_info(
+                    f"[BrowserCaptcha] Token-{self.token_id} AdsPower profile stopped after recycle "
+                    f"(profile_id={adspower_profile_id})"
+                )
 
     async def recycle_browser(self, reason: str = "unknown", rotate_profile: bool = True):
         """Recycle the current shared browser."""
@@ -1546,8 +1587,8 @@ class TokenBrowser:
 
             # 使用更简单的 API 地址，避免加载复杂页面
             page_url = "https://labs.google/fx/api/auth/providers"
-            primary_host = "https://www.recaptcha.net" if self._browser_proxy_active else "https://www.google.com"
-            secondary_host = "https://www.google.com" if primary_host == "https://www.recaptcha.net" else "https://www.recaptcha.net"
+            primary_host = "https://www.google.com"
+            secondary_host = "https://www.recaptcha.net"
             debug_logger.log_info(
                 f"[BrowserCaptcha] Token-{self.token_id} 加载 enterprise.js: primary={primary_host}, secondary={secondary_host}"
             )
@@ -1604,6 +1645,30 @@ class TokenBrowser:
                 return None
 
             # 记录本次打码页面的真实 UA/客户端提示头
+            try:
+                await page.wait_for_timeout(1200 + random.randint(0, 800))
+                await page.mouse.move(
+                    random.randint(120, 360),
+                    random.randint(80, 260),
+                    steps=random.randint(6, 12),
+                )
+                await page.mouse.wheel(0, random.randint(40, 120))
+                await page.evaluate(
+                    """() => {
+                        window.focus();
+                        window.dispatchEvent(new Event('focus'));
+                        document.dispatchEvent(new MouseEvent('mousemove', {
+                            bubbles: true,
+                            clientX: 180 + Math.floor(Math.random() * 120),
+                            clientY: 120 + Math.floor(Math.random() * 90)
+                        }));
+                        window.scrollTo(0, 1);
+                    }"""
+                )
+                await page.wait_for_timeout(random.randint(300, 900))
+            except Exception:
+                pass
+
             await self._capture_page_fingerprint(page)
 
             token = await asyncio.wait_for(

@@ -56,6 +56,14 @@ class FlowClient:
         # 发车策略改为“请求到就发”：
         # 不在 flow2api 本地对提交做批次整形或排队，避免把同批请求打成阶梯。
 
+    def _captcha_aware_max_retries(self) -> int:
+        """Browser-backed captcha modes need one recovery attempt after a rejected token."""
+        max_retries = config.flow_max_retries
+        captcha_method = str(getattr(config, "captcha_method", "") or "").strip().lower()
+        if captcha_method in {"browser", "personal", "remote_browser", "adspower"}:
+            return max(2, max_retries)
+        return max_retries
+
     def _generate_user_agent(self, account_id: str = None) -> str:
         """基于账号ID生成固定的 User-Agent
         
@@ -705,7 +713,7 @@ class FlowClient:
                 "toolName": "PINHOLE"
             }
         }
-        max_retries = config.flow_max_retries
+        max_retries = self._captcha_aware_max_retries()
         request_timeout = max(self._get_control_plane_timeout(), min(self.timeout, 15))
         last_error: Optional[Exception] = None
 
@@ -919,7 +927,7 @@ class FlowClient:
                 "tool": "ASSET_MANAGER"
             }
         }
-        max_retries = config.flow_max_retries
+        max_retries = self._captcha_aware_max_retries()
         last_error: Optional[Exception] = None
 
         captcha_method = getattr(config, "captcha_method", "adspower")
@@ -1045,7 +1053,7 @@ class FlowClient:
         url = f"{self.api_base_url}/projects/{project_id}/flowMedia:batchGenerateImages"
 
         # 403/reCAPTCHA 重试逻辑
-        max_retries = config.flow_max_retries
+        max_retries = self._captcha_aware_max_retries()
         last_error = None
         perf_trace: Dict[str, Any] = {
             "max_retries": max_retries,
@@ -1205,7 +1213,7 @@ class FlowClient:
         url = f"{self.api_base_url}/flow/upsampleImage"
 
         # 403/reCAPTCHA/500 重试逻辑 - 使用配置的最大重试次数
-        max_retries = config.flow_max_retries
+        max_retries = self._captcha_aware_max_retries()
         last_error = None
 
         for retry_attempt in range(max_retries):
@@ -1559,7 +1567,7 @@ class FlowClient:
         url = f"{self.api_base_url}/video:batchAsyncGenerateVideoText"
 
         # 403/reCAPTCHA 重试逻辑 - 使用配置的最大重试次数
-        max_retries = config.flow_max_retries
+        max_retries = self._captcha_aware_max_retries()
         last_error = None
         
         for retry_attempt in range(max_retries):
@@ -1681,7 +1689,7 @@ class FlowClient:
         url = f"{self.api_base_url}/video:batchAsyncGenerateVideoReferenceImages"
 
         # 403/reCAPTCHA 重试逻辑 - 使用配置的最大重试次数
-        max_retries = config.flow_max_retries
+        max_retries = self._captcha_aware_max_retries()
         last_error = None
         
         for retry_attempt in range(max_retries):
@@ -1812,7 +1820,7 @@ class FlowClient:
         url = f"{self.api_base_url}/video:batchAsyncGenerateVideoStartAndEndImage"
 
         # 403/reCAPTCHA 重试逻辑 - 使用配置的最大重试次数
-        max_retries = config.flow_max_retries
+        max_retries = self._captcha_aware_max_retries()
         last_error = None
         
         for retry_attempt in range(max_retries):
@@ -1940,7 +1948,7 @@ class FlowClient:
         url = f"{self.api_base_url}/video:batchAsyncGenerateVideoStartImage"
 
         # 403/reCAPTCHA 重试逻辑 - 使用配置的最大重试次数
-        max_retries = config.flow_max_retries
+        max_retries = self._captcha_aware_max_retries()
         last_error = None
         
         for retry_attempt in range(max_retries):
@@ -2343,7 +2351,7 @@ class FlowClient:
         url = f"{self.api_base_url}/video:batchAsyncGenerateVideoUpsampleVideo"
 
         # 403/reCAPTCHA 重试逻辑 - 使用配置的最大重试次数
-        max_retries = config.flow_max_retries
+        max_retries = self._captcha_aware_max_retries()
         last_error = None
         
         for retry_attempt in range(max_retries):
@@ -2455,7 +2463,7 @@ class FlowClient:
 
         media_refs = self._operations_to_media_refs(operations)
         json_data = {"media": media_refs} if media_refs else {"operations": operations}
-        max_retries = config.flow_max_retries
+        max_retries = self._captcha_aware_max_retries()
         last_error: Optional[Exception] = None
 
         for retry_attempt in range(max_retries):
