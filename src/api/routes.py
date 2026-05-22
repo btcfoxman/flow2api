@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..core.auth import AuthManager, verify_api_key_flexible
 from ..core.logger import debug_logger
-from ..core.model_resolver import get_base_model_aliases, resolve_model_name
+from ..core.model_resolver import extract_generation_params, get_base_model_aliases, resolve_model_name
 from ..core.models import (
     ChatCompletionRequest,
     ChatMessage,
@@ -80,6 +80,10 @@ class NormalizedGenerationRequest:
     images: List[bytes]
     messages: Optional[List[ChatMessage]] = None
     video_media_id: Optional[str] = None
+    video_bytes: Optional[bytes] = None
+    video_mime_type: Optional[str] = None
+    video_file_name: Optional[str] = None
+    aspect_ratio_override: Optional[str] = None
 
 
 def set_generation_handler(handler: GenerationHandler):
@@ -218,6 +222,54 @@ async def retrieve_image_data(url: str) -> Optional[bytes]:
     return None
 
 
+async def retrieve_video_data(url: str) -> Optional[bytes]:
+    """Read video bytes from local /tmp cache or remote URL."""
+    file_cache = getattr(generation_handler, "file_cache", None)
+    try:
+        if "/tmp/" in url and file_cache:
+            path = urlparse(url).path
+            filename = path.split("/tmp/")[-1]
+            local_file_path = file_cache.cache_dir / filename
+
+            if local_file_path.exists() and local_file_path.is_file():
+                data = local_file_path.read_bytes()
+                if data:
+                    return data
+    except Exception as exc:
+        debug_logger.log_warning(f"[CONTEXT] local video cache read failed: {str(exc)}")
+
+    proxy_url = None
+    try:
+        if file_cache and hasattr(file_cache, "_resolve_download_proxy"):
+            proxy_url = await file_cache._resolve_download_proxy("video")
+    except Exception as exc:
+        debug_logger.log_warning(f"[CONTEXT] video download proxy resolve failed: {str(exc)}")
+
+    try:
+        async with AsyncSession() as session:
+            response = await session.get(
+                url,
+                timeout=120,
+                proxies={"http": proxy_url, "https": proxy_url} if proxy_url else None,
+                headers={
+                    "Accept": "video/mp4,video/*,*/*;q=0.8",
+                    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                    "Accept-Encoding": "identity;q=1, *;q=0",
+                    "Connection": "keep-alive",
+                    "Referer": "https://labs.google/",
+                },
+                impersonate="chrome120",
+                verify=False,
+            )
+            if response.status_code == 200 and response.content:
+                return response.content
+            debug_logger.log_warning(f"[CONTEXT] video download failed, status={response.status_code}")
+    except Exception as exc:
+        debug_logger.log_error(f"[CONTEXT] video download exception: {str(exc)}")
+
+    return None
+
+
 async def _load_image_bytes_from_uri(uri: str) -> bytes:
     if not uri:
         raise HTTPException(status_code=400, detail="Image URI cannot be empty")
@@ -233,6 +285,51 @@ async def _load_image_bytes_from_uri(uri: str) -> bytes:
         raise HTTPException(status_code=400, detail=f"Failed to load image from {uri}")
 
     raise HTTPException(status_code=400, detail=f"Unsupported image URI: {uri}")
+
+
+async def _load_video_bytes_from_uri(uri: str) -> tuple[bytes, str, str]:
+    if not uri:
+        raise HTTPException(status_code=400, detail="Video URI cannot be empty")
+
+    if uri.startswith("data:"):
+        mime_type, video_bytes = _decode_data_url(uri)
+        if not (mime_type.startswith("video/") or mime_type == "application/octet-stream"):
+            raise HTTPException(status_code=400, detail=f"Unsupported video data URL mime type: {mime_type}")
+        extension = mimetypes.guess_extension(mime_type) or ".mp4"
+        return video_bytes, mime_type, f"upload{extension}"
+
+    if uri.startswith("http://") or uri.startswith("https://") or "/tmp/" in uri:
+        video_bytes = await retrieve_video_data(uri)
+        if video_bytes:
+            mime_type = _guess_mime_type(uri, "video/mp4")
+            file_name = urlparse(uri).path.rsplit("/", 1)[-1] or "upload.mp4"
+            return video_bytes, mime_type, file_name
+        raise HTTPException(status_code=400, detail=f"Failed to load video from {uri}")
+
+    raise HTTPException(status_code=400, detail=f"Unsupported video URI: {uri}")
+
+
+def _decode_video_payload(value: str) -> tuple[bytes, str, str]:
+    if not value:
+        raise HTTPException(status_code=400, detail="Video payload cannot be empty")
+
+    if value.startswith("data:"):
+        mime_type, video_bytes = _decode_data_url(value)
+        if not (mime_type.startswith("video/") or mime_type == "application/octet-stream"):
+            raise HTTPException(status_code=400, detail=f"Unsupported video mime type: {mime_type}")
+        extension = mimetypes.guess_extension(mime_type) or ".mp4"
+        return video_bytes, mime_type, f"upload{extension}"
+
+    return base64.b64decode(value), "video/mp4", "upload.mp4"
+
+
+def _video_aspect_override_from_request(request: Any) -> Optional[str]:
+    aspect_ratio, _ = extract_generation_params(request)
+    if aspect_ratio == "landscape":
+        return "VIDEO_ASPECT_RATIO_LANDSCAPE"
+    if aspect_ratio == "portrait":
+        return "VIDEO_ASPECT_RATIO_PORTRAIT"
+    return None
 
 
 def _coerce_gemini_contents(raw_contents: Optional[List[Any]]) -> List[GeminiContent]:
@@ -288,18 +385,16 @@ def _sanitize_media_prompt(prompt: str) -> str:
 
 async def _extract_prompt_and_images_from_openai_messages(
     messages: List[ChatMessage],
-) -> tuple[str, List[bytes], Optional[str]]:
-    """Extract prompt, images, and optional video_media_id from messages.
-
-    Returns:
-        (prompt, images, video_media_id)
-        video_media_id is set when an image_url starts with "extend://"
-    """
+) -> tuple[str, List[bytes], Optional[str], Optional[bytes], Optional[str], Optional[str]]:
+    """Extract prompt and media from OpenAI-compatible messages."""
     last_message = messages[-1]
     content = last_message.content
     prompt_parts: List[str] = []
     images: List[bytes] = []
     video_media_id: Optional[str] = None
+    video_bytes: Optional[bytes] = None
+    video_mime_type: Optional[str] = None
+    video_file_name: Optional[str] = None
 
     if isinstance(content, str):
         prompt_parts.append(content)
@@ -317,9 +412,15 @@ async def _extract_prompt_and_images_from_openai_messages(
                     video_media_id = image_url[len("extend://"):]
                 else:
                     images.append(await _load_image_bytes_from_uri(image_url))
+            elif item_type == "video_url":
+                video_url = item.get("video_url", {}).get("url", "")
+                if video_url.startswith("extend://"):
+                    video_media_id = video_url[len("extend://"):]
+                else:
+                    video_bytes, video_mime_type, video_file_name = await _load_video_bytes_from_uri(video_url)
 
     prompt = "\n".join(part for part in prompt_parts if part).strip()
-    return prompt, images, video_media_id
+    return prompt, images, video_media_id, video_bytes, video_mime_type, video_file_name
 
 
 async def _append_openai_reference_images(
@@ -362,7 +463,7 @@ async def _append_openai_reference_images(
 
 async def _extract_prompt_and_images_from_gemini_contents(
     contents: List[GeminiContent],
-) -> tuple[str, List[bytes]]:
+) -> tuple[str, List[bytes], Optional[bytes], Optional[str], Optional[str]]:
     if not contents:
         raise HTTPException(status_code=400, detail="contents cannot be empty")
 
@@ -373,6 +474,9 @@ async def _extract_prompt_and_images_from_gemini_contents(
 
     prompt_parts: List[str] = []
     images: List[bytes] = []
+    video_bytes: Optional[bytes] = None
+    video_mime_type: Optional[str] = None
+    video_file_name: Optional[str] = None
 
     for part in target_content.parts:
         if part.text:
@@ -381,23 +485,34 @@ async def _extract_prompt_and_images_from_gemini_contents(
                 prompt_parts.append(text)
         elif part.inlineData is not None:
             mime_type = part.inlineData.mimeType.lower()
-            if not mime_type.startswith("image/"):
+            if mime_type.startswith("image/"):
+                images.append(base64.b64decode(part.inlineData.data))
+            elif mime_type.startswith("video/") or mime_type == "application/octet-stream":
+                video_bytes = base64.b64decode(part.inlineData.data)
+                video_mime_type = part.inlineData.mimeType
+                extension = mimetypes.guess_extension(video_mime_type) or ".mp4"
+                video_file_name = f"upload{extension}"
+            else:
                 raise HTTPException(
                     status_code=400,
                     detail=f"Unsupported inlineData mime type: {part.inlineData.mimeType}",
                 )
-            images.append(base64.b64decode(part.inlineData.data))
         elif part.fileData is not None:
             mime_type = (part.fileData.mimeType or "").lower()
-            if mime_type and not mime_type.startswith("image/"):
+            if not mime_type:
+                mime_type = _guess_mime_type(part.fileData.fileUri, "").lower()
+            if mime_type.startswith("video/") or mime_type == "application/octet-stream":
+                video_bytes, video_mime_type, video_file_name = await _load_video_bytes_from_uri(part.fileData.fileUri)
+            elif not mime_type or mime_type.startswith("image/"):
+                images.append(await _load_image_bytes_from_uri(part.fileData.fileUri))
+            else:
                 raise HTTPException(
                     status_code=400,
                     detail=f"Unsupported fileData mime type: {part.fileData.mimeType}",
                 )
-            images.append(await _load_image_bytes_from_uri(part.fileData.fileUri))
 
     prompt = "\n".join(part for part in prompt_parts if part).strip()
-    return prompt, images
+    return prompt, images, video_bytes, video_mime_type, video_file_name
 
 
 def _resolve_request_model(model: str, request: Any) -> str:
@@ -424,11 +539,20 @@ async def _normalize_openai_request(
     request: ChatCompletionRequest,
 ) -> NormalizedGenerationRequest:
     if request.messages:
-        prompt, images, video_media_id = await _extract_prompt_and_images_from_openai_messages(
+        (
+            prompt,
+            images,
+            video_media_id,
+            video_bytes,
+            video_mime_type,
+            video_file_name,
+        ) = await _extract_prompt_and_images_from_openai_messages(
             request.messages
         )
         if request.image and not images:
             images.append(await _load_image_bytes_from_uri(request.image))
+        if request.video and not video_media_id and video_bytes is None:
+            video_bytes, video_mime_type, video_file_name = _decode_video_payload(request.video)
         model = _resolve_request_model(request.model, request)
         images = await _append_openai_reference_images(model, request.messages, images)
         return NormalizedGenerationRequest(
@@ -437,6 +561,10 @@ async def _normalize_openai_request(
             images=images,
             messages=request.messages,
             video_media_id=video_media_id,
+            video_bytes=video_bytes,
+            video_mime_type=video_mime_type,
+            video_file_name=video_file_name,
+            aspect_ratio_override=_video_aspect_override_from_request(request),
         )
 
     if request.contents:
@@ -446,6 +574,12 @@ async def _normalize_openai_request(
         )
         normalized = await _normalize_gemini_request(request.model, gemini_request)
         normalized.messages = request.messages
+        if request.video and not normalized.video_media_id and normalized.video_bytes is None:
+            (
+                normalized.video_bytes,
+                normalized.video_mime_type,
+                normalized.video_file_name,
+            ) = _decode_video_payload(request.video)
         return normalized
 
     raise HTTPException(status_code=400, detail="Messages or contents cannot be empty")
@@ -456,7 +590,7 @@ async def _normalize_gemini_request(
     request: GeminiGenerateContentRequest,
 ) -> NormalizedGenerationRequest:
     resolved_model = _resolve_request_model(model, request)
-    prompt, images = await _extract_prompt_and_images_from_gemini_contents(request.contents)
+    prompt, images, video_bytes, video_mime_type, video_file_name = await _extract_prompt_and_images_from_gemini_contents(request.contents)
     system_instruction = _extract_text_from_gemini_content(request.systemInstruction)
     model_config = MODEL_CONFIG.get(resolved_model)
     media_model = bool(model_config and model_config.get("type") in {"image", "video"})
@@ -478,6 +612,10 @@ async def _normalize_gemini_request(
         model=resolved_model,
         prompt=prompt,
         images=images,
+        video_bytes=video_bytes,
+        video_mime_type=video_mime_type,
+        video_file_name=video_file_name,
+        aspect_ratio_override=_video_aspect_override_from_request(request),
     )
 
 
@@ -487,6 +625,10 @@ async def _collect_non_stream_result(
     images: List[bytes],
     base_url_override: Optional[str] = None,
     video_media_id: Optional[str] = None,
+    video_bytes: Optional[bytes] = None,
+    video_mime_type: Optional[str] = None,
+    video_file_name: Optional[str] = None,
+    aspect_ratio_override: Optional[str] = None,
 ) -> str:
     handler = _ensure_generation_handler()
     result = None
@@ -497,6 +639,10 @@ async def _collect_non_stream_result(
         stream=False,
         base_url_override=base_url_override,
         video_media_id=video_media_id,
+        video_bytes=video_bytes,
+        video_mime_type=video_mime_type,
+        video_file_name=video_file_name,
+        aspect_ratio_override=aspect_ratio_override,
     ):
         result = chunk
 
@@ -726,6 +872,10 @@ async def _iterate_openai_stream(
         stream=True,
         base_url_override=base_url_override,
         video_media_id=normalized.video_media_id,
+        video_bytes=normalized.video_bytes,
+        video_mime_type=normalized.video_mime_type,
+        video_file_name=normalized.video_file_name,
+        aspect_ratio_override=normalized.aspect_ratio_override,
     ):
         if chunk.startswith("data: "):
             yield chunk
@@ -750,6 +900,10 @@ async def _iterate_gemini_stream(
         stream=True,
         base_url_override=base_url_override,
         video_media_id=normalized.video_media_id,
+        video_bytes=normalized.video_bytes,
+        video_mime_type=normalized.video_mime_type,
+        video_file_name=normalized.video_file_name,
+        aspect_ratio_override=normalized.aspect_ratio_override,
     ):
         if chunk.startswith("data: "):
             payload_text = chunk[6:].strip()
@@ -879,6 +1033,10 @@ async def create_chat_completion(
                 normalized.images,
                 base_url_override=request_base_url,
                 video_media_id=normalized.video_media_id,
+                video_bytes=normalized.video_bytes,
+                video_mime_type=normalized.video_mime_type,
+                video_file_name=normalized.video_file_name,
+                aspect_ratio_override=normalized.aspect_ratio_override,
             )
         )
         return _build_openai_json_response(payload)
@@ -913,6 +1071,10 @@ async def generate_content(
                     normalized.images,
                     base_url_override=request_base_url,
                     video_media_id=normalized.video_media_id,
+                    video_bytes=normalized.video_bytes,
+                    video_mime_type=normalized.video_mime_type,
+                    video_file_name=normalized.video_file_name,
+                    aspect_ratio_override=normalized.aspect_ratio_override,
                 )
             )
         )

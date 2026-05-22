@@ -512,6 +512,10 @@ def _extract_generation_params(request) -> Tuple[Optional[str], Optional[str]]:
     return aspect_ratio, image_size
 
 
+def extract_generation_params(request) -> Tuple[Optional[str], Optional[str]]:
+    return _extract_generation_params(request)
+
+
 def resolve_model_name(
     model: str, request=None, model_config: Dict[str, Any] = None
 ) -> str:

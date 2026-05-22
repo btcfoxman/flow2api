@@ -1020,6 +1020,138 @@ class FlowClient:
             raise last_error
         raise RuntimeError("上传图片失败")
 
+    # ========== Labs media helpers ==========
+
+    def _build_labs_browser_headers(self, st: Optional[str], project_id: Optional[str] = None) -> Dict[str, str]:
+        fingerprint = self._request_fingerprint_ctx.get()
+        account_id = str(st or "")[:16] or None
+        normalized_project_id = str(project_id or "").strip()
+        referer = "https://labs.google/"
+        if normalized_project_id:
+            referer = f"https://labs.google/fx/zh/tools/flow/project/{quote(normalized_project_id, safe='')}"
+
+        headers = {
+            "Referer": referer,
+            "User-Agent": self._generate_user_agent(account_id),
+        }
+        cookie_header = self._build_labs_cookie_header(st)
+        if cookie_header:
+            headers["Cookie"] = cookie_header
+
+        if isinstance(fingerprint, dict):
+            if fingerprint.get("user_agent"):
+                headers["User-Agent"] = str(fingerprint["user_agent"])
+            if fingerprint.get("accept_language"):
+                headers["Accept-Language"] = str(fingerprint["accept_language"])
+            if fingerprint.get("sec_ch_ua"):
+                headers["sec-ch-ua"] = str(fingerprint["sec_ch_ua"])
+            if fingerprint.get("sec_ch_ua_mobile"):
+                headers["sec-ch-ua-mobile"] = str(fingerprint["sec_ch_ua_mobile"])
+            if fingerprint.get("sec_ch_ua_platform"):
+                headers["sec-ch-ua-platform"] = str(fingerprint["sec_ch_ua_platform"])
+
+        return headers
+
+    async def _resolve_request_proxy(self) -> Optional[str]:
+        fingerprint = self._request_fingerprint_ctx.get()
+        proxy_url = None
+        if self.proxy_manager:
+            if isinstance(fingerprint, dict) and "proxy_url" in fingerprint:
+                proxy_url = fingerprint.get("proxy_url")
+                if proxy_url == "":
+                    proxy_url = None
+            elif hasattr(self.proxy_manager, "get_request_proxy_url"):
+                proxy_url = await self.proxy_manager.get_request_proxy_url()
+            else:
+                proxy_url = await self.proxy_manager.get_proxy_url()
+        return proxy_url
+
+    async def upload_video(
+        self,
+        st: str,
+        project_id: str,
+        video_bytes: bytes,
+        mime_type: str = "video/mp4",
+        file_name: str = "upload.mp4",
+    ) -> str:
+        normalized_project_id = str(project_id or "").strip()
+        if not normalized_project_id:
+            raise RuntimeError("project_id is required for video upload")
+        if not video_bytes:
+            raise RuntimeError("video_bytes is required for video upload")
+
+        proxy_url = await self._resolve_request_proxy()
+        base_headers = self._build_labs_browser_headers(st, normalized_project_id)
+        timeout = max(self._get_video_submit_timeout(), 120)
+        start_url = f"{self.labs_base_url}/upload-video?action=start"
+        start_headers = {
+            **base_headers,
+            "x-upload-content-length": str(len(video_bytes)),
+            "x-upload-content-type": mime_type,
+            "x-upload-file-name": file_name,
+            "x-upload-project-id": normalized_project_id,
+        }
+
+        try:
+            async with AsyncSession(trust_env=False) as session:
+                start_response = await session.post(
+                    start_url,
+                    headers=start_headers,
+                    proxy=proxy_url,
+                    timeout=timeout,
+                    impersonate="chrome124",
+                )
+                if config.debug_enabled:
+                    debug_logger.log_response(
+                        status_code=start_response.status_code,
+                        headers=dict(start_response.headers),
+                        body=start_response.text,
+                        duration_ms=0,
+                    )
+                if start_response.status_code >= 400:
+                    raise RuntimeError(f"upload-video start failed: HTTP {start_response.status_code}: {start_response.text[:300]}")
+                start_payload = start_response.json()
+                session_url = start_payload.get("sessionUrl")
+                if not isinstance(session_url, str) or not session_url.strip():
+                    raise RuntimeError(f"upload-video start response missing sessionUrl: {start_payload}")
+
+                upload_url = f"{self.labs_base_url}/upload-video?action=upload"
+                chunk_size = 2 * 1024 * 1024
+                offset = 0
+                final_payload: Dict[str, Any] = {}
+                while offset < len(video_bytes):
+                    chunk = video_bytes[offset:offset + chunk_size]
+                    is_final = offset + len(chunk) >= len(video_bytes)
+                    upload_headers = {
+                        **base_headers,
+                        "Content-Type": "application/octet-stream",
+                        "x-upload-command": "upload, finalize" if is_final else "upload",
+                        "x-upload-offset": str(offset),
+                        "x-upload-session-url": session_url,
+                        "x-upload-file-name": file_name,
+                        "x-upload-project-id": normalized_project_id,
+                    }
+                    upload_response = await session.put(
+                        upload_url,
+                        headers=upload_headers,
+                        data=chunk,
+                        proxy=proxy_url,
+                        timeout=timeout,
+                        impersonate="chrome124",
+                    )
+                    if upload_response.status_code >= 400:
+                        raise RuntimeError(f"upload-video chunk failed: HTTP {upload_response.status_code}: {upload_response.text[:300]}")
+                    if upload_response.text:
+                        final_payload = upload_response.json()
+                    offset += len(chunk)
+        except Exception as e:
+            raise RuntimeError(f"upload-video request failed: {e}") from e
+
+        media_id = final_payload.get("mediaServerId")
+        if not isinstance(media_id, str) or not media_id.strip():
+            raise RuntimeError(f"upload-video final response missing mediaServerId: {final_payload}")
+        return media_id.strip()
+
     # ========== 图片生成 (使用AT) - 同步返回 ==========
 
     async def generate_image(
@@ -1729,7 +1861,7 @@ class FlowClient:
             batch_id = str(uuid.uuid4())
             scene_id = str(uuid.uuid4())
             request_metadata = {}
-            if not suppress_scene_id_metadata and str(model_key or "") != "abra_r2v_10s":
+            if not suppress_scene_id_metadata:
                 request_metadata["sceneId"] = scene_id
 
             json_data = {
@@ -1786,6 +1918,117 @@ class FlowClient:
                 await self._notify_browser_captcha_request_finished(browser_id)
         
         # 所有重试都失败
+        raise last_error
+
+    async def generate_video_edit_video(
+        self,
+        at: str,
+        project_id: str,
+        prompt: str,
+        model_key: str,
+        aspect_ratio: str,
+        video_media_id: str,
+        reference_images: List[Dict],
+        user_paygate_tier: str = "PAYGATE_TIER_ONE",
+        token_id: Optional[int] = None,
+        token_video_concurrency: Optional[int] = None,
+    ) -> dict:
+        url = f"{self.api_base_url}/video:batchAsyncGenerateVideoEditVideo"
+        max_retries = self._captcha_aware_max_retries()
+        last_error = None
+
+        for retry_attempt in range(max_retries):
+            launch_gate_acquired = False
+            launch_ok, _, _ = await self._acquire_video_launch_gate(
+                token_id=token_id,
+                token_video_concurrency=token_video_concurrency,
+            )
+            if not launch_ok:
+                last_error = Exception("Video launch queue wait timeout")
+                raise last_error
+
+            launch_gate_acquired = True
+            try:
+                recaptcha_token, browser_id = await self._get_recaptcha_token(
+                    project_id,
+                    action="VIDEO_GENERATION",
+                    token_id=token_id
+                )
+            finally:
+                if launch_gate_acquired:
+                    await self._release_video_launch_gate(token_id)
+            if not recaptcha_token:
+                last_error = Exception("Failed to obtain reCAPTCHA token")
+                should_retry = await self._handle_missing_recaptcha_token(
+                    retry_attempt=retry_attempt,
+                    max_retries=max_retries,
+                    browser_id=browser_id,
+                    project_id=project_id,
+                    log_prefix="[VIDEO EDIT] generation",
+                )
+                if should_retry:
+                    continue
+                raise last_error
+
+            session_id = self._generate_session_id()
+            batch_id = str(uuid.uuid4())
+            json_data = {
+                "mediaGenerationContext": self._build_video_media_generation_context(batch_id),
+                "clientContext": {
+                    "recaptchaContext": {
+                        "token": recaptcha_token,
+                        "applicationType": "RECAPTCHA_APPLICATION_TYPE_WEB"
+                    },
+                    "sessionId": session_id,
+                    "projectId": project_id,
+                    "tool": "PINHOLE",
+                    "userPaygateTier": user_paygate_tier
+                },
+                "requests": [{
+                    "aspectRatio": aspect_ratio,
+                    "seed": random.randint(1, 99999),
+                    "textInput": {
+                        "structuredPrompt": {
+                            "parts": [{
+                                "text": prompt
+                            }]
+                        }
+                    },
+                    "videoModelKey": model_key,
+                    "metadata": {},
+                    "videoInput": {
+                        "mediaId": video_media_id,
+                        "startFrameIndex": 0,
+                        "endFrameIndex": 240
+                    },
+                    "referenceImages": reference_images
+                }]
+            }
+
+            try:
+                result = await self._make_video_api_request(
+                    url=url,
+                    json_data=json_data,
+                    at=at,
+                    timeout=self._get_video_submit_timeout()
+                )
+                return self._normalize_video_generation_response(result, fallback_project_id=project_id)
+            except Exception as e:
+                last_error = e
+                should_retry = await self._handle_retryable_generation_error(
+                    error=e,
+                    retry_attempt=retry_attempt,
+                    max_retries=max_retries,
+                    browser_id=browser_id,
+                    project_id=project_id,
+                    log_prefix="[VIDEO EDIT] generation",
+                )
+                if should_retry:
+                    continue
+                raise
+            finally:
+                await self._notify_browser_captcha_request_finished(browser_id)
+
         raise last_error
 
     async def generate_video_start_end(

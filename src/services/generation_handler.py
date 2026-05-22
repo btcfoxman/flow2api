@@ -727,6 +727,35 @@ def _make_i2v_config(
     return cfg
 
 
+def _make_abra_r2v_config(model_key: str) -> Dict[str, Any]:
+    return {
+        "type": "video",
+        "video_type": "r2v",
+        "model_key": model_key,
+        "aspect_ratio": "VIDEO_ASPECT_RATIO_LANDSCAPE",
+        "supports_images": True,
+        "min_images": 1,
+        "max_images": 7,
+        "use_v2_model_config": True,
+        "suppress_scene_id_metadata": True,
+        "allow_aspect_ratio_override": True,
+    }
+
+
+def _make_abra_edit_config() -> Dict[str, Any]:
+    return {
+        "type": "video",
+        "video_type": "v2v",
+        "model_key": "abra_edit",
+        "aspect_ratio": "VIDEO_ASPECT_RATIO_LANDSCAPE",
+        "supports_images": True,
+        "min_images": 1,
+        "max_images": 5,
+        "requires_video_input": True,
+        "allow_aspect_ratio_override": True,
+    }
+
+
 def _apply_veo_3_1_model_updates():
     """Keep the public aliases aligned with the current Veo 3.1 model families."""
     landscape = "VIDEO_ASPECT_RATIO_LANDSCAPE"
@@ -896,17 +925,10 @@ def _apply_veo_3_1_model_updates():
     add_alias("veo_3_1_r2v_fast_landscape_ultra_4k", "veo_3_1_r2v_fast_ultra_4k")
     add_alias("veo_3_1_r2v_fast_landscape_ultra_1080p", "veo_3_1_r2v_fast_ultra_1080p")
 
-    MODEL_CONFIG["abra_r2v_10s"] = {
-        "type": "video",
-        "video_type": "r2v",
-        "model_key": "abra_r2v_10s",
-        "aspect_ratio": "VIDEO_ASPECT_RATIO_PORTRAIT",
-        "supports_images": True,
-        "min_images": 0,
-        "max_images": 3,
-        "use_v2_model_config": True,
-        "suppress_scene_id_metadata": True,
-    }
+    for seconds in (4, 6, 8, 10):
+        MODEL_CONFIG[f"abra_r2v_{seconds}s"] = _make_abra_r2v_config(f"abra_r2v_{seconds}s")
+
+    MODEL_CONFIG["abra_edit"] = _make_abra_edit_config()
 
 
 _apply_veo_3_1_model_updates()
@@ -1043,6 +1065,10 @@ class GenerationHandler:
         stream: bool = False,
         base_url_override: Optional[str] = None,
         video_media_id: Optional[str] = None,
+        video_bytes: Optional[bytes] = None,
+        video_mime_type: Optional[str] = None,
+        video_file_name: Optional[str] = None,
+        aspect_ratio_override: Optional[str] = None,
     ) -> AsyncGenerator:
         """统一生成入口
 
@@ -1088,6 +1114,7 @@ class GenerationHandler:
             "model": model,
             "prompt": prompt_for_log,
             "has_images": images is not None and len(images) > 0,
+            "has_video": bool(video_media_id or video_bytes),
         }
         debug_logger.log_info(f"[GENERATION] 开始生成 - 模型: {model}, 类型: {generation_type}, Prompt: {prompt[:50]}...")
 
@@ -1246,6 +1273,10 @@ class GenerationHandler:
                     request_log_state=request_log_state,
                     pending_token_state=pending_token_state,
                     video_media_id=video_media_id,
+                    video_bytes=video_bytes,
+                    video_mime_type=video_mime_type,
+                    video_file_name=video_file_name,
+                    aspect_ratio_override=aspect_ratio_override,
                 ):
                     yield chunk
             perf_trace["generation_pipeline_ms"] = int((time.time() - generation_pipeline_started_at) * 1000)
@@ -1697,6 +1728,10 @@ class GenerationHandler:
         request_log_state: Optional[Dict[str, Any]] = None,
         pending_token_state: Optional[Dict[str, bool]] = None,
         video_media_id: Optional[str] = None,
+        video_bytes: Optional[bytes] = None,
+        video_mime_type: Optional[str] = None,
+        video_file_name: Optional[str] = None,
+        aspect_ratio_override: Optional[str] = None,
     ) -> AsyncGenerator:
         """处理视频生成 (异步轮询)"""
 
@@ -1707,6 +1742,7 @@ class GenerationHandler:
         if isinstance(perf_trace, dict):
             video_trace = perf_trace.setdefault("video_generation", {})
             video_trace["input_image_count"] = len(images) if images else 0
+            video_trace["input_video_present"] = bool(video_media_id or video_bytes)
 
         # 不在本地等待视频硬并发槽位；请求一到就直接向上游提交。
         normalized_tier = normalize_user_paygate_tier(token.user_paygate_tier)
@@ -1739,9 +1775,15 @@ class GenerationHandler:
             # 更新 model_config 中的 model_key
             model_config = dict(model_config)  # 创建副本避免修改原配置
             model_config["model_key"] = model_key
+            if model_config.get("allow_aspect_ratio_override") and aspect_ratio_override in {
+                "VIDEO_ASPECT_RATIO_LANDSCAPE",
+                "VIDEO_ASPECT_RATIO_PORTRAIT",
+            }:
+                model_config["aspect_ratio"] = aspect_ratio_override
 
             # 图片数量
             image_count = len(images) if images else 0
+            has_video_input = bool(video_media_id or video_bytes)
 
             # ========== 验证和处理图片 ==========
 
@@ -1766,8 +1808,25 @@ class GenerationHandler:
 
             # R2V: 多图生成 - 当前上游协议最多 3 张参考图
             elif video_type == "r2v":
-                if max_images is not None and image_count > max_images:
-                    error_msg = f"❌ 多图视频模型最多支持 {max_images} 张参考图,当前提供了 {image_count} 张"
+                if image_count < min_images or (max_images is not None and image_count > max_images):
+                    error_msg = f"❌ 多图视频模型需要 {min_images}-{max_images} 张参考图,当前提供了 {image_count} 张"
+                    if stream:
+                        yield self._create_stream_chunk(f"{error_msg}\n")
+                    self._mark_generation_failed(generation_result, error_msg)
+                    yield self._create_error_response(error_msg, status_code=400)
+                    return
+
+            # V2V: reference images plus one reference video
+            elif video_type == "v2v":
+                if not has_video_input:
+                    error_msg = "❌ 视频编辑模型需要提供参考视频"
+                    if stream:
+                        yield self._create_stream_chunk(f"{error_msg}\n")
+                    self._mark_generation_failed(generation_result, error_msg)
+                    yield self._create_error_response(error_msg, status_code=400)
+                    return
+                if image_count < min_images or (max_images is not None and image_count > max_images):
+                    error_msg = f"❌ 视频编辑模型需要 {min_images}-{max_images} 张参考图,当前提供了 {image_count} 张"
                     if stream:
                         yield self._create_stream_chunk(f"{error_msg}\n")
                     self._mark_generation_failed(generation_result, error_msg)
@@ -1818,8 +1877,35 @@ class GenerationHandler:
                 debug_logger.log_info(f"[R2V] 上传了 {len(reference_images)} 张参考图片")
 
             # ========== 调用生成API ==========
-            if stream:
+            if stream and video_type != "v2v":
                 yield self._create_stream_chunk("提交视频生成任务...\n")
+            if video_type == "v2v":
+                if stream:
+                    yield self._create_stream_chunk(f"上传 {image_count} 张参考图片...\n")
+
+                for img in images or []:
+                    media_id = await self.flow_client.upload_image(
+                        token.at, img, model_config["aspect_ratio"], project_id=project_id
+                    )
+                    reference_images.append({
+                        "imageUsageType": "IMAGE_USAGE_TYPE_ASSET",
+                        "mediaId": media_id
+                    })
+
+                if not video_media_id and video_bytes:
+                    if stream:
+                        yield self._create_stream_chunk("上传参考视频...\n")
+                    video_media_id = await self.flow_client.upload_video(
+                        st=token.st,
+                        project_id=project_id,
+                        video_bytes=video_bytes,
+                        mime_type=video_mime_type or "video/mp4",
+                        file_name=video_file_name or "upload.mp4",
+                    )
+                debug_logger.log_info(f"[V2V] Uploaded {len(reference_images)} reference images, video={str(video_media_id or '')[:12]}...")
+                if stream:
+                    yield self._create_stream_chunk("提交视频生成任务...\n")
+
             submit_started_at = time.time()
 
             # I2V: 首尾帧生成
@@ -1873,6 +1959,21 @@ class GenerationHandler:
                     token_id=token.id,
                     token_video_concurrency=token.video_concurrency,
                     suppress_scene_id_metadata=bool(model_config.get("suppress_scene_id_metadata", False)),
+                )
+
+            # V2V: 参考图 + 视频生成
+            elif video_type == "v2v" and reference_images and video_media_id:
+                result = await self.flow_client.generate_video_edit_video(
+                    at=token.at,
+                    project_id=project_id,
+                    prompt=prompt,
+                    model_key=model_config["model_key"],
+                    aspect_ratio=model_config["aspect_ratio"],
+                    video_media_id=video_media_id,
+                    reference_images=reference_images,
+                    user_paygate_tier=normalized_tier,
+                    token_id=token.id,
+                    token_video_concurrency=token.video_concurrency,
                 )
 
             # Extend: 视频续写

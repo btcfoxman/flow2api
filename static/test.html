@@ -63,7 +63,12 @@ h1 { text-align: center; margin-bottom: 8px; font-size: 24px; color: #7c8aff; }
   padding: 10px 12px; border-radius: 8px; font-size: 14px; resize: vertical; min-height: 80px;
   font-family: inherit;
 }
+.form-group select {
+  width: 100%; background: #0f1117; border: 1px solid #2a2b3a; color: #e1e1e6;
+  padding: 9px 12px; border-radius: 8px; font-size: 14px; font-family: inherit;
+}
 .form-group textarea:focus { outline: none; border-color: #7c8aff; }
+.form-group select:focus { outline: none; border-color: #7c8aff; }
 
 .image-upload-area {
   border: 2px dashed #2a2b3a; border-radius: 8px; padding: 20px; text-align: center;
@@ -81,6 +86,16 @@ h1 { text-align: center; margin-bottom: 8px; font-size: 24px; color: #7c8aff; }
   position: absolute; top: 2px; right: 2px; width: 20px; height: 20px;
   background: rgba(0,0,0,0.7); color: #fff; border: none; border-radius: 50%;
   cursor: pointer; font-size: 12px; display: flex; align-items: center; justify-content: center;
+}
+.video-preview {
+  display: flex; align-items: center; gap: 10px; padding: 10px;
+  background: #0f1117; border: 1px solid #2a2b3a; border-radius: 8px;
+}
+.video-preview video { width: 160px; max-width: 45%; border-radius: 6px; background: #000; }
+.video-preview .video-name { flex: 1; min-width: 0; color: #aaa; font-size: 12px; word-break: break-all; }
+.video-preview .remove-btn {
+  width: 24px; height: 24px; background: rgba(0,0,0,0.7); color: #fff;
+  border: none; border-radius: 50%; cursor: pointer; font-size: 14px;
 }
 
 .btn-generate {
@@ -146,6 +161,14 @@ h1 { text-align: center; margin-bottom: 8px; font-size: 24px; color: #7c8aff; }
           <textarea id="promptInput" placeholder="描述你想生成的内容...">一只可爱的橘猫趴在窗台上晒太阳，窗外是樱花盛开的春天</textarea>
         </div>
 
+        <div class="form-group" id="aspectRatioGroup" style="display:none;">
+          <label>画幅比</label>
+          <select id="aspectRatioSelect">
+            <option value="16:9">横屏 16:9</option>
+            <option value="9:16">竖屏 9:16</option>
+          </select>
+        </div>
+
         <div class="form-group" id="imageUploadGroup" style="display:none;">
           <label>上传图片 <span id="imageLimit" style="color:#666;font-size:12px;"></span></label>
           <div class="image-upload-area" id="imageUploadArea">
@@ -153,6 +176,15 @@ h1 { text-align: center; margin-bottom: 8px; font-size: 24px; color: #7c8aff; }
             <div class="image-preview-list" id="imagePreviewList"></div>
           </div>
           <input type="file" id="imageFileInput" accept="image/*" multiple style="display:none;">
+        </div>
+
+        <div class="form-group" id="videoUploadGroup" style="display:none;">
+          <label>上传参考视频 <span style="color:#666;font-size:12px;">(abra_edit)</span></label>
+          <div class="image-upload-area" id="videoUploadArea">
+            <div class="image-upload-hint" id="videoHint">点击或拖拽上传 MP4 视频</div>
+            <div id="videoPreview"></div>
+          </div>
+          <input type="file" id="videoFileInput" accept="video/mp4,video/*" style="display:none;">
         </div>
 
         <button class="btn-generate" id="btnGenerate" disabled>选择模型后开始生成</button>
@@ -168,7 +200,7 @@ h1 { text-align: center; margin-bottom: 8px; font-size: 24px; color: #7c8aff; }
 </div>
 
 <script>
-const STATE = { selectedModel: null, modelConfig: null, images: [], generating: false };
+const STATE = { selectedModel: null, modelConfig: null, images: [], video: null, generating: false };
 </script>
 <script>
 // Model categories for sidebar
@@ -178,7 +210,8 @@ const MODEL_CATEGORIES = {
   "Imagen 4.0 图片": { filter: m => m.startsWith("imagen-4.0") },
   "Veo 3.1 文生视频 (T2V)": { filter: m => m.startsWith("veo_3_1_t2v") && !m.includes("4k") && !m.includes("1080p") },
   "Veo 3.1 图生视频 (I2V)": { filter: m => m.startsWith("veo_3_1_i2v") && !m.includes("4k") && !m.includes("1080p") },
-  "Veo 3.1 多图视频 (R2V)": { filter: m => (m.startsWith("veo_3_1_r2v") || m === "abra_r2v_10s") && !m.includes("4k") && !m.includes("1080p") },
+  "Veo 3.1 多图视频 (R2V)": { filter: m => m.startsWith("veo_3_1_r2v") && !m.includes("4k") && !m.includes("1080p") },
+  "Labs Abra 参考媒体": { filter: m => m.startsWith("abra_r2v_") || m === "abra_edit" },
   "视频放大 (Upsample)": { filter: m => m.includes("4k") || m.includes("1080p") },
 };
 
@@ -235,7 +268,11 @@ const FALLBACK_MODELS = {
   "veo_3_1_i2v_s_6s_1080p": "Video upsample alias - generate 6s then upscale to 1080P",
   "veo_3_1_i2v_s_landscape_6s_1080p": "Video upsample alias - generate 6s landscape then upscale to 1080P",
   "veo_3_1_r2v_fast": "Video generation (alias) - supports landscape/portrait via generationConfig",
-  "abra_r2v_10s": "Video generation - observed Labs R2V modelKey, portrait reference images",
+  "abra_r2v_4s": "Video generation - Labs R2V modelKey, 1-7 reference images",
+  "abra_r2v_6s": "Video generation - Labs R2V modelKey, 1-7 reference images",
+  "abra_r2v_8s": "Video generation - Labs R2V modelKey, 1-7 reference images",
+  "abra_r2v_10s": "Video generation - Labs R2V modelKey, 1-7 reference images",
+  "abra_edit": "Video generation - Labs edit model, reference images plus one video",
   "veo_3_1_r2v_fast_landscape": "Video generation - R2V fast landscape",
   "veo_3_1_r2v_fast_ultra": "Video generation (alias) - supports landscape/portrait via generationConfig",
   "veo_3_1_r2v_fast_landscape_ultra": "Video generation - R2V fast ultra landscape",
@@ -293,15 +330,19 @@ function getModelType(modelId) {
 
 function getModelMeta(modelId) {
   // Determine supports_images, min/max from model name patterns
+  const isAbraEdit = modelId === "abra_edit";
+  const isAbraR2V = modelId.startsWith("abra_r2v_");
   const isI2V = modelId.includes("i2v");
   const isR2V = modelId.includes("r2v");
   const isT2V = modelId.includes("t2v");
   const isImage = getModelType(modelId) === "image";
 
+  if (isAbraEdit) return { type: "video", supportsImages: true, minImages: 1, maxImages: 5, supportsVideo: true };
+  if (isAbraR2V) return { type: "video", supportsImages: true, minImages: 1, maxImages: 7, supportsVideo: false };
   if (isImage) return { type: "image", supportsImages: true, minImages: 0, maxImages: 5 };
-  if (isI2V) return { type: "video", supportsImages: true, minImages: 1, maxImages: 2 };
-  if (isR2V) return { type: "video", supportsImages: true, minImages: 0, maxImages: 3 };
-  return { type: "video", supportsImages: false, minImages: 0, maxImages: 0 };
+  if (isI2V) return { type: "video", supportsImages: true, minImages: 1, maxImages: 2, supportsVideo: false };
+  if (isR2V) return { type: "video", supportsImages: true, minImages: 0, maxImages: 3, supportsVideo: false };
+  return { type: "video", supportsImages: false, minImages: 0, maxImages: 0, supportsVideo: false };
 }
 
 function renderSidebar() {
@@ -355,6 +396,7 @@ function selectModel(modelId) {
   STATE.selectedModel = modelId;
   STATE.modelConfig = getModelMeta(modelId);
   STATE.images = [];
+  STATE.video = null;
 
   // Update sidebar active state
   document.querySelectorAll(".model-item").forEach(el => {
@@ -368,6 +410,7 @@ function selectModel(modelId) {
   // Show/hide image upload
   const uploadGroup = document.getElementById("imageUploadGroup");
   const meta = STATE.modelConfig;
+  document.getElementById("aspectRatioGroup").style.display = meta.type === "video" ? "block" : "none";
   if (meta.supportsImages) {
     uploadGroup.style.display = "block";
     const limitText = meta.type === "image" ? "可选，用于图生图" : `${meta.minImages}-${meta.maxImages}张`;
@@ -375,10 +418,12 @@ function selectModel(modelId) {
   } else {
     uploadGroup.style.display = "none";
   }
+  document.getElementById("videoUploadGroup").style.display = meta.supportsVideo ? "block" : "none";
 
   // Reset image previews
   document.getElementById("imagePreviewList").innerHTML = "";
   document.getElementById("imageHint").style.display = "block";
+  renderVideoPreview();
 
   // Enable button
   const btn = document.getElementById("btnGenerate");
@@ -439,6 +484,59 @@ function removeImage(idx) {
   renderImagePreviews();
 }
 
+// Video upload handling
+const videoUploadArea = document.getElementById("videoUploadArea");
+const videoFileInput = document.getElementById("videoFileInput");
+
+videoUploadArea.onclick = (e) => {
+  if (e.target.closest(".remove-btn")) return;
+  videoFileInput.click();
+};
+
+videoUploadArea.ondragover = (e) => { e.preventDefault(); videoUploadArea.style.borderColor = "#7c8aff"; };
+videoUploadArea.ondragleave = () => { videoUploadArea.style.borderColor = "#2a2b3a"; };
+videoUploadArea.ondrop = (e) => {
+  e.preventDefault();
+  videoUploadArea.style.borderColor = "#2a2b3a";
+  handleVideoFile(e.dataTransfer.files && e.dataTransfer.files[0]);
+};
+
+videoFileInput.onchange = () => {
+  handleVideoFile(videoFileInput.files && videoFileInput.files[0]);
+  videoFileInput.value = "";
+};
+
+function handleVideoFile(file) {
+  if (!file || !file.type.startsWith("video/")) return;
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    STATE.video = { dataUrl: e.target.result, name: file.name };
+    renderVideoPreview();
+  };
+  reader.readAsDataURL(file);
+}
+
+function renderVideoPreview() {
+  const preview = document.getElementById("videoPreview");
+  const hint = document.getElementById("videoHint");
+  if (!preview || !hint) return;
+  preview.innerHTML = "";
+  hint.style.display = STATE.video ? "none" : "block";
+  if (!STATE.video) return;
+  preview.innerHTML = `
+    <div class="video-preview">
+      <video src="${STATE.video.dataUrl}" controls muted preload="metadata"></video>
+      <div class="video-name">${STATE.video.name || "upload.mp4"}</div>
+      <button class="remove-btn" onclick="removeVideo()">×</button>
+    </div>
+  `;
+}
+
+function removeVideo() {
+  STATE.video = null;
+  renderVideoPreview();
+}
+
 // Generation
 document.getElementById("btnGenerate").onclick = generate;
 
@@ -451,6 +549,10 @@ async function generate() {
   if (!prompt) { alert("请输入提示词"); return; }
   if (!apiKey) { alert("请输入 API Key"); return; }
   if (!baseUrl) { alert("请输入服务地址"); return; }
+  if (STATE.modelConfig && STATE.modelConfig.supportsVideo && !STATE.video) {
+    alert("请上传参考视频");
+    return;
+  }
 
   STATE.generating = true;
   const btn = document.getElementById("btnGenerate");
@@ -476,6 +578,12 @@ async function generate() {
   const messages = [{ role: "user", content: content.length === 1 ? prompt : content }];
 
   const body = { model: STATE.selectedModel, messages, stream: true };
+  if (STATE.modelConfig && STATE.modelConfig.type === "video") {
+    body.generationConfig = { aspectRatio: document.getElementById("aspectRatioSelect").value };
+  }
+  if (STATE.video) {
+    body.video = STATE.video.dataUrl;
+  }
 
   const startTime = Date.now();
   appendLog(`[${new Date().toLocaleTimeString()}] 模型: ${STATE.selectedModel}\n`);
