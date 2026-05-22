@@ -1606,7 +1606,21 @@ class TokenBrowser:
                             const script = document.createElement('script');
                             script.src = urls[index];
                             script.async = true;
-                            script.onerror = () => loadScript(index + 1);
+                            let done = false;
+                            const fallback = () => {{
+                                if (done) return;
+                                done = true;
+                                loadScript(index + 1);
+                            }};
+                            const timer = setTimeout(fallback, 5000);
+                            script.onload = () => {{
+                                done = true;
+                                clearTimeout(timer);
+                            }};
+                            script.onerror = () => {{
+                                clearTimeout(timer);
+                                fallback();
+                            }};
                             document.head.appendChild(script);
                         }};
                         loadScript(0);
@@ -1633,13 +1647,13 @@ class TokenBrowser:
             await page.route("**/*", handle_route)
             page.on("requestfailed", handle_request_failed)
             try:
-                await page.goto(page_url, wait_until="load", timeout=15000)  # 减少到15秒
+                await page.goto(page_url, wait_until="domcontentloaded", timeout=15000)
             except Exception as e:
                 debug_logger.log_warning(f"[BrowserCaptcha] Token-{self.token_id} page.goto 失败: {type(e).__name__}: {str(e)[:200]}")
                 return None
 
             try:
-                await page.wait_for_function("typeof grecaptcha !== 'undefined'", timeout=10000)  # 减少到10秒
+                await page.wait_for_function("typeof grecaptcha !== 'undefined'", timeout=30000)
             except Exception as e:
                 debug_logger.log_warning(f"[BrowserCaptcha] Token-{self.token_id} grecaptcha 未就绪: {type(e).__name__}: {str(e)[:200]}")
                 return None
