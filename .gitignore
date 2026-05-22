@@ -65,7 +65,7 @@ config/setting_warp_example.toml
 
 /.venv/
 
-# 测试文件
-test_*
+# 根目录临时测试文件
+/test_*
 tests/__pycache__/
 *.har

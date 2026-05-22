@@ -9,10 +9,10 @@ import re
 from urllib.parse import urlparse
 
 from curl_cffi.requests import AsyncSession
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from ..core.auth import verify_api_key_flexible
+from ..core.auth import AuthManager, verify_api_key_flexible
 from ..core.logger import debug_logger
 from ..core.model_resolver import get_base_model_aliases, resolve_model_name
 from ..core.models import (
@@ -22,6 +22,7 @@ from ..core.models import (
     GeminiGenerateContentRequest,
 )
 from ..services.generation_handler import MODEL_CONFIG, GenerationHandler
+from ..services.browser_captcha_extension import ExtensionCaptchaService
 
 router = APIRouter()
 
@@ -78,6 +79,7 @@ class NormalizedGenerationRequest:
     prompt: str
     images: List[bytes]
     messages: Optional[List[ChatMessage]] = None
+    video_media_id: Optional[str] = None
 
 
 def set_generation_handler(handler: GenerationHandler):
@@ -286,11 +288,18 @@ def _sanitize_media_prompt(prompt: str) -> str:
 
 async def _extract_prompt_and_images_from_openai_messages(
     messages: List[ChatMessage],
-) -> tuple[str, List[bytes]]:
+) -> tuple[str, List[bytes], Optional[str]]:
+    """Extract prompt, images, and optional video_media_id from messages.
+
+    Returns:
+        (prompt, images, video_media_id)
+        video_media_id is set when an image_url starts with "extend://"
+    """
     last_message = messages[-1]
     content = last_message.content
     prompt_parts: List[str] = []
     images: List[bytes] = []
+    video_media_id: Optional[str] = None
 
     if isinstance(content, str):
         prompt_parts.append(content)
@@ -303,10 +312,14 @@ async def _extract_prompt_and_images_from_openai_messages(
                     prompt_parts.append(text)
             elif item_type == "image_url":
                 image_url = item.get("image_url", {}).get("url", "")
-                images.append(await _load_image_bytes_from_uri(image_url))
+                # extend://MEDIA_ID 用于视频续写
+                if image_url.startswith("extend://"):
+                    video_media_id = image_url[len("extend://"):]
+                else:
+                    images.append(await _load_image_bytes_from_uri(image_url))
 
     prompt = "\n".join(part for part in prompt_parts if part).strip()
-    return prompt, images
+    return prompt, images, video_media_id
 
 
 async def _append_openai_reference_images(
@@ -411,7 +424,7 @@ async def _normalize_openai_request(
     request: ChatCompletionRequest,
 ) -> NormalizedGenerationRequest:
     if request.messages:
-        prompt, images = await _extract_prompt_and_images_from_openai_messages(
+        prompt, images, video_media_id = await _extract_prompt_and_images_from_openai_messages(
             request.messages
         )
         if request.image and not images:
@@ -423,6 +436,7 @@ async def _normalize_openai_request(
             prompt=prompt,
             images=images,
             messages=request.messages,
+            video_media_id=video_media_id,
         )
 
     if request.contents:
@@ -472,6 +486,7 @@ async def _collect_non_stream_result(
     prompt: str,
     images: List[bytes],
     base_url_override: Optional[str] = None,
+    video_media_id: Optional[str] = None,
 ) -> str:
     handler = _ensure_generation_handler()
     result = None
@@ -481,6 +496,7 @@ async def _collect_non_stream_result(
         images=images if images else None,
         stream=False,
         base_url_override=base_url_override,
+        video_media_id=video_media_id,
     ):
         result = chunk
 
@@ -709,6 +725,7 @@ async def _iterate_openai_stream(
         images=normalized.images if normalized.images else None,
         stream=True,
         base_url_override=base_url_override,
+        video_media_id=normalized.video_media_id,
     ):
         if chunk.startswith("data: "):
             yield chunk
@@ -732,6 +749,7 @@ async def _iterate_gemini_stream(
         images=normalized.images if normalized.images else None,
         stream=True,
         base_url_override=base_url_override,
+        video_media_id=normalized.video_media_id,
     ):
         if chunk.startswith("data: "):
             payload_text = chunk[6:].strip()
@@ -854,14 +872,13 @@ async def create_chat_completion(
                 },
             )
 
-        payload = _enrich_payload_with_direct_url(
-            _parse_handler_result(
-                await _collect_non_stream_result(
-                    normalized.model,
-                    normalized.prompt,
-                    normalized.images,
-                    request_base_url,
-                )
+        payload = _parse_handler_result(
+            await _collect_non_stream_result(
+                normalized.model,
+                normalized.prompt,
+                normalized.images,
+                base_url_override=request_base_url,
+                video_media_id=normalized.video_media_id,
             )
         )
         return _build_openai_json_response(payload)
@@ -894,7 +911,8 @@ async def generate_content(
                     normalized.model,
                     normalized.prompt,
                     normalized.images,
-                    request_base_url,
+                    base_url_override=request_base_url,
+                    video_media_id=normalized.video_media_id,
                 )
             )
         )
@@ -953,3 +971,32 @@ async def stream_generate_content(
             status_code=500,
             content=_build_gemini_error_payload(500, str(exc)),
         )
+
+@router.websocket("/captcha_ws")
+async def captcha_websocket_endpoint(websocket: WebSocket):
+    from ..core.logger import debug_logger
+    api_key = (
+        websocket.query_params.get("key")
+        or websocket.query_params.get("api_key")
+        or websocket.headers.get("x-goog-api-key")
+        or ""
+    ).strip()
+    authorization = (websocket.headers.get("authorization") or "").strip()
+    if authorization.lower().startswith("bearer "):
+        api_key = authorization[7:].strip()
+
+    if not api_key or not AuthManager.verify_api_key(api_key):
+        await websocket.close(code=1008)
+        return
+
+    service = await ExtensionCaptchaService.get_instance()
+    await service.connect(websocket)
+    try:
+        while True:
+            data = await websocket.receive_text()
+            await service.handle_message(websocket, data)
+    except WebSocketDisconnect:
+        service.disconnect(websocket)
+    except Exception as e:
+        debug_logger.log_error(f"WebSocket error: {e}")
+        service.disconnect(websocket)

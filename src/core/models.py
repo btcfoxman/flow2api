@@ -42,6 +42,7 @@ class Token(BaseModel):
 
     # 打码代理（token 级，可覆盖全局浏览器打码代理）
     captcha_proxy_url: Optional[str] = None
+    extension_route_key: Optional[str] = None
 
     # 429禁用相关
     ban_reason: Optional[str] = None  # 禁用原因: "429_rate_limit" 或 None
@@ -180,6 +181,7 @@ class CaptchaConfig(BaseModel):
     captcha_method: str = "browser"  # yescaptcha/capmonster/ezcaptcha/capsolver/browser/personal/remote_browser
     yescaptcha_api_key: str = ""
     yescaptcha_base_url: str = "https://api.yescaptcha.com"
+    yescaptcha_task_type: str = "RecaptchaV3TaskProxylessM1"
     capmonster_api_key: str = ""
     capmonster_base_url: str = "https://api.capmonster.cloud"
     ezcaptcha_api_key: str = ""
@@ -195,7 +197,8 @@ class CaptchaConfig(BaseModel):
     browser_proxy_url: Optional[str] = None  # 浏览器打码代理URL
     browser_count: int = 1  # 浏览器打码实例数量
     personal_project_pool_size: int = 4  # 单个 Token 默认维护的项目池数量（仅影响项目轮换）
-    personal_max_resident_tabs: int = 5  # 内置浏览器共享打码标签页数量上限
+    personal_max_resident_tabs: int = 5  # 内置浏览器单实例共享打码标签页数量上限
+    browser_personal_fresh_restart_every_n_solves: int = 10  # 成功打码多少次后清理并重启浏览器，0表示禁用
     personal_idle_tab_ttl_seconds: int = 600  # 内置浏览器标签页空闲超时(秒)
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None

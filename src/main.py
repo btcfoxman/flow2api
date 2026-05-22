@@ -1,6 +1,6 @@
 """FastAPI application initialization"""
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .core.config import config
 from .core.database import Database
+from .core.monitoring import CONTENT_TYPE_LATEST, render_main_metrics
 from .services.flow_client import FlowClient
 from .services.proxy_manager import ProxyManager
 from .services.token_manager import TokenManager
@@ -56,11 +57,20 @@ async def lifespan(app: FastAPI):
     # Initialize browser captcha service if needed
     browser_service = None
     if captcha_config.captcha_method == "personal":
-        from .services.browser_captcha_personal import BrowserCaptchaService
+        from .services.browser_captcha_personal import (
+            BrowserCaptchaService,
+            PERSONAL_POOL_MAX_TOTAL_RESIDENT_TABS,
+            resolve_effective_browser_count,
+            resolve_effective_personal_max_resident_tabs,
+        )
         browser_service = await BrowserCaptchaService.get_instance(db)
         print("✓ Browser captcha service initialized (nodriver mode)")
 
-        warmup_limit = max(1, int(config.personal_max_resident_tabs or 1))
+        warmup_limit = max(1, min(
+            PERSONAL_POOL_MAX_TOTAL_RESIDENT_TABS,
+            resolve_effective_browser_count(config.browser_count)
+            * resolve_effective_personal_max_resident_tabs(config.personal_max_resident_tabs),
+        ))
         warmup_project_ids = await token_manager.get_personal_warmup_project_ids(
             tokens=tokens,
             limit=warmup_limit,
@@ -238,8 +248,14 @@ async def test_page():
     return HTMLResponse(content="<h1>Test Page Not Found</h1>", status_code=404)
 
 
-@app.get("/health")
 @app.get("/healthz")
-async def health_check():
+async def healthz_check():
     """Basic liveness endpoint for container health checks."""
     return {"status": "ok"}
+
+
+@app.get("/metrics")
+async def metrics():
+    """Prometheus metrics endpoint for the main Flow2API service."""
+    payload = await render_main_metrics(db, concurrency_manager=concurrency_manager)
+    return Response(content=payload, media_type=CONTENT_TYPE_LATEST)
