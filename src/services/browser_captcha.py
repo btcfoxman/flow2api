@@ -17,7 +17,7 @@ import random
 import uuid
 from typing import Optional, Dict, Any, List, Union
 from datetime import datetime
-from urllib.parse import urlparse, unquote, parse_qs
+from urllib.parse import urlparse, unquote, parse_qs, urlunparse
 import urllib.parse
 import urllib.request
 
@@ -238,21 +238,48 @@ def _adspower_debug_ws_from_port(port: str, host: str = "127.0.0.1") -> Optional
     return None
 
 
+def _adspower_api_host_for_cdp(default: str = "127.0.0.1") -> str:
+    try:
+        host = urlparse(_adspower_api_base_url()).hostname
+        return host or default
+    except Exception:
+        return default
+
+
+def _is_loopback_host(host: Optional[str]) -> bool:
+    return (host or "").strip().lower() in {"127.0.0.1", "localhost", "::1"}
+
+
+def _rewrite_adspower_local_endpoint(endpoint: str) -> str:
+    try:
+        parsed = urlparse(endpoint)
+        api_host = _adspower_api_host_for_cdp()
+        if parsed.hostname and _is_loopback_host(parsed.hostname) and not _is_loopback_host(api_host):
+            netloc = api_host
+            if parsed.port:
+                netloc = f"{netloc}:{parsed.port}"
+            return urlunparse(parsed._replace(netloc=netloc))
+    except Exception:
+        return endpoint
+    return endpoint
+
+
 def _resolve_adspower_cdp_url(payload: Dict[str, Any]) -> Optional[str]:
     ws_endpoint = _extract_adspower_ws_endpoint(payload)
     if ws_endpoint:
-        return ws_endpoint
+        return _rewrite_adspower_local_endpoint(ws_endpoint)
 
     http_endpoint = _extract_adspower_http_endpoint(payload)
     if http_endpoint:
-        return http_endpoint
+        return _rewrite_adspower_local_endpoint(http_endpoint)
 
     debug_port = _extract_adspower_value(payload, ["debug_port", "debugPort", "port", "cdp_port"])
     if debug_port:
-        ws_endpoint = _adspower_debug_ws_from_port(debug_port)
+        cdp_host = _adspower_api_host_for_cdp()
+        ws_endpoint = _adspower_debug_ws_from_port(debug_port, host=cdp_host)
         if ws_endpoint:
-            return ws_endpoint
-        return f"http://127.0.0.1:{debug_port}"
+            return _rewrite_adspower_local_endpoint(ws_endpoint)
+        return f"http://{cdp_host}:{debug_port}"
 
     return None
 
