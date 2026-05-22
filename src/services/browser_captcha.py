@@ -192,6 +192,72 @@ def _extract_adspower_ws_endpoint(payload: Any) -> Optional[str]:
     return None
 
 
+def _adspower_profile_proxy_url(profile_id: str) -> Optional[str]:
+    """Resolve the proxy URL configured on an AdsPower profile."""
+    normalized_profile_id = str(profile_id or "").strip()
+    if not normalized_profile_id:
+        return None
+
+    profile: Optional[Dict[str, Any]] = None
+    lookups = (
+        ("GET", "/api/v1/user/list", {"user_id": normalized_profile_id, "page": 1, "page_size": 100}, None),
+        ("POST", "/api/v2/browser-profile/list", None, {"profile_id": [normalized_profile_id], "limit": 100}),
+    )
+    for method, path, params, body in lookups:
+        try:
+            payload = _adspower_request_json(method, path, params=params, body=body)
+        except Exception:
+            continue
+        if not _adspower_response_success(payload):
+            continue
+        data = payload.get("data") if isinstance(payload, dict) else None
+        items: List[Any] = []
+        if isinstance(data, dict):
+            items = data.get("list") or data.get("data") or []
+        elif isinstance(data, list):
+            items = data
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            item_id = str(item.get("user_id") or item.get("profile_id") or item.get("id") or "").strip()
+            if item_id == normalized_profile_id:
+                profile = item
+                break
+        if profile:
+            break
+
+    if not profile:
+        return None
+    proxy_config = profile.get("user_proxy_config") or profile.get("proxy_config") or {}
+    if not isinstance(proxy_config, dict):
+        return None
+
+    host = str(proxy_config.get("proxy_host") or proxy_config.get("host") or "").strip()
+    port = str(proxy_config.get("proxy_port") or proxy_config.get("port") or "").strip()
+    if not host or not port:
+        return None
+
+    try:
+        api_host = _adspower_api_host_for_cdp()
+        if _is_loopback_host(host) and not _is_loopback_host(api_host):
+            host = api_host
+    except Exception:
+        pass
+
+    proxy_type = str(proxy_config.get("proxy_type") or proxy_config.get("type") or "socks5").strip().lower()
+    if proxy_type not in {"http", "https", "socks4", "socks5", "socks5h"}:
+        proxy_type = "socks5"
+
+    username = str(proxy_config.get("proxy_user") or proxy_config.get("username") or "").strip()
+    password = str(proxy_config.get("proxy_password") or proxy_config.get("password") or "").strip()
+    auth = ""
+    if username or password:
+        auth = f"{urllib.parse.quote(username, safe='')}:{urllib.parse.quote(password, safe='')}@"
+    return f"{proxy_type}://{auth}{host}:{port}"
+
+
 def _extract_adspower_value(payload: Any, keys: List[str]) -> Optional[str]:
     if payload is None:
         return None
@@ -897,6 +963,19 @@ class TokenBrowser:
         playwright = await async_playwright().start()
         browser_executable_path = os.environ.get("BROWSER_EXECUTABLE_PATH", "").strip() or None
         proxy_option, raw_proxy_url, _ = await self._resolve_proxy_runtime_config(token_proxy_url=token_proxy_url)
+        if _is_adspower_enabled() and not raw_proxy_url:
+            profile_id = _adspower_profile_id_for_slot(self.token_id)
+            try:
+                raw_proxy_url = await asyncio.to_thread(_adspower_profile_proxy_url, profile_id)
+                if raw_proxy_url:
+                    debug_logger.log_info(
+                        f"[BrowserCaptcha] Token-{self.token_id} using AdsPower profile proxy "
+                        f"(profile_id={profile_id})"
+                    )
+            except Exception as e:
+                debug_logger.log_warning(
+                    f"[BrowserCaptcha] Token-{self.token_id} failed to read AdsPower profile proxy: {e}"
+                )
 
         # 先只记录代理，真实 UA/UA-CH 交给浏览器自己暴露，避免 user-agent 与 sec-ch-ua 版本错位。
         self._last_fingerprint = {
