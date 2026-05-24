@@ -383,6 +383,34 @@ def _stop_adspower_profile(profile_id: str) -> bool:
     return False
 
 
+def _active_adspower_profile_payload(profile_id: str) -> Optional[Dict[str, Any]]:
+    """Return the active AdsPower browser payload when the profile is already running."""
+    normalized_profile_id = str(profile_id or "").strip()
+    if not normalized_profile_id:
+        return None
+
+    attempts = (
+        ("GET", "/api/v1/browser/active", {"user_id": normalized_profile_id}, None),
+        ("GET", "/api/v1/browser/active", {"id": normalized_profile_id}, None),
+    )
+    for method, path, params, body in attempts:
+        try:
+            payload = _adspower_request_json(method, path, params=params, body=body)
+        except Exception:
+            continue
+        if not _adspower_response_success(payload):
+            continue
+        data = payload.get("data") if isinstance(payload, dict) else None
+        status = ""
+        if isinstance(data, dict):
+            status = str(data.get("status") or data.get("state") or "").strip().lower()
+        if status not in {"active", "running", "started", "open"}:
+            continue
+        if _resolve_adspower_cdp_url(payload):
+            return payload
+    return None
+
+
 # ==================== Docker 环境检测 ====================
 def _is_running_in_docker() -> bool:
     """检测是否在 Docker 容器中运行"""
@@ -1097,6 +1125,14 @@ class TokenBrowser:
         if not profile_id:
             raise RuntimeError("AdsPower profile IDs are empty")
 
+        active_payload = _active_adspower_profile_payload(profile_id)
+        if active_payload:
+            debug_logger.log_info(
+                f"[BrowserCaptcha] Token-{self.token_id} reusing active AdsPower profile "
+                f"(profile_id={profile_id})"
+            )
+            return active_payload
+
         launch_args = _adspower_launch_args()
         headless = _adspower_headless()
 
@@ -1118,15 +1154,32 @@ class TokenBrowser:
         ]
 
         last_message = ""
-        for method, path, params, body in attempts:
-            try:
-                payload = _adspower_request_json(method, path, params=params, body=body)
-            except Exception as exc:
-                last_message = f"{type(exc).__name__}: {str(exc)[:200]}"
-                continue
-            if _adspower_response_success(payload):
-                return payload
-            last_message = _adspower_message(payload)
+        for start_round, delay_seconds in enumerate((0, 2, 5), start=1):
+            if delay_seconds:
+                time.sleep(delay_seconds)
+
+            active_payload = _active_adspower_profile_payload(profile_id)
+            if active_payload:
+                debug_logger.log_info(
+                    f"[BrowserCaptcha] Token-{self.token_id} reusing active AdsPower profile "
+                    f"(profile_id={profile_id}, round={start_round})"
+                )
+                return active_payload
+
+            for method, path, params, body in attempts:
+                try:
+                    payload = _adspower_request_json(method, path, params=params, body=body)
+                except Exception as exc:
+                    last_message = f"{type(exc).__name__}: {str(exc)[:200]}"
+                    continue
+                if _adspower_response_success(payload):
+                    return payload
+                last_message = _adspower_message(payload)
+                if "too many request per second" in last_message.lower():
+                    break
+
+            if "too many request per second" not in last_message.lower():
+                break
 
         raise RuntimeError(f"AdsPower start failed: {last_message or 'unknown error'}")
 
@@ -1146,7 +1199,6 @@ class TokenBrowser:
 
     async def _recycle_browser_locked(self, reason: str = "unknown", rotate_profile: bool = True):
         """Recycle the shared browser instance and reset its state."""
-        adspower_profile_id = _adspower_profile_id_for_slot(self.token_id) if _is_adspower_enabled() else ""
         playwright = self._shared_playwright
         browser = self._shared_browser
         context = self._shared_context
@@ -1171,13 +1223,10 @@ class TokenBrowser:
                 f"[BrowserCaptcha] Token-{self.token_id} shared browser recycled, reason={reason}"
             )
         await self._close_browser(playwright, browser, context, browser_pid=browser_pid)
-        if adspower_profile_id and had_browser:
-            stop_ok = await asyncio.to_thread(_stop_adspower_profile, adspower_profile_id)
-            if stop_ok:
-                debug_logger.log_info(
-                    f"[BrowserCaptcha] Token-{self.token_id} AdsPower profile stopped after recycle "
-                    f"(profile_id={adspower_profile_id})"
-                )
+        if _is_adspower_enabled() and had_browser:
+            debug_logger.log_info(
+                f"[BrowserCaptcha] Token-{self.token_id} AdsPower profile kept open after recycle"
+            )
 
     async def recycle_browser(self, reason: str = "unknown", rotate_profile: bool = True):
         """Recycle the current shared browser."""

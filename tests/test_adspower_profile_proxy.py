@@ -1,7 +1,12 @@
 import unittest
 from unittest.mock import patch
 
-from src.services.browser_captcha import _adspower_profile_proxy_url, _stop_adspower_profile
+from src.services.browser_captcha import (
+    TokenBrowser,
+    _active_adspower_profile_payload,
+    _adspower_profile_proxy_url,
+    _stop_adspower_profile,
+)
 
 
 class AdsPowerProfileProxyTests(unittest.TestCase):
@@ -74,4 +79,49 @@ class AdsPowerProfileProxyTests(unittest.TestCase):
                 ("GET", "/api/v1/browser/stop", {"user_id": "kwrxc3b"}, None),
                 ("GET", "/api/v1/browser/stop", {"id": "kwrxc3b"}, None),
             ],
+        )
+
+    def test_active_profile_payload_requires_cdp_endpoint(self):
+        payload = {
+            "code": 0,
+            "data": {
+                "status": "Active",
+                "debug_port": "9993",
+            },
+        }
+
+        with patch("src.services.browser_captcha._adspower_request_json", return_value=payload), patch(
+            "src.services.browser_captcha._adspower_debug_ws_from_port",
+            return_value="ws://127.0.0.1:9993/devtools/browser/test",
+        ):
+            self.assertIs(_active_adspower_profile_payload("kwrxc3b"), payload)
+
+    def test_start_profile_reuses_active_profile_without_start_call(self):
+        calls = []
+
+        def fake_request(method, path, params=None, body=None):
+            calls.append((method, path, params, body))
+            if path == "/api/v1/browser/active":
+                return {
+                    "code": 0,
+                    "data": {
+                        "status": "Active",
+                        "debug_port": "9993",
+                    },
+                }
+            raise AssertionError(f"unexpected start call: {method} {path}")
+
+        browser = TokenBrowser(token_id=0, user_data_dir="tmp/unit-adspower")
+        with patch("src.services.browser_captcha._adspower_request_json", side_effect=fake_request), patch(
+            "src.services.browser_captcha._adspower_profile_id_for_slot",
+            return_value="kwrxc3b",
+        ), patch(
+            "src.services.browser_captcha._adspower_debug_ws_from_port",
+            return_value="ws://127.0.0.1:9993/devtools/browser/test",
+        ):
+            self.assertEqual(browser._start_adspower_profile()["data"]["status"], "Active")
+
+        self.assertEqual(
+            calls,
+            [("GET", "/api/v1/browser/active", {"user_id": "kwrxc3b"}, None)],
         )
