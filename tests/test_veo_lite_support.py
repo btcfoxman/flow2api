@@ -158,6 +158,16 @@ class VeoLiteGenerationHandlerTests(unittest.TestCase):
         )
         self.assertNotEqual(MODEL_CONFIG["veo_3_1_r2v_fast"]["model_key"], "abra_r2v_10s")
 
+    def test_abra_t2v_is_direct_public_text_model(self):
+        for seconds in (4, 6, 8, 10):
+            cfg = MODEL_CONFIG[f"abra_t2v_{seconds}s"]
+            self.assertEqual(cfg["model_key"], f"abra_t2v_{seconds}s")
+            self.assertEqual(cfg["video_type"], "t2v")
+            self.assertEqual(cfg["aspect_ratio"], "VIDEO_ASPECT_RATIO_LANDSCAPE")
+            self.assertFalse(cfg["supports_images"])
+            self.assertTrue(cfg["use_v2_model_config"])
+            self.assertTrue(cfg["allow_aspect_ratio_override"])
+
     def test_abra_edit_is_direct_public_model(self):
         cfg = MODEL_CONFIG["abra_edit"]
 
@@ -216,6 +226,34 @@ class VeoLiteFlowClientTests(unittest.IsolatedAsyncioTestCase):
             json_data["mediaGenerationContext"]["audioFailurePreference"],
             "BLOCK_SILENCED_VIDEOS",
         )
+
+    async def test_generate_video_text_uses_abra_t2v_model_key(self):
+        captured = {}
+
+        async def fake_make_request(method, url, json_data, use_at, at_token, **kwargs):
+            captured["url"] = url
+            captured["json_data"] = json_data
+            return {"operations": [{"operation": {"name": "task-abra-t2v"}}]}
+
+        self.client._make_request = AsyncMock(side_effect=fake_make_request)
+
+        await self.client.generate_video_text(
+            at="at-token",
+            project_id="project-1",
+            prompt="text only",
+            model_key="abra_t2v_10s",
+            aspect_ratio="VIDEO_ASPECT_RATIO_LANDSCAPE",
+            use_v2_model_config=True,
+        )
+
+        self.assertTrue(captured["url"].endswith("/video:batchAsyncGenerateVideoText"))
+        request_data = captured["json_data"]["requests"][0]
+        self.assertEqual(request_data["videoModelKey"], "abra_t2v_10s")
+        self.assertEqual(
+            request_data["textInput"]["structuredPrompt"]["parts"][0]["text"],
+            "text only",
+        )
+        self.assertNotIn("duration", request_data)
 
     async def test_generate_video_text_normalizes_media_only_create_response(self):
         captured = {}

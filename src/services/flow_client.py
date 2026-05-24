@@ -111,6 +111,18 @@ class FlowClient:
         """清理请求链路绑定的浏览器指纹。"""
         self._set_request_fingerprint(None)
 
+    @staticmethod
+    def _is_local_browser_ref(browser_ref: Optional[Union[int, str]]) -> bool:
+        if isinstance(browser_ref, int):
+            return browser_ref >= 0
+        if isinstance(browser_ref, str):
+            raw = browser_ref.strip()
+            if raw.isdigit():
+                return True
+            browser_id_part, sep, request_ref = raw.partition(":")
+            return bool(sep and browser_id_part.isdigit() and request_ref)
+        return False
+
     def _build_labs_cookie_header(self, st_token: Any) -> str:
         """Build a Labs Cookie header from a raw ST, Cookie header, or browser cookie JSON."""
         if st_token is None:
@@ -508,6 +520,32 @@ class FlowClient:
         timeout: int,
     ) -> Dict[str, Any]:
         """视频 API 加硬截止，避免 curl_cffi 底层偶发卡住导致整条请求悬挂。"""
+        fingerprint = self._request_fingerprint_ctx.get()
+        browser_ref = fingerprint.get("browser_ref") if isinstance(fingerprint, dict) else None
+        captcha_method = str(getattr(config, "captcha_method", "") or "").strip().lower()
+        if captcha_method in {"browser", "adspower"} and self._is_local_browser_ref(browser_ref):
+            try:
+                from .browser_captcha import BrowserCaptchaService
+                service = await BrowserCaptchaService.get_instance(self.db)
+                return await asyncio.wait_for(
+                    service.fetch_json(
+                        browser_ref=browser_ref,
+                        method="POST",
+                        url=url,
+                        headers={
+                            "authorization": f"Bearer {at}",
+                            "content-type": "text/plain;charset=UTF-8",
+                        },
+                        json_data=json_data,
+                        timeout=timeout,
+                    ),
+                    timeout=timeout + 5,
+                )
+            except asyncio.TimeoutError as exc:
+                raise Exception(f"Flow browser video API request timed out after {timeout}s") from exc
+            except Exception as exc:
+                raise Exception(f"Flow browser API request failed: {exc}") from exc
+
         try:
             return await asyncio.wait_for(
                 self._make_request(
@@ -3378,7 +3416,12 @@ class FlowClient:
                 service = await BrowserCaptchaService.get_instance(self.db)
                 token, browser_id = await service.get_token(project_id, action, token_id=token_id)
                 fingerprint = await service.get_fingerprint(browser_id) if token else None
-                self._set_request_fingerprint(fingerprint if token else None)
+                if token:
+                    fingerprint_payload = dict(fingerprint or {})
+                    fingerprint_payload["browser_ref"] = browser_id
+                    self._set_request_fingerprint(fingerprint_payload)
+                else:
+                    self._set_request_fingerprint(None)
                 return token, browser_id
             except RuntimeError as e:
                 # 捕获 Docker 环境或依赖缺失的明确错误

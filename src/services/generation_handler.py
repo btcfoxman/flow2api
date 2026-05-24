@@ -742,6 +742,18 @@ def _make_abra_r2v_config(model_key: str) -> Dict[str, Any]:
     }
 
 
+def _make_abra_t2v_config(model_key: str) -> Dict[str, Any]:
+    return {
+        "type": "video",
+        "video_type": "t2v",
+        "model_key": model_key,
+        "aspect_ratio": "VIDEO_ASPECT_RATIO_LANDSCAPE",
+        "supports_images": False,
+        "use_v2_model_config": True,
+        "allow_aspect_ratio_override": True,
+    }
+
+
 def _make_abra_edit_config() -> Dict[str, Any]:
     return {
         "type": "video",
@@ -926,6 +938,7 @@ def _apply_veo_3_1_model_updates():
     add_alias("veo_3_1_r2v_fast_landscape_ultra_1080p", "veo_3_1_r2v_fast_ultra_1080p")
 
     for seconds in (4, 6, 8, 10):
+        MODEL_CONFIG[f"abra_t2v_{seconds}s"] = _make_abra_t2v_config(f"abra_t2v_{seconds}s")
         MODEL_CONFIG[f"abra_r2v_{seconds}s"] = _make_abra_r2v_config(f"abra_r2v_{seconds}s")
 
     MODEL_CONFIG["abra_edit"] = _make_abra_edit_config()

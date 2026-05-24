@@ -1927,6 +1927,149 @@ class TokenBrowser:
         if not self._last_fingerprint:
             return None
         return dict(self._last_fingerprint)
+
+    @staticmethod
+    def _browser_fetch_headers(headers: Optional[Dict[str, Any]]) -> Dict[str, str]:
+        """Keep only headers that browser fetch is allowed to set explicitly."""
+        forbidden_names = {
+            "accept-encoding",
+            "connection",
+            "content-length",
+            "cookie",
+            "host",
+            "origin",
+            "referer",
+            "user-agent",
+        }
+        filtered: Dict[str, str] = {}
+        for key, value in (headers or {}).items():
+            if value is None:
+                continue
+            key_text = str(key or "").strip()
+            key_lower = key_text.lower()
+            if not key_text or key_lower in forbidden_names:
+                continue
+            if key_lower.startswith("sec-") or key_lower.startswith("proxy-"):
+                continue
+            filtered[key_text] = str(value)
+        return filtered
+
+    @staticmethod
+    def _format_browser_fetch_http_error(status: int, text: str) -> str:
+        reason = f"HTTP Error {status}"
+        try:
+            payload = json.loads(text or "{}")
+            error_info = payload.get("error") if isinstance(payload, dict) else None
+            if isinstance(error_info, dict):
+                message = str(error_info.get("message") or "").strip()
+                for detail in error_info.get("details") or []:
+                    if isinstance(detail, dict) and detail.get("reason"):
+                        reason = str(detail.get("reason"))
+                        break
+                if message:
+                    reason = f"{reason}: {message}"
+        except Exception:
+            body = (text or "").strip()
+            if body:
+                reason = f"{reason}: {body[:300]}"
+        return reason
+
+    async def fetch_json(
+        self,
+        url: str,
+        method: str = "POST",
+        headers: Optional[Dict[str, Any]] = None,
+        json_data: Optional[Dict[str, Any]] = None,
+        timeout: int = 60,
+    ) -> Dict[str, Any]:
+        """Execute a JSON request inside the real browser context used for captcha."""
+        _, _, context = await self._get_or_create_shared_browser()
+        page = None
+        route_url = "https://labs.google/flow2api-browser-fetch"
+        try:
+            page = await context.new_page()
+
+            async def handle_route(route):
+                if route.request.url.rstrip("/") == route_url.rstrip("/"):
+                    await route.fulfill(
+                        status=200,
+                        content_type="text/html",
+                        body="<html><head><title>flow2api fetch</title></head><body></body></html>",
+                    )
+                else:
+                    await route.continue_()
+
+            await page.route(route_url, handle_route)
+            await page.goto(route_url, wait_until="domcontentloaded", timeout=15000)
+            await self._capture_page_fingerprint(page)
+
+            payload = {
+                "url": url,
+                "method": (method or "POST").upper(),
+                "headers": self._browser_fetch_headers(headers),
+                "body": json.dumps(json_data or {}, ensure_ascii=False),
+                "timeoutMs": max(1000, int(timeout * 1000)),
+            }
+            result = await asyncio.wait_for(
+                page.evaluate(
+                    """
+                    async (payload) => {
+                        const controller = new AbortController();
+                        const timer = setTimeout(() => controller.abort(), payload.timeoutMs);
+                        try {
+                            const response = await fetch(payload.url, {
+                                method: payload.method,
+                                headers: payload.headers,
+                                body: payload.method === 'GET' ? undefined : payload.body,
+                                credentials: 'omit',
+                                mode: 'cors',
+                                signal: controller.signal
+                            });
+                            const text = await response.text();
+                            return {
+                                status: response.status,
+                                statusText: response.statusText || '',
+                                text
+                            };
+                        } catch (error) {
+                            return {
+                                fetchError: `${error && error.name ? error.name : 'Error'}: ${error && error.message ? error.message : String(error)}`
+                            };
+                        } finally {
+                            clearTimeout(timer);
+                        }
+                    }
+                    """,
+                    payload,
+                ),
+                timeout=max(1, timeout + 5),
+            )
+
+            if not isinstance(result, dict):
+                raise RuntimeError("browser fetch returned invalid result")
+            fetch_error = result.get("fetchError")
+            if fetch_error:
+                raise RuntimeError(f"browser fetch failed: {fetch_error}")
+
+            status = int(result.get("status") or 0)
+            text = result.get("text") or ""
+            if status >= 400:
+                raise RuntimeError(self._format_browser_fetch_http_error(status, text))
+            if not text:
+                return {}
+            try:
+                parsed = json.loads(text)
+            except Exception as exc:
+                raise RuntimeError(f"browser fetch returned non-JSON response: {text[:300]}") from exc
+            if not isinstance(parsed, dict):
+                raise RuntimeError(f"browser fetch returned unexpected JSON type: {type(parsed).__name__}")
+            return parsed
+        finally:
+            if page:
+                try:
+                    await page.close()
+                except Exception:
+                    pass
     
     async def get_token(
         self,
@@ -2542,6 +2685,33 @@ class BrowserCaptchaService:
             if not browser:
                 return None
             return browser.get_last_fingerprint()
+
+    async def fetch_json(
+        self,
+        browser_ref: Optional[Union[int, str]],
+        url: str,
+        method: str = "POST",
+        headers: Optional[Dict[str, Any]] = None,
+        json_data: Optional[Dict[str, Any]] = None,
+        timeout: int = 60,
+    ) -> Dict[str, Any]:
+        """Run a JSON request from the same browser slot that solved captcha."""
+        browser_id, _ = self._parse_browser_ref(browser_ref)
+        if browser_id is None:
+            raise RuntimeError("browser_ref is required for browser fetch")
+
+        async with self._browsers_lock:
+            browser = self._browsers.get(browser_id)
+            if not browser:
+                raise RuntimeError(f"browser slot {browser_id} is not available")
+
+        return await browser.fetch_json(
+            url=url,
+            method=method,
+            headers=headers,
+            json_data=json_data,
+            timeout=timeout,
+        )
 
     async def report_error(self, browser_ref: Optional[Union[int, str]] = None, error_reason: Optional[str] = None):
         """Handle upstream errors; recycle the browser only for explicit reCAPTCHA evaluation failures."""
