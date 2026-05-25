@@ -84,8 +84,24 @@ jobs:
 
           export IMAGE_REGISTRY="${IMAGE_REGISTRY}"
           export IMAGE_NAMESPACE="${IMAGE_NAMESPACE}"
-          export IMAGE_NAME="${IMAGE_REPOSITORY}"
+          export IMAGE_REPOSITORY="${IMAGE_REPOSITORY}"
           export IMAGE_TAG="${IMAGE_TAG}"
+
+          touch .env
+          set_env_var() {
+            local key="$1"
+            local value="$2"
+            if grep -q "^${key}=" .env; then
+              sed -i "s|^${key}=.*|${key}=${value}|" .env
+            else
+              printf '%s=%s\n' "$key" "$value" >> .env
+            fi
+          }
+
+          set_env_var IMAGE_REGISTRY "$IMAGE_REGISTRY"
+          set_env_var IMAGE_NAMESPACE "$IMAGE_NAMESPACE"
+          set_env_var IMAGE_REPOSITORY "$IMAGE_REPOSITORY"
+          set_env_var IMAGE_TAG "$IMAGE_TAG"
 
           docker network inspect my-shared-net >/dev/null 2>&1 || docker network create my-shared-net
           docker compose pull flow2api
