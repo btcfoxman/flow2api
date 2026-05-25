@@ -973,6 +973,7 @@ VIDEO_POLICY_ERROR_KEYWORDS = (
     "prominent_people_filter_failed",
     "request contains an invalid ar",
 )
+VIDEO_REFERENCE_MAX_DURATION_SECONDS = 10.0
 
 
 def _is_video_policy_error(error_message: Any) -> bool:
@@ -1043,6 +1044,15 @@ def _video_end_frame_index_from_bytes(data: Optional[bytes], fallback: int = 240
     if not duration:
         return fallback
     return max(1, min(fallback, int(duration * 24)))
+
+
+def _validate_reference_video_duration(data: Optional[bytes]) -> Optional[float]:
+    duration = _mp4_duration_seconds(data or b"")
+    if duration is None:
+        return None
+    if duration > VIDEO_REFERENCE_MAX_DURATION_SECONDS:
+        raise ValueError(f"参考视频不能超过10秒，当前约 {duration:.2f} 秒")
+    return duration
 
 
 class GenerationHandler:
@@ -1986,8 +1996,19 @@ class GenerationHandler:
                     })
 
                 if not video_media_id and video_bytes:
+                    try:
+                        video_duration_seconds = _validate_reference_video_duration(video_bytes)
+                    except ValueError as exc:
+                        error_msg = f"❌ {exc}"
+                        if stream:
+                            yield self._create_stream_chunk(f"{error_msg}\n")
+                        self._mark_generation_failed(generation_result, error_msg)
+                        yield self._create_error_response(error_msg, status_code=400)
+                        return
                     video_end_frame_index = _video_end_frame_index_from_bytes(video_bytes)
                     if video_trace is not None:
+                        if video_duration_seconds is not None:
+                            video_trace["input_video_duration_seconds"] = round(video_duration_seconds, 3)
                         video_trace["input_video_end_frame_index"] = video_end_frame_index
                     if stream:
                         yield self._create_stream_chunk("上传参考视频...\n")

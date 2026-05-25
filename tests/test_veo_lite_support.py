@@ -7,6 +7,7 @@ from src.services.flow_client import FlowClient
 from src.services.generation_handler import (
     MODEL_CONFIG,
     GenerationHandler,
+    _validate_reference_video_duration,
     _video_end_frame_index_from_bytes,
     _video_generation_failure_response,
 )
@@ -81,6 +82,11 @@ class VeoLiteGenerationHandlerTests(unittest.TestCase):
     def test_video_edit_frame_index_uses_uploaded_video_duration(self):
         self.assertEqual(_video_end_frame_index_from_bytes(self._mp4_with_duration(4)), 96)
         self.assertEqual(_video_end_frame_index_from_bytes(self._mp4_with_duration(20)), 240)
+
+    def test_reference_video_duration_limit_is_ten_seconds(self):
+        self.assertEqual(_validate_reference_video_duration(self._mp4_with_duration(10)), 10.0)
+        with self.assertRaisesRegex(ValueError, "参考视频不能超过10秒"):
+            _validate_reference_video_duration(self._mp4_with_duration(11))
 
     def test_video_policy_failure_uses_client_error_status(self):
         message, status_code = _video_generation_failure_response("PUBLIC_ERROR_UNSAFE_GENERATION")
