@@ -966,6 +966,27 @@ def _resolve_tier_two_model_key(model_key: str) -> str:
     return candidate if candidate in _known_video_model_keys() else model_key
 
 
+VIDEO_POLICY_ERROR_KEYWORDS = (
+    "public_error_unsafe_generation",
+    "unsafe_generation",
+    "public_error_prominent_people_filter_failed",
+    "prominent_people_filter_failed",
+    "request contains an invalid ar",
+)
+
+
+def _is_video_policy_error(error_message: Any) -> bool:
+    error_lower = str(error_message or "").strip().lower()
+    return any(keyword in error_lower for keyword in VIDEO_POLICY_ERROR_KEYWORDS)
+
+
+def _video_generation_failure_response(error_message: Any) -> tuple[str, int]:
+    text = str(error_message or "").strip() or "未知错误"
+    if _is_video_policy_error(text):
+        return f"视频生成被上游内容安全策略拒绝: {text}。请调整提示词或参考图后重试", 400
+    return f"视频生成失败: {text}，请重试", 502
+
+
 class GenerationHandler:
     """统一生成处理器"""
 
@@ -2350,12 +2371,12 @@ class GenerationHandler:
                         f"{error_message} (code: {error_code})"
                     )
                     
-                    # 返回友好的错误消息，提示用户重试
-                    friendly_error = f"视频生成失败: {error_message}，请重试"
+                    # 内容安全拒绝是上游策略结果，不应包装成 5xx 服务故障。
+                    friendly_error, response_status_code = _video_generation_failure_response(error_message)
                     self._mark_generation_failed(generation_result, friendly_error)
                     if stream:
                         yield self._create_stream_chunk(f"❌ {friendly_error}\n")
-                    yield self._create_error_response(friendly_error, status_code=502)
+                    yield self._create_error_response(friendly_error, status_code=response_status_code)
                     return
 
                 elif status.startswith("MEDIA_GENERATION_STATUS_ERROR"):

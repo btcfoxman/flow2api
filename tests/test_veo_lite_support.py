@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 from src.core.model_resolver import resolve_model_name
 from src.services.flow_client import FlowClient
-from src.services.generation_handler import MODEL_CONFIG, GenerationHandler
+from src.services.generation_handler import MODEL_CONFIG, GenerationHandler, _video_generation_failure_response
 
 
 class VeoLiteModelResolverTests(unittest.TestCase):
@@ -57,6 +57,19 @@ class VeoLiteModelResolverTests(unittest.TestCase):
 
 
 class VeoLiteGenerationHandlerTests(unittest.TestCase):
+    def test_video_policy_failure_uses_client_error_status(self):
+        message, status_code = _video_generation_failure_response("PUBLIC_ERROR_UNSAFE_GENERATION")
+
+        self.assertEqual(status_code, 400)
+        self.assertIn("内容安全策略拒绝", message)
+        self.assertIn("PUBLIC_ERROR_UNSAFE_GENERATION", message)
+
+    def test_video_transient_failure_stays_server_error_status(self):
+        message, status_code = _video_generation_failure_response("upstream temporary error")
+
+        self.assertEqual(status_code, 502)
+        self.assertIn("请重试", message)
+
     def test_tier_two_does_not_upgrade_lite_model_to_fake_ultra(self):
         handler = GenerationHandler.__new__(GenerationHandler)
 
