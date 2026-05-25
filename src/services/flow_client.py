@@ -1967,6 +1967,7 @@ class FlowClient:
         aspect_ratio: str,
         video_media_id: str,
         reference_images: List[Dict],
+        video_end_frame_index: int = 240,
         user_paygate_tier: str = "PAYGATE_TIER_ONE",
         token_id: Optional[int] = None,
         token_video_concurrency: Optional[int] = None,
@@ -2037,7 +2038,7 @@ class FlowClient:
                     "videoInput": {
                         "mediaId": video_media_id,
                         "startFrameIndex": 0,
-                        "endFrameIndex": 240
+                        "endFrameIndex": max(1, int(video_end_frame_index or 240))
                     },
                     "referenceImages": reference_images
                 }]

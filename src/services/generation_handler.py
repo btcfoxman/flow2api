@@ -987,6 +987,64 @@ def _video_generation_failure_response(error_message: Any) -> tuple[str, int]:
     return f"视频生成失败: {text}，请重试", 502
 
 
+def _iter_mp4_boxes(data: bytes, start: int = 0, end: Optional[int] = None):
+    data_len = len(data)
+    end = min(data_len, data_len if end is None else end)
+    offset = max(0, start)
+    while offset + 8 <= end:
+        size = int.from_bytes(data[offset:offset + 4], "big", signed=False)
+        box_type = data[offset + 4:offset + 8]
+        header_size = 8
+        if size == 1:
+            if offset + 16 > end:
+                break
+            size = int.from_bytes(data[offset + 8:offset + 16], "big", signed=False)
+            header_size = 16
+        elif size == 0:
+            size = end - offset
+        if size < header_size or offset + size > end:
+            break
+        yield box_type, offset, size, header_size
+        offset += size
+
+
+def _mp4_duration_seconds(data: bytes) -> Optional[float]:
+    for box_type, offset, size, header_size in _iter_mp4_boxes(data):
+        if box_type != b"moov":
+            continue
+        moov_start = offset + header_size
+        moov_end = offset + size
+        for child_type, child_offset, child_size, child_header_size in _iter_mp4_boxes(data, moov_start, moov_end):
+            if child_type != b"mvhd":
+                continue
+            payload = child_offset + child_header_size
+            if payload + 24 > len(data):
+                return None
+            version = data[payload]
+            if version == 1:
+                timescale_offset = payload + 20
+                duration_offset = payload + 24
+                duration_size = 8
+            else:
+                timescale_offset = payload + 12
+                duration_offset = payload + 16
+                duration_size = 4
+            if duration_offset + duration_size > len(data):
+                return None
+            timescale = int.from_bytes(data[timescale_offset:timescale_offset + 4], "big", signed=False)
+            duration = int.from_bytes(data[duration_offset:duration_offset + duration_size], "big", signed=False)
+            if timescale > 0 and duration > 0:
+                return duration / float(timescale)
+    return None
+
+
+def _video_end_frame_index_from_bytes(data: Optional[bytes], fallback: int = 240) -> int:
+    duration = _mp4_duration_seconds(data or b"")
+    if not duration:
+        return fallback
+    return max(1, min(fallback, int(duration * 24)))
+
+
 class GenerationHandler:
     """统一生成处理器"""
 
@@ -1871,6 +1929,7 @@ class GenerationHandler:
             start_media_id = None
             end_media_id = None
             reference_images = []
+            video_end_frame_index = 240
 
             # I2V: 首尾帧处理
             if video_type == "i2v" and images:
@@ -1927,6 +1986,9 @@ class GenerationHandler:
                     })
 
                 if not video_media_id and video_bytes:
+                    video_end_frame_index = _video_end_frame_index_from_bytes(video_bytes)
+                    if video_trace is not None:
+                        video_trace["input_video_end_frame_index"] = video_end_frame_index
                     if stream:
                         yield self._create_stream_chunk("上传参考视频...\n")
                     video_media_id = await self.flow_client.upload_video(
@@ -2005,6 +2067,7 @@ class GenerationHandler:
                     aspect_ratio=model_config["aspect_ratio"],
                     video_media_id=video_media_id,
                     reference_images=reference_images,
+                    video_end_frame_index=video_end_frame_index,
                     user_paygate_tier=normalized_tier,
                     token_id=token.id,
                     token_video_concurrency=token.video_concurrency,

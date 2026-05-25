@@ -4,7 +4,12 @@ from unittest.mock import AsyncMock, patch
 
 from src.core.model_resolver import resolve_model_name
 from src.services.flow_client import FlowClient
-from src.services.generation_handler import MODEL_CONFIG, GenerationHandler, _video_generation_failure_response
+from src.services.generation_handler import (
+    MODEL_CONFIG,
+    GenerationHandler,
+    _video_end_frame_index_from_bytes,
+    _video_generation_failure_response,
+)
 
 
 class VeoLiteModelResolverTests(unittest.TestCase):
@@ -57,6 +62,26 @@ class VeoLiteModelResolverTests(unittest.TestCase):
 
 
 class VeoLiteGenerationHandlerTests(unittest.TestCase):
+    @staticmethod
+    def _mp4_with_duration(duration_seconds: int, timescale: int = 1000) -> bytes:
+        duration = duration_seconds * timescale
+        mvhd_payload = (
+            b"\x00\x00\x00\x00"
+            + (0).to_bytes(4, "big")
+            + (0).to_bytes(4, "big")
+            + timescale.to_bytes(4, "big")
+            + duration.to_bytes(4, "big")
+            + b"\x00" * 80
+        )
+        mvhd = (len(mvhd_payload) + 8).to_bytes(4, "big") + b"mvhd" + mvhd_payload
+        moov = (len(mvhd) + 8).to_bytes(4, "big") + b"moov" + mvhd
+        ftyp = (16).to_bytes(4, "big") + b"ftyp" + b"isom" + b"\x00\x00\x00\x01"
+        return ftyp + moov
+
+    def test_video_edit_frame_index_uses_uploaded_video_duration(self):
+        self.assertEqual(_video_end_frame_index_from_bytes(self._mp4_with_duration(4)), 96)
+        self.assertEqual(_video_end_frame_index_from_bytes(self._mp4_with_duration(20)), 240)
+
     def test_video_policy_failure_uses_client_error_status(self):
         message, status_code = _video_generation_failure_response("PUBLIC_ERROR_UNSAFE_GENERATION")
 
@@ -486,6 +511,30 @@ class VeoLiteFlowClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request_data["referenceImages"][0]["mediaId"], "image-1")
         self.assertNotIn("duration", request_data)
         self.assertEqual(result["operations"][0]["operation"]["name"], "media-edit-1")
+
+    async def test_generate_video_edit_video_uses_dynamic_video_end_frame(self):
+        captured = {}
+
+        async def fake_make_request(method, url, json_data, use_at, at_token, **kwargs):
+            captured["json_data"] = json_data
+            return {"media": [{"name": "media-edit-1"}]}
+
+        self.client._make_request = AsyncMock(side_effect=fake_make_request)
+
+        await self.client.generate_video_edit_video(
+            at="at-token",
+            project_id="project-1",
+            prompt="edit scene",
+            model_key="abra_edit",
+            aspect_ratio="VIDEO_ASPECT_RATIO_LANDSCAPE",
+            video_media_id="video-media-1",
+            reference_images=[{"mediaId": "image-1", "imageUsageType": "IMAGE_USAGE_TYPE_ASSET"}],
+            video_end_frame_index=96,
+        )
+
+        request_data = captured["json_data"]["requests"][0]
+        self.assertEqual(request_data["videoInput"]["startFrameIndex"], 0)
+        self.assertEqual(request_data["videoInput"]["endFrameIndex"], 96)
 
     async def test_successful_media_status_without_fife_url_keeps_media_and_workflow_metadata(self):
         result = self.client._normalize_video_generation_response(
