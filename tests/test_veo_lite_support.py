@@ -81,7 +81,8 @@ class VeoLiteGenerationHandlerTests(unittest.TestCase):
 
     def test_video_edit_frame_index_uses_uploaded_video_duration(self):
         self.assertEqual(_video_end_frame_index_from_bytes(self._mp4_with_duration(4)), 96)
-        self.assertEqual(_video_end_frame_index_from_bytes(self._mp4_with_duration(20)), 240)
+        self.assertEqual(_video_end_frame_index_from_bytes(self._mp4_with_duration(10)), 239)
+        self.assertEqual(_video_end_frame_index_from_bytes(self._mp4_with_duration(20)), 239)
 
     def test_reference_video_duration_limit_is_ten_seconds(self):
         self.assertEqual(_validate_reference_video_duration(self._mp4_with_duration(10)), 10.0)
@@ -511,7 +512,7 @@ class VeoLiteFlowClientTests(unittest.IsolatedAsyncioTestCase):
             {
                 "mediaId": "video-media-1",
                 "startFrameIndex": 0,
-                "endFrameIndex": 240,
+                "endFrameIndex": 239,
             },
         )
         self.assertEqual(request_data["referenceImages"][0]["mediaId"], "image-1")

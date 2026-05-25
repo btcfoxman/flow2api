@@ -1042,8 +1042,8 @@ def _mp4_duration_seconds(data: bytes) -> Optional[float]:
 def _video_end_frame_index_from_bytes(data: Optional[bytes], fallback: int = 240) -> int:
     duration = _mp4_duration_seconds(data or b"")
     if not duration:
-        return fallback
-    return max(1, min(fallback, int(duration * 24)))
+        return max(1, fallback - 1)
+    return max(1, min(max(1, fallback - 1), int(duration * 24)))
 
 
 def _validate_reference_video_duration(data: Optional[bytes]) -> Optional[float]:
