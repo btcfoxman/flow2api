@@ -17,6 +17,7 @@ from ..core.account_tiers import (
     supports_model_for_tier,
 )
 from .file_cache import FileCache
+from .watermark_processor import WatermarkProcessor
 
 
 # Model configuration
@@ -1071,6 +1072,7 @@ class GenerationHandler:
             proxy_manager=proxy_manager,
             flow_client=flow_client,
         )
+        self.watermark_processor = WatermarkProcessor()
 
     def _create_generation_result(self) -> Dict[str, Any]:
         """????????????????"""
@@ -1082,6 +1084,7 @@ class GenerationHandler:
             "url": None,
             "generated_assets": None,
             "base_url": None,
+            "async_task_id": None,
         }
 
     def _mark_generation_failed(self, generation_result: Optional[Dict[str, Any]], error_message: str):
@@ -1171,6 +1174,8 @@ class GenerationHandler:
         video_mime_type: Optional[str] = None,
         video_file_name: Optional[str] = None,
         aspect_ratio_override: Optional[str] = None,
+        async_video_task: bool = False,
+        watermark: bool = True,
     ) -> AsyncGenerator:
         """统一生成入口
 
@@ -1217,6 +1222,7 @@ class GenerationHandler:
             "prompt": prompt_for_log,
             "has_images": images is not None and len(images) > 0,
             "has_video": bool(video_media_id or video_bytes),
+            "watermark": bool(watermark),
         }
         debug_logger.log_info(f"[GENERATION] 开始生成 - 模型: {model}, 类型: {generation_type}, Prompt: {prompt[:50]}...")
 
@@ -1379,6 +1385,8 @@ class GenerationHandler:
                     video_mime_type=video_mime_type,
                     video_file_name=video_file_name,
                     aspect_ratio_override=aspect_ratio_override,
+                    async_task=async_video_task,
+                    watermark=watermark,
                 ):
                     yield chunk
             perf_trace["generation_pipeline_ms"] = int((time.time() - generation_pipeline_started_at) * 1000)
@@ -1455,6 +1463,7 @@ class GenerationHandler:
                 f"video_slot_wait={video_perf.get('slot_wait_ms', 0)}ms"
             )
 
+            is_async_video_task = bool(response_state.get("async_task_id"))
             await self._log_request(
                 token.id,
                 request_operation,
@@ -1463,8 +1472,8 @@ class GenerationHandler:
                 200,
                 duration,
                 log_id=request_log_state.get("id"),
-                status_text="completed",
-                progress=100,
+                status_text="video_submitted" if is_async_video_task else "completed",
+                progress=45 if is_async_video_task else 100,
             )
 
         except asyncio.CancelledError:
@@ -1834,6 +1843,8 @@ class GenerationHandler:
         video_mime_type: Optional[str] = None,
         video_file_name: Optional[str] = None,
         aspect_ratio_override: Optional[str] = None,
+        async_task: bool = False,
+        watermark: bool = True,
     ) -> AsyncGenerator:
         """处理视频生成 (异步轮询)"""
 
@@ -2153,7 +2164,11 @@ class GenerationHandler:
                 model=model_config["model_key"],
                 prompt=prompt,
                 status="processing",
-                scene_id=scene_id
+                progress=45,
+                scene_id=scene_id,
+                project_id=project_id,
+                operations=operations,
+                watermark=bool(watermark),
             )
             await self.db.create_task(task)
             await self._update_request_log_progress(
@@ -2169,6 +2184,28 @@ class GenerationHandler:
                 yield self._create_stream_chunk(f"视频生成中...\n")
 
             # 检查是否需要放大
+            if async_task:
+                response_state["async_task_id"] = task_id
+                self._mark_generation_succeeded(generation_result)
+                asyncio.create_task(
+                    self._run_video_task_background(
+                        token=token,
+                        project_id=project_id,
+                        operations=operations,
+                        upsample_config=model_config.get("upsample"),
+                        response_state=dict(response_state),
+                        extend_source_media_id=video_media_id if video_type == "extend" else None,
+                        watermark=bool(watermark),
+                    )
+                )
+                yield self._create_video_task_response(
+                    task_id=task_id,
+                    model=model_config["model_key"],
+                    status="processing",
+                    progress=45,
+                )
+                return
+
             upsample_config = model_config.get("upsample")
 
             # 如果是 extend，传入源视频 media_id 用于后续拼接
@@ -2183,11 +2220,46 @@ class GenerationHandler:
                 response_state,
                 request_log_state,
                 extend_source_media_id=extend_source_id,
+                watermark=bool(watermark),
             ):
                 yield chunk
 
         finally:
             pass
+
+    async def _run_video_task_background(
+        self,
+        *,
+        token,
+        project_id: str,
+        operations: List[Dict],
+        upsample_config: Optional[Dict],
+        response_state: Dict[str, Any],
+        extend_source_media_id: Optional[str],
+        watermark: bool,
+    ) -> None:
+        generation_result = self._create_generation_result()
+        try:
+            async for _ in self._poll_video_result(
+                token,
+                project_id,
+                operations,
+                False,
+                upsample_config,
+                generation_result,
+                response_state,
+                None,
+                extend_source_media_id=extend_source_media_id,
+                watermark=watermark,
+            ):
+                pass
+            if not generation_result.get("success"):
+                await self.token_manager.record_error(token.id)
+        except Exception as exc:
+            error_msg = self._normalize_error_message(exc)
+            debug_logger.log_error(f"[VIDEO ASYNC] background task failed: {error_msg}")
+            await self._fail_video_task(operations, error_msg)
+            await self.token_manager.record_error(token.id)
 
     async def _poll_video_result(
         self,
@@ -2200,6 +2272,7 @@ class GenerationHandler:
         response_state: Optional[Dict[str, Any]] = None,
         request_log_state: Optional[Dict[str, Any]] = None,
         extend_source_media_id: Optional[str] = None,
+        watermark: bool = True,
     ) -> AsyncGenerator:
         """轮询视频生成结果
         
@@ -2320,6 +2393,7 @@ class GenerationHandler:
                                     generation_result,
                                     response_state,
                                     request_log_state,
+                                    watermark=bool(watermark),
                                 ):
                                     yield chunk
                                 return
@@ -2388,8 +2462,14 @@ class GenerationHandler:
                             # 拼接失败不影响返回，继续使用 extend 片段的 URL
 
                     # 缓存视频 (如果启用)
-                    local_url = video_url
-                    if config.cache_enabled:
+                    original_video_url = video_url
+                    local_url = await self.watermark_processor.apply_policy(
+                        url=video_url,
+                        watermark=bool(watermark),
+                        file_cache=self.file_cache,
+                        public_base_url=self._get_base_url(response_state),
+                    )
+                    if config.cache_enabled and local_url == original_video_url:
                         await self._update_request_log_progress(request_log_state, token_id=token.id, status_text="caching_video", progress=92)
                         try:
                             if stream:
@@ -2573,6 +2653,73 @@ class GenerationHandler:
         }
 
         return json.dumps(response, ensure_ascii=False)
+
+    def _create_video_task_response(
+        self,
+        *,
+        task_id: str,
+        model: Optional[str] = None,
+        status: str,
+        progress: Optional[int] = None,
+        video_url: Optional[str] = None,
+        error_message: Optional[str] = None,
+    ) -> str:
+        response: Dict[str, Any] = {
+            "id": task_id,
+            "object": "video",
+            "status": status,
+            "created_at": int(time.time()),
+        }
+        if model:
+            response["model"] = model
+        if progress is not None:
+            response["progress"] = progress
+        if video_url:
+            response["video_url"] = video_url
+        if status == "completed":
+            response["completed_at"] = int(time.time())
+        if error_message:
+            response["error"] = {
+                "code": "FAILED",
+                "message": error_message,
+            }
+        return json.dumps(response, ensure_ascii=False)
+
+    async def get_video_task_payload(self, task_id: str) -> Optional[Dict[str, Any]]:
+        task = await self.db.get_task(task_id)
+        if task is None:
+            return None
+        return self._task_to_video_payload(task)
+
+    def _task_to_video_payload(self, task: Task) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "id": task.task_id,
+            "object": "video",
+            "status": task.status,
+            "progress": task.progress,
+            "model": task.model,
+        }
+        if task.created_at is not None:
+            try:
+                payload["created_at"] = int(task.created_at.timestamp())
+            except Exception:
+                pass
+        if task.completed_at is not None:
+            try:
+                payload["completed_at"] = int(task.completed_at.timestamp())
+            except Exception:
+                try:
+                    payload["completed_at"] = int(float(task.completed_at))
+                except Exception:
+                    pass
+        if task.result_urls:
+            payload["video_url"] = task.result_urls[0]
+        if task.error_message:
+            payload["error"] = {
+                "code": "FAILED",
+                "message": task.error_message,
+            }
+        return payload
 
     def _create_error_response(self, error_message: str, status_code: int = 500) -> str:
         """创建错误响应"""

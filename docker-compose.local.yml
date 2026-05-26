@@ -12,6 +12,7 @@ services:
     volumes:
       - ./data:/app/data
       - ./tmp:/app/tmp
+      - ./bin:/app/bin:ro
       - ./config/setting.toml:/app/config/setting.toml
     environment:
       - PYTHONUNBUFFERED=1

@@ -539,6 +539,22 @@ class CallLogicConfigRequest(BaseModel):
     call_mode: str
 
 
+class WatermarkConfigRequest(BaseModel):
+    flow_content_proxy_base: Optional[str] = None
+    gwt_video_command: Optional[str] = None
+    gwt_video_concurrency: Optional[int] = None
+    s3_enabled: Optional[bool] = None
+    s3_endpoint: Optional[str] = None
+    s3_region: Optional[str] = None
+    s3_bucket: Optional[str] = None
+    s3_access_key: Optional[str] = None
+    s3_secret_key: Optional[str] = None
+    s3_prefix: Optional[str] = None
+    s3_public_base_url: Optional[str] = None
+    s3_force_path_style: Optional[bool] = None
+    s3_acl: Optional[str] = None
+
+
 class ChangePasswordRequest(BaseModel):
     username: Optional[str] = None
     old_password: str
@@ -1490,6 +1506,25 @@ async def _sync_runtime_cache_config():
         file_cache.set_timeout(config.cache_timeout)
         await file_cache.refresh_cleanup_task()
 
+
+def _sync_runtime_watermark_config():
+    from . import routes
+    handler = routes.generation_handler
+    processor = getattr(handler, "watermark_processor", None) if handler else None
+    if processor and hasattr(processor, "refresh_runtime_config"):
+        processor.refresh_runtime_config()
+
+
+def _normalize_admin_url(value: Optional[str], field_name: str, *, required: bool = False) -> str:
+    normalized = (value or "").strip()
+    if required and not normalized:
+        raise HTTPException(status_code=400, detail=f"{field_name}不能为空")
+    if normalized:
+        parsed = urlparse(normalized)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            raise HTTPException(status_code=400, detail=f"{field_name}必须是 http:// 或 https:// URL")
+    return normalized
+
 # ========== Cache Configuration Endpoints ==========
 
 @router.get("/api/cache/config")
@@ -1568,6 +1603,98 @@ async def update_cache_base_url(
     await _sync_runtime_cache_config()
 
     return {"success": True, "message": "缓存Base URL更新成功"}
+
+
+# ========== Watermark/S3 Configuration Endpoints ==========
+
+@router.get("/api/watermark/config")
+async def get_watermark_config(token: str = Depends(verify_admin_token)):
+    """Get watermark and S3 upload configuration."""
+    watermark_config = await db.get_watermark_config()
+    return {
+        "success": True,
+        "config": {
+            "flow_content_proxy_base": watermark_config.flow_content_proxy_base or "",
+            "gwt_video_command": watermark_config.gwt_video_command or "",
+            "gwt_video_concurrency": watermark_config.gwt_video_concurrency,
+            "s3_enabled": watermark_config.s3_enabled,
+            "s3_endpoint": watermark_config.s3_endpoint or "",
+            "s3_region": watermark_config.s3_region or "auto",
+            "s3_bucket": watermark_config.s3_bucket or "",
+            "s3_access_key": watermark_config.s3_access_key or "",
+            "s3_secret_key": watermark_config.s3_secret_key or "",
+            "s3_prefix": watermark_config.s3_prefix or "",
+            "s3_public_base_url": watermark_config.s3_public_base_url or "",
+            "s3_force_path_style": watermark_config.s3_force_path_style,
+            "s3_acl": watermark_config.s3_acl or "",
+        },
+    }
+
+
+@router.post("/api/watermark/config")
+async def update_watermark_config(
+    request: WatermarkConfigRequest,
+    token: str = Depends(verify_admin_token)
+):
+    """Update watermark and S3 upload configuration."""
+    flow_content_proxy_base = _normalize_admin_url(
+        request.flow_content_proxy_base or "https://file-vercel-fl-go.aiid.edu.kg",
+        "Flow 链接代理域名",
+        required=True,
+    ).rstrip("/")
+    gwt_video_command = (request.gwt_video_command or "").strip() or "/app/bin/gwt-video"
+
+    try:
+        gwt_video_concurrency = int(request.gwt_video_concurrency or 1)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="gwt-video 并发数必须为整数")
+    if gwt_video_concurrency < 1 or gwt_video_concurrency > 16:
+        raise HTTPException(status_code=400, detail="gwt-video 并发数必须在 1-16 之间")
+
+    s3_enabled = bool(request.s3_enabled)
+    s3_endpoint = _normalize_admin_url(request.s3_endpoint, "S3 Endpoint")
+    s3_region = (request.s3_region or "auto").strip() or "auto"
+    s3_bucket = (request.s3_bucket or "").strip()
+    s3_access_key = (request.s3_access_key or "").strip()
+    s3_secret_key = request.s3_secret_key or ""
+    s3_prefix = (request.s3_prefix or "").strip()
+    s3_public_base_url = _normalize_admin_url(request.s3_public_base_url, "S3 公开访问域名").rstrip("/")
+    s3_force_path_style = True if request.s3_force_path_style is None else bool(request.s3_force_path_style)
+    s3_acl = (request.s3_acl or "").strip()
+
+    if s3_enabled:
+        missing = [
+            name
+            for name, value in (
+                ("S3 Bucket", s3_bucket),
+                ("S3 Access Key", s3_access_key),
+                ("S3 Secret Key", s3_secret_key),
+            )
+            if not value
+        ]
+        if missing:
+            raise HTTPException(status_code=400, detail=f"启用 S3 时缺少配置：{', '.join(missing)}")
+
+    await db.update_watermark_config(
+        flow_content_proxy_base=flow_content_proxy_base,
+        gwt_video_command=gwt_video_command,
+        gwt_video_concurrency=gwt_video_concurrency,
+        s3_enabled=s3_enabled,
+        s3_endpoint=s3_endpoint,
+        s3_region=s3_region,
+        s3_bucket=s3_bucket,
+        s3_access_key=s3_access_key,
+        s3_secret_key=s3_secret_key,
+        s3_prefix=s3_prefix,
+        s3_public_base_url=s3_public_base_url,
+        s3_force_path_style=s3_force_path_style,
+        s3_acl=s3_acl,
+    )
+
+    await db.reload_config_to_memory()
+    _sync_runtime_watermark_config()
+
+    return {"success": True, "message": "水印与 S3 配置更新成功"}
 
 
 @router.post("/api/captcha/config")

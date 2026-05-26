@@ -314,6 +314,81 @@
                     <button onclick="saveCacheConfig()" class="inline-flex items-center justify-center rounded-md bg-primary text-primary-foreground hover:bg-primary/90 h-9 px-4 w-full mt-4">保存配置</button>
                 </div>
 
+                <!-- 水印处理与 S3 上传配置 -->
+                <div class="rounded-lg border border-border bg-background p-6 flex flex-col lg:col-span-2">
+                    <h3 class="text-lg font-semibold mb-4">水印处理与 S3 上传</h3>
+                    <div class="space-y-4 flex-1">
+                        <div class="grid gap-4 lg:grid-cols-2">
+                            <div>
+                                <label class="text-sm font-medium mb-2 block">Flow 链接代理域名</label>
+                                <input id="cfgFlowContentProxyBase" type="text" class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm" placeholder="https://file-vercel-fl-go.aiid.edu.kg">
+                                <p class="text-xs text-muted-foreground mt-1">watermark=true 或失败回退时替换 flow-content.google 的访问域名</p>
+                            </div>
+                            <div>
+                                <label class="text-sm font-medium mb-2 block">gwt-video 命令路径</label>
+                                <input id="cfgGwtVideoCommand" type="text" class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm" placeholder="/app/bin/gwt-video">
+                                <p class="text-xs text-muted-foreground mt-1">Docker 挂载时通常为 /app/bin/gwt-video</p>
+                            </div>
+                            <div>
+                                <label class="text-sm font-medium mb-2 block">gwt-video 并发数</label>
+                                <input id="cfgGwtVideoConcurrency" type="number" min="1" max="16" class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm" placeholder="1">
+                                <p class="text-xs text-muted-foreground mt-1">watermark=false 时进入本地处理队列，范围：1-16</p>
+                            </div>
+                            <div>
+                                <label class="inline-flex items-center gap-2 cursor-pointer mt-7">
+                                    <input type="checkbox" id="cfgS3Enabled" class="h-4 w-4 rounded border-input">
+                                    <span class="text-sm font-medium">启用 S3 上传</span>
+                                </label>
+                                <p class="text-xs text-muted-foreground mt-1">处理完成后上传至 S3，并返回公开访问链接</p>
+                            </div>
+                            <div>
+                                <label class="text-sm font-medium mb-2 block">S3 Endpoint</label>
+                                <input id="cfgS3Endpoint" type="text" class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm" placeholder="https://s3.example.com">
+                                <p class="text-xs text-muted-foreground mt-1">兼容 S3 服务可填写自定义 Endpoint；AWS S3 可留空</p>
+                            </div>
+                            <div>
+                                <label class="text-sm font-medium mb-2 block">S3 Region</label>
+                                <input id="cfgS3Region" type="text" class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm" placeholder="auto">
+                                <p class="text-xs text-muted-foreground mt-1">兼容服务通常可使用 auto</p>
+                            </div>
+                            <div>
+                                <label class="text-sm font-medium mb-2 block">S3 Bucket</label>
+                                <input id="cfgS3Bucket" type="text" class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm" placeholder="bucket-name">
+                            </div>
+                            <div>
+                                <label class="text-sm font-medium mb-2 block">S3 Prefix</label>
+                                <input id="cfgS3Prefix" type="text" class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm" placeholder="flow2api/watermark/">
+                            </div>
+                            <div>
+                                <label class="text-sm font-medium mb-2 block">S3 Access Key</label>
+                                <input id="cfgS3AccessKey" type="text" autocomplete="off" class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm" placeholder="Access Key">
+                            </div>
+                            <div>
+                                <label class="text-sm font-medium mb-2 block">S3 Secret Key</label>
+                                <input id="cfgS3SecretKey" type="password" autocomplete="new-password" class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm" placeholder="Secret Key">
+                            </div>
+                            <div>
+                                <label class="text-sm font-medium mb-2 block">S3 公开访问域名</label>
+                                <input id="cfgS3PublicBaseUrl" type="text" class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm" placeholder="https://cdn.example.com">
+                                <p class="text-xs text-muted-foreground mt-1">留空则按上传地址拼接返回</p>
+                            </div>
+                            <div>
+                                <label class="text-sm font-medium mb-2 block">S3 ACL</label>
+                                <input id="cfgS3Acl" type="text" class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm" placeholder="public-read">
+                                <p class="text-xs text-muted-foreground mt-1">不需要 x-amz-acl 时留空</p>
+                            </div>
+                            <div>
+                                <label class="inline-flex items-center gap-2 cursor-pointer">
+                                    <input type="checkbox" id="cfgS3ForcePathStyle" class="h-4 w-4 rounded border-input">
+                                    <span class="text-sm font-medium">强制 Path Style</span>
+                                </label>
+                                <p class="text-xs text-muted-foreground mt-1">兼容 MinIO、R2、TOS 等服务时通常启用</p>
+                            </div>
+                        </div>
+                    </div>
+                    <button onclick="saveWatermarkConfig()" class="inline-flex items-center justify-center rounded-md bg-primary text-primary-foreground hover:bg-primary/90 h-9 px-4 w-full mt-4">保存配置</button>
+                </div>
+
                 <!-- 插件连接配置 -->
                 <div class="rounded-lg border border-border bg-background p-6 flex flex-col">
                     <h3 class="text-lg font-semibold mb-4">插件连接配置</h3>
@@ -958,6 +1033,9 @@
         loadCacheConfig=async()=>{try{console.log('开始加载缓存配置...');const r=await apiRequest('/api/cache/config');if(!r){console.error('API请求失败');return}const d=await r.json();console.log('缓存配置数据:',d);if(d.success&&d.config){const enabled=d.config.enabled!==false;const timeout=d.config.timeout??7200;const baseUrl=d.config.base_url||'';const effectiveUrl=d.config.effective_base_url||'';console.log('设置缓存启用:',enabled);console.log('设置超时时间:',timeout);console.log('设置域名:',baseUrl);console.log('生效URL:',effectiveUrl);$('cfgCacheEnabled').checked=enabled;$('cfgCacheTimeout').value=timeout;$('cfgCacheBaseUrl').value=baseUrl;if(effectiveUrl){$('cacheEffectiveUrlValue').textContent=effectiveUrl;$('cacheEffectiveUrl').classList.remove('hidden')}else{$('cacheEffectiveUrl').classList.add('hidden')}toggleCacheOptions();console.log('缓存配置加载成功')}else{console.error('缓存配置数据格式错误:',d)}}catch(e){console.error('加载缓存配置失败:',e);showToast('加载缓存配置失败: '+e.message,'error')}},
         loadGenerationTimeout=async()=>{try{console.log('开始加载生成配置...');const r=await apiRequest('/api/generation/timeout');if(!r){console.error('API请求失败');return}const d=await r.json();console.log('生成配置数据:',d);if(d.success&&d.config){const imageTimeout=d.config.image_timeout||300;const videoTimeout=d.config.video_timeout||1500;const maxRetries=d.config.max_retries||3;console.log('设置图片超时:',imageTimeout);console.log('设置视频超时:',videoTimeout);console.log('设置最大重试次数:',maxRetries);$('cfgImageTimeout').value=imageTimeout;$('cfgVideoTimeout').value=videoTimeout;$('cfgMaxRetries').value=maxRetries;console.log('生成配置加载成功')}else{console.error('生成配置数据格式错误:',d)}}catch(e){console.error('加载生成配置失败:',e);showToast('加载生成配置失败: '+e.message,'error')}},
         loadCallLogicConfig=async()=>{try{const r=await apiRequest('/api/call-logic/config');if(!r)return;const d=await r.json();if(d.success&&d.config){const mode=d.config.call_mode||((d.config.polling_mode_enabled||false)?'polling':'default');$('cfgCallLogicMode').value=mode}else{console.error('轮询模式配置数据格式错误:',d)}}catch(e){console.error('加载轮询模式配置失败:',e);showToast('加载轮询模式配置失败: '+e.message,'error')}},
+        isHttpUrl=value=>!value||value.startsWith('http://')||value.startsWith('https://'),
+        loadWatermarkConfig=async()=>{try{const r=await apiRequest('/api/watermark/config');if(!r)return;const d=await r.json();if(d.success&&d.config){const c=d.config;$('cfgFlowContentProxyBase').value=c.flow_content_proxy_base||'https://file-vercel-fl-go.aiid.edu.kg';$('cfgGwtVideoCommand').value=c.gwt_video_command||'/app/bin/gwt-video';$('cfgGwtVideoConcurrency').value=c.gwt_video_concurrency||1;$('cfgS3Enabled').checked=!!c.s3_enabled;$('cfgS3Endpoint').value=c.s3_endpoint||'';$('cfgS3Region').value=c.s3_region||'auto';$('cfgS3Bucket').value=c.s3_bucket||'';$('cfgS3AccessKey').value=c.s3_access_key||'';$('cfgS3SecretKey').value=c.s3_secret_key||'';$('cfgS3Prefix').value=c.s3_prefix||'flow2api/watermark/';$('cfgS3PublicBaseUrl').value=c.s3_public_base_url||'';$('cfgS3ForcePathStyle').checked=c.s3_force_path_style!==false;$('cfgS3Acl').value=c.s3_acl||''}else{console.error('水印与 S3 配置数据格式错误:',d)}}catch(e){console.error('加载水印与 S3 配置失败:',e);showToast('加载水印与 S3 配置失败: '+e.message,'error')}},
+        saveWatermarkConfig=async()=>{const flowContentProxyBase=$('cfgFlowContentProxyBase').value.trim()||'https://file-vercel-fl-go.aiid.edu.kg',gwtVideoCommand=$('cfgGwtVideoCommand').value.trim()||'/app/bin/gwt-video',gwtVideoConcurrency=parseInt($('cfgGwtVideoConcurrency').value)||1,s3Enabled=$('cfgS3Enabled').checked,s3Endpoint=$('cfgS3Endpoint').value.trim(),s3Region=$('cfgS3Region').value.trim()||'auto',s3Bucket=$('cfgS3Bucket').value.trim(),s3AccessKey=$('cfgS3AccessKey').value.trim(),s3SecretKey=$('cfgS3SecretKey').value,s3Prefix=$('cfgS3Prefix').value.trim(),s3PublicBaseUrl=$('cfgS3PublicBaseUrl').value.trim(),s3ForcePathStyle=$('cfgS3ForcePathStyle').checked,s3Acl=$('cfgS3Acl').value.trim();if(!isHttpUrl(flowContentProxyBase))return showToast('Flow 链接代理域名必须以 http:// 或 https:// 开头','error');if(!isHttpUrl(s3Endpoint))return showToast('S3 Endpoint 必须以 http:// 或 https:// 开头','error');if(!isHttpUrl(s3PublicBaseUrl))return showToast('S3 公开访问域名必须以 http:// 或 https:// 开头','error');if(gwtVideoConcurrency<1||gwtVideoConcurrency>16)return showToast('gwt-video 并发数必须在 1-16 之间','error');if(s3Enabled&&(!s3Bucket||!s3AccessKey||!s3SecretKey))return showToast('启用 S3 时必须填写 Bucket、Access Key、Secret Key','error');try{const r=await apiRequest('/api/watermark/config',{method:'POST',body:JSON.stringify({flow_content_proxy_base:flowContentProxyBase,gwt_video_command:gwtVideoCommand,gwt_video_concurrency:gwtVideoConcurrency,s3_enabled:s3Enabled,s3_endpoint:s3Endpoint,s3_region:s3Region,s3_bucket:s3Bucket,s3_access_key:s3AccessKey,s3_secret_key:s3SecretKey,s3_prefix:s3Prefix,s3_public_base_url:s3PublicBaseUrl,s3_force_path_style:s3ForcePathStyle,s3_acl:s3Acl})});if(!r)return;const d=await r.json();if(d.success){showToast('水印与 S3 配置保存成功','success');await loadWatermarkConfig()}else{showToast(d.detail||d.message||'保存失败','error')}}catch(e){showToast('保存失败: '+e.message,'error')}},
         saveCacheConfig=async()=>{const enabled=$('cfgCacheEnabled').checked,timeoutInput=$('cfgCacheTimeout').value.trim(),timeout=timeoutInput===''?7200:parseInt(timeoutInput,10),baseUrl=$('cfgCacheBaseUrl').value.trim();console.log('保存缓存配置:',{enabled,timeout,baseUrl});if(Number.isNaN(timeout)||timeout<0||timeout>86400)return showToast('缓存超时时间必须在 0-86400 秒之间，0 表示不删除','error');if(baseUrl&&!baseUrl.startsWith('http://')&&!baseUrl.startsWith('https://'))return showToast('域名必须以 http:// 或 https:// 开头','error');try{console.log('保存缓存启用状态...');const r0=await apiRequest('/api/cache/enabled',{method:'POST',body:JSON.stringify({enabled:enabled})});if(!r0){console.error('保存缓存启用状态请求失败');return}const d0=await r0.json();console.log('缓存启用状态保存结果:',d0);if(!d0.success){console.error('保存缓存启用状态失败:',d0);return showToast('保存缓存启用状态失败','error')}console.log('保存超时时间...');const r1=await apiRequest('/api/cache/config',{method:'POST',body:JSON.stringify({timeout:timeout})});if(!r1){console.error('保存超时时间请求失败');return}const d1=await r1.json();console.log('超时时间保存结果:',d1);if(!d1.success){console.error('保存超时时间失败:',d1);return showToast('保存超时时间失败','error')}console.log('保存域名...');const r2=await apiRequest('/api/cache/base-url',{method:'POST',body:JSON.stringify({base_url:baseUrl})});if(!r2){console.error('保存域名请求失败');return}const d2=await r2.json();console.log('域名保存结果:',d2);if(d2.success){showToast('缓存配置保存成功','success');console.log('等待配置文件写入完成...');await new Promise(r=>setTimeout(r,200));console.log('重新加载配置...');await loadCacheConfig()}else{console.error('保存域名失败:',d2);showToast('保存域名失败','error')}}catch(e){console.error('保存失败:',e);showToast('保存失败: '+e.message,'error')}},
         saveGenerationTimeout=async()=>{const imageTimeout=parseInt($('cfgImageTimeout').value)||300,videoTimeout=parseInt($('cfgVideoTimeout').value)||1500,maxRetries=parseInt($('cfgMaxRetries').value)||3;console.log('保存生成配置:',{imageTimeout,videoTimeout,maxRetries});if(imageTimeout<60||imageTimeout>3600)return showToast('图片超时时间必须在 60-3600 秒之间','error');if(videoTimeout<60||videoTimeout>7200)return showToast('视频超时时间必须在 60-7200 秒之间','error');if(maxRetries<1)return showToast('最大重试次数不能小于 1','error');try{const r=await apiRequest('/api/generation/timeout',{method:'POST',body:JSON.stringify({image_timeout:imageTimeout,video_timeout:videoTimeout,max_retries:maxRetries})});if(!r){console.error('保存请求失败');return}const d=await r.json();console.log('保存结果:',d);if(d.success){showToast('生成配置保存成功','success');await new Promise(r=>setTimeout(r,200));await loadGenerationTimeout()}else{console.error('保存失败:',d);showToast('保存失败','error')}}catch(e){console.error('保存失败:',e);showToast('保存失败: '+e.message,'error')}},
         saveCallLogicConfig=async()=>{const callMode=$('cfgCallLogicMode').value||'default';try{const r=await apiRequest('/api/call-logic/config',{method:'POST',body:JSON.stringify({call_mode:callMode})});if(!r)return;const d=await r.json();if(d.success){showToast('Token轮询配置保存成功','success');await loadCallLogicConfig()}else{showToast(d.message||'保存失败','error')}}catch(e){console.error('保存轮询模式配置失败:',e);showToast('保存轮询模式配置失败: '+e.message,'error')}},
@@ -988,7 +1066,7 @@
         closeLogDetailModal=()=>{window.activeLogDetailId=null;resetLogMediaCache();$('logDetailModal').classList.add('hidden')},
         showToast=(m,t='info')=>{const d=document.createElement('div'),bc={success:'bg-green-600',error:'bg-destructive',info:'bg-primary'};d.className=`fixed bottom-4 right-4 ${bc[t]||bc.info} text-white px-4 py-2.5 rounded-lg shadow-lg text-sm font-medium z-50 animate-slide-up`;d.textContent=m;document.body.appendChild(d);setTimeout(()=>{d.style.opacity='0';d.style.transition='opacity .3s';setTimeout(()=>d.parentNode&&document.body.removeChild(d),300)},2000)},
         logout=()=>{if(!confirm('确定要退出登录吗?'))return;localStorage.removeItem('adminToken');location.href='/login'},
-        switchTab=t=>{const cap=n=>n.charAt(0).toUpperCase()+n.slice(1);['tokens','settings','logs'].forEach(n=>{const active=n===t;$(`panel${cap(n)}`).classList.toggle('hidden',!active);$(`tab${cap(n)}`).classList.toggle('border-primary',active);$(`tab${cap(n)}`).classList.toggle('text-primary',active);$(`tab${cap(n)}`).classList.toggle('border-transparent',!active);$(`tab${cap(n)}`).classList.toggle('text-muted-foreground',!active)});if(t==='settings'){stopLogsAutoRefresh();loadAdminConfig();loadProxyConfig();loadCacheConfig();loadGenerationTimeout();loadCallLogicConfig();loadCaptchaConfig();loadPluginConfig();loadATAutoRefreshConfig()}else if(t==='logs'){startLogsAutoRefresh();loadLogs()}else{stopLogsAutoRefresh()}};
+        switchTab=t=>{const cap=n=>n.charAt(0).toUpperCase()+n.slice(1);['tokens','settings','logs'].forEach(n=>{const active=n===t;$(`panel${cap(n)}`).classList.toggle('hidden',!active);$(`tab${cap(n)}`).classList.toggle('border-primary',active);$(`tab${cap(n)}`).classList.toggle('text-primary',active);$(`tab${cap(n)}`).classList.toggle('border-transparent',!active);$(`tab${cap(n)}`).classList.toggle('text-muted-foreground',!active)});if(t==='settings'){stopLogsAutoRefresh();loadAdminConfig();loadProxyConfig();loadCacheConfig();loadWatermarkConfig();loadGenerationTimeout();loadCallLogicConfig();loadCaptchaConfig();loadPluginConfig();loadATAutoRefreshConfig()}else if(t==='logs'){startLogsAutoRefresh();loadLogs()}else{stopLogsAutoRefresh()}};
 
         function escapeLogHtml(text){
             if(text===null||text===undefined) return '';

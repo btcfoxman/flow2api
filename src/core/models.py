@@ -93,6 +93,9 @@ class Task(BaseModel):
     result_urls: Optional[List[str]] = None
     error_message: Optional[str] = None
     scene_id: Optional[str] = None  # Flow API的sceneId
+    project_id: Optional[str] = None
+    operations: Optional[List[dict]] = None
+    watermark: bool = True
     created_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
 
@@ -158,6 +161,27 @@ class CacheConfig(BaseModel):
     cache_enabled: bool = False
     cache_timeout: int = 7200  # seconds (2 hours), 0 means never expire
     cache_base_url: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class WatermarkConfig(BaseModel):
+    """Video watermark and S3 upload configuration"""
+
+    id: int = 1
+    flow_content_proxy_base: str = "https://file-vercel-fl-go.aiid.edu.kg"
+    gwt_video_command: str = "/app/bin/gwt-video"
+    gwt_video_concurrency: int = 1
+    s3_enabled: bool = False
+    s3_endpoint: str = ""
+    s3_region: str = "auto"
+    s3_bucket: str = ""
+    s3_access_key: str = ""
+    s3_secret_key: str = ""
+    s3_prefix: str = "flow2api/watermark/"
+    s3_public_base_url: str = ""
+    s3_force_path_style: bool = True
+    s3_acl: str = ""
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 

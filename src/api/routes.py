@@ -6,7 +6,7 @@ import base64
 import json
 import mimetypes
 import re
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from curl_cffi.requests import AsyncSession
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
@@ -38,6 +38,24 @@ MEDIA_SYSTEM_INSTRUCTION_MARKERS = (
     "\"$schema\"",
     "\"additionalproperties\"",
 )
+VIDEO_IMAGE_PAYLOAD_KEYS = [
+    "input_reference",
+    "image",
+    "image_url",
+    "images",
+    "image_urls",
+    "reference_image",
+    "reference_image_url",
+    "reference_images",
+    "reference_image_urls",
+]
+VIDEO_VIDEO_PAYLOAD_KEYS = [
+    "video_url",
+    "video_urls",
+    "videos",
+    "reference_video",
+    "reference_video_url",
+]
 MEDIA_PROMPT_PREAMBLE_PATTERNS = (
     re.compile(r"^you are a function calling ai model\.?$", re.IGNORECASE),
     re.compile(
@@ -84,6 +102,7 @@ class NormalizedGenerationRequest:
     video_mime_type: Optional[str] = None
     video_file_name: Optional[str] = None
     aspect_ratio_override: Optional[str] = None
+    watermark: bool = True
 
 
 def set_generation_handler(handler: GenerationHandler):
@@ -323,6 +342,86 @@ def _decode_video_payload(value: str) -> tuple[bytes, str, str]:
     return base64.b64decode(value), "video/mp4", "upload.mp4"
 
 
+def _coerce_bool(value: Any, default: bool = True) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"true", "1", "yes", "y", "on"}:
+        return True
+    if text in {"false", "0", "no", "n", "off"}:
+        return False
+    return default
+
+
+def _extract_url_value(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        return text or None
+    if isinstance(value, dict):
+        for key in ("url", "uri", "image_url", "video_url", "fileUri", "file_uri"):
+            nested = _extract_url_value(value.get(key))
+            if nested:
+                return nested
+    return None
+
+
+def _collect_media_values(payload: Dict[str, Any], keys: List[str]) -> List[str]:
+    values: List[str] = []
+
+    def add(value: Any) -> None:
+        if value is None:
+            return
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return
+            try:
+                parsed = json.loads(stripped)
+            except Exception:
+                values.append(stripped)
+                return
+            add(parsed)
+            return
+        if isinstance(value, list):
+            for item in value:
+                add(item)
+            return
+        extracted = _extract_url_value(value)
+        if extracted:
+            values.append(extracted)
+
+    for key in keys:
+        add(payload.get(key))
+    return values
+
+
+def _parse_jsonish_value(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if not text or text[0] not in "[{":
+        return value
+    try:
+        return json.loads(text)
+    except Exception:
+        return value
+
+
+def _append_video_payload_media_items(
+    payload: Dict[str, Any], content: List[Dict[str, Any]]
+) -> None:
+    for image_url in _collect_media_values(payload, VIDEO_IMAGE_PAYLOAD_KEYS):
+        content.append({"type": "image_url", "image_url": {"url": image_url}})
+    for video_url in _collect_media_values(payload, VIDEO_VIDEO_PAYLOAD_KEYS):
+        content.append({"type": "video_url", "video_url": {"url": video_url}})
+
+
 def _video_aspect_override_from_request(request: Any) -> Optional[str]:
     aspect_ratio, _ = extract_generation_params(request)
     if aspect_ratio == "landscape":
@@ -406,14 +505,14 @@ async def _extract_prompt_and_images_from_openai_messages(
                 if text:
                     prompt_parts.append(text)
             elif item_type == "image_url":
-                image_url = item.get("image_url", {}).get("url", "")
+                image_url = _extract_url_value(item.get("image_url")) or ""
                 # extend://MEDIA_ID 用于视频续写
                 if image_url.startswith("extend://"):
                     video_media_id = image_url[len("extend://"):]
                 else:
                     images.append(await _load_image_bytes_from_uri(image_url))
             elif item_type == "video_url":
-                video_url = item.get("video_url", {}).get("url", "")
+                video_url = _extract_url_value(item.get("video_url")) or ""
                 if video_url.startswith("extend://"):
                     video_media_id = video_url[len("extend://"):]
                 else:
@@ -565,6 +664,7 @@ async def _normalize_openai_request(
             video_mime_type=video_mime_type,
             video_file_name=video_file_name,
             aspect_ratio_override=_video_aspect_override_from_request(request),
+            watermark=_coerce_bool(getattr(request, "watermark", None), True),
         )
 
     if request.contents:
@@ -580,6 +680,7 @@ async def _normalize_openai_request(
                 normalized.video_mime_type,
                 normalized.video_file_name,
             ) = _decode_video_payload(request.video)
+        normalized.watermark = _coerce_bool(getattr(request, "watermark", None), True)
         return normalized
 
     raise HTTPException(status_code=400, detail="Messages or contents cannot be empty")
@@ -616,7 +717,108 @@ async def _normalize_gemini_request(
         video_mime_type=video_mime_type,
         video_file_name=video_file_name,
         aspect_ratio_override=_video_aspect_override_from_request(request),
+        watermark=_coerce_bool(getattr(request, "watermark", None), True),
     )
+
+
+async def _read_request_payload(raw_request: Request) -> Dict[str, Any]:
+    content_type = (raw_request.headers.get("content-type") or "").lower()
+    if "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
+        form = await raw_request.form()
+        return {key: value for key, value in form.items()}
+
+    raw_body = await raw_request.body()
+    if not raw_body:
+        return {}
+    try:
+        payload = json.loads(raw_body.decode("utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON body: {exc}")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Request body must be a JSON object")
+    return payload
+
+
+async def _normalize_video_create_payload(payload: Dict[str, Any]) -> NormalizedGenerationRequest:
+    if payload.get("messages") or payload.get("contents"):
+        return await _normalize_openai_request(ChatCompletionRequest.model_validate(payload))
+
+    model = str(payload.get("model") or "").strip()
+    raw_content = _parse_jsonish_value(payload.get("content"))
+    prompt = str(payload.get("prompt") or "").strip()
+    if not prompt and isinstance(raw_content, str):
+        prompt = raw_content.strip()
+    if not model:
+        raise HTTPException(status_code=400, detail="model is required")
+    if not prompt and not isinstance(raw_content, (list, dict)):
+        raise HTTPException(status_code=400, detail="prompt is required")
+
+    if isinstance(raw_content, (list, dict)):
+        content_items = list(raw_content) if isinstance(raw_content, list) else [raw_content]
+        if prompt and not any(
+            isinstance(item, dict) and item.get("type") == "text"
+            for item in content_items
+        ):
+            content_items = [{"type": "text", "text": prompt}, *content_items]
+        _append_video_payload_media_items(payload, content_items)
+        request_payload = dict(payload)
+        request_payload["model"] = model
+        request_payload["messages"] = [
+            {
+                "role": "user",
+                "content": content_items,
+            }
+        ]
+        request = ChatCompletionRequest.model_validate(request_payload)
+        return await _normalize_openai_request(request)
+
+    content: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
+    _append_video_payload_media_items(payload, content)
+
+    request_payload = dict(payload)
+    request_payload["model"] = model
+    request_payload["messages"] = [
+        {
+            "role": "user",
+            "content": content if len(content) > 1 else prompt,
+        }
+    ]
+    request = ChatCompletionRequest.model_validate(request_payload)
+    return await _normalize_openai_request(request)
+
+
+def _to_seedance_task_status(status: Any) -> str:
+    normalized = str(status or "").strip().lower()
+    if normalized in {"completed", "success", "succeeded", "done", "finished"}:
+        return "succeeded"
+    if normalized in {"failed", "fail", "error", "cancelled", "canceled"}:
+        return "failed"
+    if normalized in {"processing", "in_progress", "running", "working"}:
+        return "running"
+    return "queued"
+
+
+def _format_seedance_task_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    formatted: Dict[str, Any] = {
+        "id": payload.get("id", ""),
+        "status": _to_seedance_task_status(payload.get("status")),
+    }
+    for source_key, target_key in (
+        ("model", "model"),
+        ("created_at", "created_at"),
+        ("completed_at", "updated_at"),
+        ("progress", "progress"),
+    ):
+        if payload.get(source_key) is not None:
+            formatted[target_key] = payload[source_key]
+    content: Dict[str, Any] = {}
+    if payload.get("video_url"):
+        content["video_url"] = payload["video_url"]
+    if content:
+        formatted["content"] = content
+    if payload.get("error") is not None:
+        formatted["error"] = payload["error"]
+    return formatted
 
 
 async def _collect_non_stream_result(
@@ -629,6 +831,7 @@ async def _collect_non_stream_result(
     video_mime_type: Optional[str] = None,
     video_file_name: Optional[str] = None,
     aspect_ratio_override: Optional[str] = None,
+    watermark: bool = True,
 ) -> str:
     handler = _ensure_generation_handler()
     result = None
@@ -643,6 +846,7 @@ async def _collect_non_stream_result(
         video_mime_type=video_mime_type,
         video_file_name=video_file_name,
         aspect_ratio_override=aspect_ratio_override,
+        watermark=watermark,
     ):
         result = chunk
 
@@ -650,6 +854,34 @@ async def _collect_non_stream_result(
         raise HTTPException(status_code=500, detail="Generation failed: No response")
 
     return result
+
+
+async def _collect_async_video_task_result(
+    normalized: NormalizedGenerationRequest,
+    base_url_override: Optional[str] = None,
+) -> Dict[str, Any]:
+    handler = _ensure_generation_handler()
+    result = None
+    async for chunk in handler.handle_generation(
+        model=normalized.model,
+        prompt=normalized.prompt,
+        images=normalized.images if normalized.images else None,
+        stream=False,
+        base_url_override=base_url_override,
+        video_media_id=normalized.video_media_id,
+        video_bytes=normalized.video_bytes,
+        video_mime_type=normalized.video_mime_type,
+        video_file_name=normalized.video_file_name,
+        aspect_ratio_override=normalized.aspect_ratio_override,
+        async_video_task=True,
+        watermark=normalized.watermark,
+    ):
+        result = chunk
+
+    if result is None:
+        raise HTTPException(status_code=500, detail="Video task creation failed: No response")
+
+    return _parse_handler_result(result)
 
 
 def _parse_handler_result(result: str) -> Dict[str, Any]:
@@ -876,6 +1108,7 @@ async def _iterate_openai_stream(
         video_mime_type=normalized.video_mime_type,
         video_file_name=normalized.video_file_name,
         aspect_ratio_override=normalized.aspect_ratio_override,
+        watermark=normalized.watermark,
     ):
         if chunk.startswith("data: "):
             yield chunk
@@ -904,6 +1137,7 @@ async def _iterate_gemini_stream(
         video_mime_type=normalized.video_mime_type,
         video_file_name=normalized.video_file_name,
         aspect_ratio_override=normalized.aspect_ratio_override,
+        watermark=normalized.watermark,
     ):
         if chunk.startswith("data: "):
             payload_text = chunk[6:].strip()
@@ -1037,6 +1271,7 @@ async def create_chat_completion(
                 video_mime_type=normalized.video_mime_type,
                 video_file_name=normalized.video_file_name,
                 aspect_ratio_override=normalized.aspect_ratio_override,
+                watermark=normalized.watermark,
             )
         )
         return _build_openai_json_response(payload)
@@ -1045,6 +1280,52 @@ async def create_chat_completion(
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/v1/videos")
+@router.post("/api/v3/contents/generations/tasks")
+async def create_video_task(
+    raw_request: Request,
+    api_key: str = Depends(verify_api_key_flexible),
+):
+    try:
+        payload = await _read_request_payload(raw_request)
+        normalized = await _normalize_video_create_payload(payload)
+        if MODEL_CONFIG.get(normalized.model, {}).get("type") != "video":
+            raise HTTPException(status_code=400, detail=f"Model is not a video model: {normalized.model}")
+
+        result = await _collect_async_video_task_result(
+            normalized,
+            _get_request_base_url(raw_request),
+        )
+        if "error" in result:
+            return _build_openai_json_response(result)
+
+        if raw_request.url.path.startswith("/api/v3/contents/generations/tasks"):
+            return JSONResponse(content=_format_seedance_task_payload(result))
+        return JSONResponse(content=result)
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/v1/videos/{task_id:path}")
+@router.get("/api/v3/contents/generations/tasks/{task_id:path}")
+async def get_video_task(
+    task_id: str,
+    raw_request: Request,
+    api_key: str = Depends(verify_api_key_flexible),
+):
+    handler = _ensure_generation_handler()
+    payload = await handler.get_video_task_payload(unquote(task_id))
+    if payload is None:
+        raise HTTPException(status_code=404, detail=f"Video task not found: {task_id}")
+
+    if raw_request.url.path.startswith("/api/v3/contents/generations/tasks"):
+        return JSONResponse(content=_format_seedance_task_payload(payload))
+    return JSONResponse(content=payload)
 
 
 @router.post("/v1beta/models/{model}:generateContent")
@@ -1075,6 +1356,7 @@ async def generate_content(
                     video_mime_type=normalized.video_mime_type,
                     video_file_name=normalized.video_file_name,
                     aspect_ratio_override=normalized.aspect_ratio_override,
+                    watermark=normalized.watermark,
                 )
             )
         )

@@ -59,6 +59,9 @@ browser_data_rt
 
 data
 tmp/
+bin/*
+!bin/.gitignore
+!bin/README.md
 config/setting.toml
 config/setting_warp.toml
 config/setting_warp_example.toml

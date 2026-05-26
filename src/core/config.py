@@ -382,6 +382,71 @@ class Config:
             self._config["cache"] = {}
         self._config["cache"]["base_url"] = base_url
 
+    @property
+    def flow_content_proxy_base(self) -> str:
+        return self._config.get("watermark", {}).get(
+            "flow_content_proxy_base",
+            "https://file-vercel-fl-go.aiid.edu.kg",
+        )
+
+    @property
+    def gwt_video_command(self) -> str:
+        return self._config.get("watermark", {}).get("gwt_video_command", "/app/bin/gwt-video")
+
+    @property
+    def gwt_video_concurrency(self) -> int:
+        value = self._config.get("watermark", {}).get("gwt_video_concurrency", 1)
+        try:
+            return max(1, min(16, int(value)))
+        except Exception:
+            return 1
+
+    @property
+    def watermark_s3_enabled(self) -> bool:
+        return bool(self._config.get("watermark", {}).get("s3_enabled", False))
+
+    @property
+    def watermark_s3_endpoint(self) -> str:
+        return self._config.get("watermark", {}).get("s3_endpoint", "")
+
+    @property
+    def watermark_s3_region(self) -> str:
+        return self._config.get("watermark", {}).get("s3_region", "auto")
+
+    @property
+    def watermark_s3_bucket(self) -> str:
+        return self._config.get("watermark", {}).get("s3_bucket", "")
+
+    @property
+    def watermark_s3_access_key(self) -> str:
+        return self._config.get("watermark", {}).get("s3_access_key", "")
+
+    @property
+    def watermark_s3_secret_key(self) -> str:
+        return self._config.get("watermark", {}).get("s3_secret_key", "")
+
+    @property
+    def watermark_s3_prefix(self) -> str:
+        return self._config.get("watermark", {}).get("s3_prefix", "flow2api/watermark/")
+
+    @property
+    def watermark_s3_public_base_url(self) -> str:
+        return self._config.get("watermark", {}).get("s3_public_base_url", "")
+
+    @property
+    def watermark_s3_force_path_style(self) -> bool:
+        return bool(self._config.get("watermark", {}).get("s3_force_path_style", True))
+
+    @property
+    def watermark_s3_acl(self) -> str:
+        return self._config.get("watermark", {}).get("s3_acl", "")
+
+    def set_watermark_config(self, **kwargs):
+        """Set watermark and S3 configuration from database."""
+        if "watermark" not in self._config:
+            self._config["watermark"] = {}
+        self._config["watermark"].update(kwargs)
+
     # Captcha configuration
     @property
     def captcha_method(self) -> str:

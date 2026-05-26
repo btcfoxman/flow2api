@@ -7,7 +7,7 @@ from datetime import date, datetime
 from typing import Optional, List, Dict, Any
 from pathlib import Path
 from .config import DEFAULT_YESCAPTCHA_TASK_TYPE, normalize_yescaptcha_task_type
-from .models import Token, TokenStats, Task, RequestLog, AdminConfig, ProxyConfig, GenerationConfig, CacheConfig, Project, CaptchaConfig, PluginConfig, CallLogicConfig
+from .models import Token, TokenStats, Task, RequestLog, AdminConfig, ProxyConfig, GenerationConfig, CacheConfig, WatermarkConfig, Project, CaptchaConfig, PluginConfig, CallLogicConfig
 
 
 class Database:
@@ -196,6 +196,56 @@ class Database:
                 VALUES (1, ?, ?, ?)
             """, (cache_enabled, cache_timeout, cache_base_url))
 
+        # Ensure watermark_config has a row
+        cursor = await db.execute("SELECT COUNT(*) FROM watermark_config")
+        count = await cursor.fetchone()
+        if count[0] == 0:
+            watermark_config = config_dict.get("watermark", {}) if config_dict else {}
+            flow_content_proxy_base = watermark_config.get(
+                "flow_content_proxy_base",
+                "https://file-vercel-fl-go.aiid.edu.kg",
+            )
+            gwt_video_command = watermark_config.get("gwt_video_command", "/app/bin/gwt-video")
+            gwt_video_concurrency = watermark_config.get("gwt_video_concurrency", 1)
+            s3_enabled = watermark_config.get("s3_enabled", False)
+            s3_endpoint = watermark_config.get("s3_endpoint", "")
+            s3_region = watermark_config.get("s3_region", "auto")
+            s3_bucket = watermark_config.get("s3_bucket", "")
+            s3_access_key = watermark_config.get("s3_access_key", "")
+            s3_secret_key = watermark_config.get("s3_secret_key", "")
+            s3_prefix = watermark_config.get("s3_prefix", "flow2api/watermark/")
+            s3_public_base_url = watermark_config.get("s3_public_base_url", "")
+            s3_force_path_style = watermark_config.get("s3_force_path_style", True)
+            s3_acl = watermark_config.get("s3_acl", "")
+
+            try:
+                gwt_video_concurrency = max(1, min(16, int(gwt_video_concurrency)))
+            except Exception:
+                gwt_video_concurrency = 1
+
+            await db.execute("""
+                INSERT INTO watermark_config (
+                    id, flow_content_proxy_base, gwt_video_command, gwt_video_concurrency,
+                    s3_enabled, s3_endpoint, s3_region, s3_bucket, s3_access_key, s3_secret_key,
+                    s3_prefix, s3_public_base_url, s3_force_path_style, s3_acl
+                )
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                flow_content_proxy_base,
+                gwt_video_command,
+                gwt_video_concurrency,
+                bool(s3_enabled),
+                s3_endpoint,
+                s3_region,
+                s3_bucket,
+                s3_access_key,
+                s3_secret_key,
+                s3_prefix,
+                s3_public_base_url,
+                bool(s3_force_path_style),
+                s3_acl,
+            ))
+
         # Ensure debug_config has a row
         cursor = await db.execute("SELECT COUNT(*) FROM debug_config")
         count = await cursor.fetchone()
@@ -360,6 +410,30 @@ class Database:
                     )
                 """)
 
+            # Check and create watermark_config table if missing
+            if not await self._table_exists(db, "watermark_config"):
+                print("  Creating missing table: watermark_config")
+                await db.execute("""
+                    CREATE TABLE watermark_config (
+                        id INTEGER PRIMARY KEY DEFAULT 1,
+                        flow_content_proxy_base TEXT DEFAULT 'https://file-vercel-fl-go.aiid.edu.kg',
+                        gwt_video_command TEXT DEFAULT '/app/bin/gwt-video',
+                        gwt_video_concurrency INTEGER DEFAULT 1,
+                        s3_enabled BOOLEAN DEFAULT 0,
+                        s3_endpoint TEXT DEFAULT '',
+                        s3_region TEXT DEFAULT 'auto',
+                        s3_bucket TEXT DEFAULT '',
+                        s3_access_key TEXT DEFAULT '',
+                        s3_secret_key TEXT DEFAULT '',
+                        s3_prefix TEXT DEFAULT 'flow2api/watermark/',
+                        s3_public_base_url TEXT DEFAULT '',
+                        s3_force_path_style BOOLEAN DEFAULT 1,
+                        s3_acl TEXT DEFAULT '',
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+
             # Check and create proxy_config table if missing
             if not await self._table_exists(db, "proxy_config"):
                 print("  ✓ Creating missing table: proxy_config")
@@ -465,6 +539,20 @@ class Database:
                             print(f"  ✓ Added column '{col_name}' to tokens table")
                         except Exception as e:
                             print(f"  ✗ Failed to add column '{col_name}': {e}")
+
+            if await self._table_exists(db, "tasks"):
+                task_columns_to_add = [
+                    ("project_id", "TEXT"),
+                    ("operations", "TEXT"),
+                    ("watermark", "BOOLEAN DEFAULT 1"),
+                ]
+                for col_name, col_type in task_columns_to_add:
+                    if not await self._column_exists(db, "tasks", col_name):
+                        try:
+                            await db.execute(f"ALTER TABLE tasks ADD COLUMN {col_name} {col_type}")
+                            print(f"  Added column '{col_name}' to tasks table")
+                        except Exception as e:
+                            print(f"  Failed to add column '{col_name}' to tasks table: {e}")
 
             # Check and add missing columns to admin_config table
             if await self._table_exists(db, "admin_config"):
@@ -585,6 +673,34 @@ class Database:
                         except Exception as e:
                             print(f"  ✗ Failed to add column '{col_name}': {e}")
 
+            # Check and add missing columns to watermark_config table
+            if await self._table_exists(db, "watermark_config"):
+                watermark_columns_to_add = [
+                    ("flow_content_proxy_base", "TEXT DEFAULT 'https://file-vercel-fl-go.aiid.edu.kg'"),
+                    ("gwt_video_command", "TEXT DEFAULT '/app/bin/gwt-video'"),
+                    ("gwt_video_concurrency", "INTEGER DEFAULT 1"),
+                    ("s3_enabled", "BOOLEAN DEFAULT 0"),
+                    ("s3_endpoint", "TEXT DEFAULT ''"),
+                    ("s3_region", "TEXT DEFAULT 'auto'"),
+                    ("s3_bucket", "TEXT DEFAULT ''"),
+                    ("s3_access_key", "TEXT DEFAULT ''"),
+                    ("s3_secret_key", "TEXT DEFAULT ''"),
+                    ("s3_prefix", "TEXT DEFAULT 'flow2api/watermark/'"),
+                    ("s3_public_base_url", "TEXT DEFAULT ''"),
+                    ("s3_force_path_style", "BOOLEAN DEFAULT 1"),
+                    ("s3_acl", "TEXT DEFAULT ''"),
+                    ("created_at", "TIMESTAMP"),
+                    ("updated_at", "TIMESTAMP"),
+                ]
+
+                for col_name, col_type in watermark_columns_to_add:
+                    if not await self._column_exists(db, "watermark_config", col_name):
+                        try:
+                            await db.execute(f"ALTER TABLE watermark_config ADD COLUMN {col_name} {col_type}")
+                            print(f"  Added column '{col_name}' to watermark_config table")
+                        except Exception as e:
+                            print(f"  Failed to add column '{col_name}' to watermark_config table: {e}")
+
             # ========== Step 3: Ensure all config tables have default rows ==========
             # Note: This will NOT overwrite existing config rows
             # It only ensures missing rows are created with default values from setting.toml
@@ -674,6 +790,9 @@ class Database:
                     result_urls TEXT,
                     error_message TEXT,
                     scene_id TEXT,
+                    project_id TEXT,
+                    operations TEXT,
+                    watermark BOOLEAN DEFAULT 1,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     completed_at TIMESTAMP,
                     FOREIGN KEY (token_id) REFERENCES tokens(id)
@@ -750,6 +869,28 @@ class Database:
                     cache_enabled BOOLEAN DEFAULT 0,
                     cache_timeout INTEGER DEFAULT 7200,
                     cache_base_url TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            # Watermark and S3 upload config table
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS watermark_config (
+                    id INTEGER PRIMARY KEY DEFAULT 1,
+                    flow_content_proxy_base TEXT DEFAULT 'https://file-vercel-fl-go.aiid.edu.kg',
+                    gwt_video_command TEXT DEFAULT '/app/bin/gwt-video',
+                    gwt_video_concurrency INTEGER DEFAULT 1,
+                    s3_enabled BOOLEAN DEFAULT 0,
+                    s3_endpoint TEXT DEFAULT '',
+                    s3_region TEXT DEFAULT 'auto',
+                    s3_bucket TEXT DEFAULT '',
+                    s3_access_key TEXT DEFAULT '',
+                    s3_secret_key TEXT DEFAULT '',
+                    s3_prefix TEXT DEFAULT 'flow2api/watermark/',
+                    s3_public_base_url TEXT DEFAULT '',
+                    s3_force_path_style BOOLEAN DEFAULT 1,
+                    s3_acl TEXT DEFAULT '',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -1126,10 +1267,15 @@ class Database:
         """Create a new task"""
         async with self._connect(write=True) as db:
             cursor = await db.execute("""
-                INSERT INTO tasks (task_id, token_id, model, prompt, status, progress, scene_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO tasks (
+                    task_id, token_id, model, prompt, status, progress, scene_id,
+                    project_id, operations, watermark
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (task.task_id, task.token_id, task.model, task.prompt,
-                  task.status, task.progress, task.scene_id))
+                  task.status, task.progress, task.scene_id, task.project_id,
+                  json.dumps(task.operations, ensure_ascii=False) if task.operations is not None else None,
+                  1 if task.watermark else 0))
             await db.commit()
             return cursor.lastrowid
 
@@ -1144,6 +1290,8 @@ class Database:
                 # Parse result_urls from JSON
                 if task_dict.get("result_urls"):
                     task_dict["result_urls"] = json.loads(task_dict["result_urls"])
+                if task_dict.get("operations"):
+                    task_dict["operations"] = json.loads(task_dict["operations"])
                 return Task(**task_dict)
             return None
 
@@ -1155,8 +1303,8 @@ class Database:
 
             for key, value in kwargs.items():
                 if value is not None:
-                    # Convert list to JSON string for result_urls
-                    if key == "result_urls" and isinstance(value, list):
+                    # Convert list to JSON string for JSON columns
+                    if key in {"result_urls", "operations"} and isinstance(value, list):
                         value = json.dumps(value)
                     updates.append(f"{key} = ?")
                     params.append(value)
@@ -1662,6 +1810,25 @@ class Database:
             config.set_cache_timeout(cache_config.cache_timeout)
             config.set_cache_base_url(cache_config.cache_base_url or "")
 
+        # Reload watermark/S3 config
+        watermark_config = await self.get_watermark_config()
+        if watermark_config:
+            config.set_watermark_config(
+                flow_content_proxy_base=watermark_config.flow_content_proxy_base,
+                gwt_video_command=watermark_config.gwt_video_command,
+                gwt_video_concurrency=watermark_config.gwt_video_concurrency,
+                s3_enabled=watermark_config.s3_enabled,
+                s3_endpoint=watermark_config.s3_endpoint,
+                s3_region=watermark_config.s3_region,
+                s3_bucket=watermark_config.s3_bucket,
+                s3_access_key=watermark_config.s3_access_key,
+                s3_secret_key=watermark_config.s3_secret_key,
+                s3_prefix=watermark_config.s3_prefix,
+                s3_public_base_url=watermark_config.s3_public_base_url,
+                s3_force_path_style=watermark_config.s3_force_path_style,
+                s3_acl=watermark_config.s3_acl,
+            )
+
         # Reload generation config
         generation_config = await self.get_generation_config()
         if generation_config:
@@ -1755,6 +1922,115 @@ class Database:
                     INSERT INTO cache_config (id, cache_enabled, cache_timeout, cache_base_url)
                     VALUES (1, ?, ?, ?)
                 """, (new_enabled, new_timeout, new_base_url))
+
+            await db.commit()
+
+    # Watermark/S3 config operations
+    async def get_watermark_config(self) -> WatermarkConfig:
+        """Get watermark and S3 upload configuration."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT * FROM watermark_config WHERE id = 1")
+            row = await cursor.fetchone()
+            if row:
+                return WatermarkConfig(**dict(row))
+            return WatermarkConfig()
+
+    async def update_watermark_config(
+        self,
+        flow_content_proxy_base: str = None,
+        gwt_video_command: str = None,
+        gwt_video_concurrency: int = None,
+        s3_enabled: bool = None,
+        s3_endpoint: str = None,
+        s3_region: str = None,
+        s3_bucket: str = None,
+        s3_access_key: str = None,
+        s3_secret_key: str = None,
+        s3_prefix: str = None,
+        s3_public_base_url: str = None,
+        s3_force_path_style: bool = None,
+        s3_acl: str = None,
+    ):
+        """Update watermark and S3 upload configuration."""
+        async with self._connect(write=True) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT * FROM watermark_config WHERE id = 1")
+            row = await cursor.fetchone()
+            current = dict(row) if row else {}
+
+            def keep(name: str, value, default):
+                return value if value is not None else current.get(name, default)
+
+            new_flow_content_proxy_base = keep(
+                "flow_content_proxy_base",
+                flow_content_proxy_base,
+                "https://file-vercel-fl-go.aiid.edu.kg",
+            )
+            new_gwt_video_command = keep("gwt_video_command", gwt_video_command, "/app/bin/gwt-video")
+            new_gwt_video_concurrency = keep("gwt_video_concurrency", gwt_video_concurrency, 1)
+            new_s3_enabled = keep("s3_enabled", s3_enabled, False)
+            new_s3_endpoint = keep("s3_endpoint", s3_endpoint, "")
+            new_s3_region = keep("s3_region", s3_region, "auto")
+            new_s3_bucket = keep("s3_bucket", s3_bucket, "")
+            new_s3_access_key = keep("s3_access_key", s3_access_key, "")
+            new_s3_secret_key = keep("s3_secret_key", s3_secret_key, "")
+            new_s3_prefix = keep("s3_prefix", s3_prefix, "flow2api/watermark/")
+            new_s3_public_base_url = keep("s3_public_base_url", s3_public_base_url, "")
+            new_s3_force_path_style = keep("s3_force_path_style", s3_force_path_style, True)
+            new_s3_acl = keep("s3_acl", s3_acl, "")
+
+            try:
+                new_gwt_video_concurrency = max(1, min(16, int(new_gwt_video_concurrency)))
+            except Exception:
+                new_gwt_video_concurrency = 1
+
+            if row:
+                await db.execute("""
+                    UPDATE watermark_config
+                    SET flow_content_proxy_base = ?, gwt_video_command = ?, gwt_video_concurrency = ?,
+                        s3_enabled = ?, s3_endpoint = ?, s3_region = ?, s3_bucket = ?,
+                        s3_access_key = ?, s3_secret_key = ?, s3_prefix = ?, s3_public_base_url = ?,
+                        s3_force_path_style = ?, s3_acl = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = 1
+                """, (
+                    new_flow_content_proxy_base,
+                    new_gwt_video_command,
+                    new_gwt_video_concurrency,
+                    bool(new_s3_enabled),
+                    new_s3_endpoint,
+                    new_s3_region,
+                    new_s3_bucket,
+                    new_s3_access_key,
+                    new_s3_secret_key,
+                    new_s3_prefix,
+                    new_s3_public_base_url,
+                    bool(new_s3_force_path_style),
+                    new_s3_acl,
+                ))
+            else:
+                await db.execute("""
+                    INSERT INTO watermark_config (
+                        id, flow_content_proxy_base, gwt_video_command, gwt_video_concurrency,
+                        s3_enabled, s3_endpoint, s3_region, s3_bucket, s3_access_key, s3_secret_key,
+                        s3_prefix, s3_public_base_url, s3_force_path_style, s3_acl
+                    )
+                    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    new_flow_content_proxy_base,
+                    new_gwt_video_command,
+                    new_gwt_video_concurrency,
+                    bool(new_s3_enabled),
+                    new_s3_endpoint,
+                    new_s3_region,
+                    new_s3_bucket,
+                    new_s3_access_key,
+                    new_s3_secret_key,
+                    new_s3_prefix,
+                    new_s3_public_base_url,
+                    bool(new_s3_force_path_style),
+                    new_s3_acl,
+                ))
 
             await db.commit()
 
