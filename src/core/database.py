@@ -1324,15 +1324,22 @@ class Database:
                 SELECT task.*
                 FROM tasks task
                 WHERE task.status IN ('completed', 'failed')
-                  AND EXISTS (
-                    SELECT 1
-                    FROM request_logs rl
-                    WHERE rl.operation = 'generate_video'
-                      AND rl.status_text = 'video_submitted'
-                      AND (
-                        COALESCE(rl.request_body, '') LIKE '%' || task.task_id || '%'
-                        OR COALESCE(rl.response_body, '') LIKE '%' || task.task_id || '%'
-                      )
+                  AND (
+                    EXISTS (
+                      SELECT 1
+                      FROM request_logs rl
+                      WHERE rl.operation = 'generate_video'
+                        AND rl.status_text = 'video_submitted'
+                        AND (
+                          COALESCE(rl.request_body, '') LIKE '%' || task.task_id || '%'
+                          OR COALESCE(rl.response_body, '') LIKE '%' || task.task_id || '%'
+                        )
+                    )
+                    OR (
+                      task.status = 'failed'
+                      AND COALESCE(task.progress, 0) >= 45
+                      AND COALESCE(task.operations, '') != ''
+                    )
                   )
                   AND NOT EXISTS (
                     SELECT 1

@@ -98,6 +98,34 @@ class AsyncVideoResultBackfillTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(inserted, 0)
 
+    async def test_backfills_failed_post_submit_task_when_request_logs_were_cleared(self):
+        await self.db.create_task(
+            Task(
+                task_id="task-cleared-log",
+                token_id=self.token_id,
+                model="abra_r2v_10s",
+                prompt="hello",
+                status="failed",
+                progress=45,
+                operations=[{"operation": {"name": "task-cleared-log"}}],
+            )
+        )
+        await self.db.update_task(
+            "task-cleared-log",
+            error_message="视频生成被上游内容安全策略拒绝，请调整提示词或参考图后重试",
+        )
+
+        inserted = await self.db.backfill_async_video_result_logs()
+
+        logs = await self.db.get_logs(include_payload=True)
+        async_logs = [log for log in logs if log["operation"] == "generate_video_async_result"]
+        response_body = json.loads(async_logs[0]["response_body"])
+
+        self.assertEqual(inserted, 1)
+        self.assertEqual(len(async_logs), 1)
+        self.assertEqual(response_body["task_id"], "task-cleared-log")
+        self.assertEqual(response_body["status"], "failed")
+
 
 if __name__ == "__main__":
     unittest.main()
