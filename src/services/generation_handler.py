@@ -985,7 +985,7 @@ def _is_video_policy_error(error_message: Any) -> bool:
 def _video_generation_failure_response(error_message: Any) -> tuple[str, int]:
     text = str(error_message or "").strip() or "未知错误"
     if _is_video_policy_error(text):
-        return f"视频生成被上游内容安全策略拒绝: {text}。请调整提示词或参考图后重试", 400
+        return "视频生成被上游内容安全策略拒绝，请调整提示词或参考图后重试", 400
     return f"视频生成失败: {text}，请重试", 502
 
 
@@ -2528,15 +2528,15 @@ class GenerationHandler:
                     error_info = operation.get("operation", {}).get("error", {})
                     error_code = error_info.get("code", "unknown")
                     error_message = error_info.get("message", "未知错误")
+                    friendly_error, response_status_code = _video_generation_failure_response(error_message)
                     
                     # 更新数据库任务状态
                     await self._fail_video_task(
                         checked_operations,
-                        f"{error_message} (code: {error_code})"
+                        friendly_error if _is_video_policy_error(error_message) else f"{error_message} (code: {error_code})"
                     )
                     
                     # 内容安全拒绝是上游策略结果，不应包装成 5xx 服务故障。
-                    friendly_error, response_status_code = _video_generation_failure_response(error_message)
                     self._mark_generation_failed(generation_result, friendly_error)
                     if stream:
                         yield self._create_stream_chunk(f"❌ {friendly_error}\n")
@@ -2717,9 +2717,15 @@ class GenerationHandler:
         if task.error_message:
             payload["error"] = {
                 "code": "FAILED",
-                "message": task.error_message,
+                "message": self._public_video_task_error_message(task.error_message),
             }
         return payload
+
+    def _public_video_task_error_message(self, error_message: Any) -> str:
+        message = self._normalize_error_message(error_message)
+        if _is_video_policy_error(message):
+            return _video_generation_failure_response(message)[0]
+        return message
 
     def _create_error_response(self, error_message: str, status_code: int = 500) -> str:
         """创建错误响应"""

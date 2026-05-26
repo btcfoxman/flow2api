@@ -2,6 +2,7 @@ import types
 import unittest
 from unittest.mock import AsyncMock, patch
 
+from src.core.models import Task
 from src.core.model_resolver import resolve_model_name
 from src.services.flow_client import FlowClient
 from src.services.generation_handler import (
@@ -94,7 +95,27 @@ class VeoLiteGenerationHandlerTests(unittest.TestCase):
 
         self.assertEqual(status_code, 400)
         self.assertIn("内容安全策略拒绝", message)
-        self.assertIn("PUBLIC_ERROR_UNSAFE_GENERATION", message)
+        self.assertNotIn("PUBLIC_ERROR_UNSAFE_GENERATION", message)
+
+    def test_async_video_task_payload_hides_upstream_policy_code(self):
+        handler = GenerationHandler.__new__(GenerationHandler)
+        task = Task(
+            task_id="task-1",
+            token_id=1,
+            model="abra_r2v_10s",
+            prompt="hello",
+            status="failed",
+            progress=100,
+            error_message="PUBLIC_ERROR_UNSAFE_GENERATION (code: 3)",
+        )
+
+        payload = handler._task_to_video_payload(task)
+
+        self.assertEqual(payload["status"], "failed")
+        self.assertEqual(
+            payload["error"]["message"],
+            "视频生成被上游内容安全策略拒绝，请调整提示词或参考图后重试",
+        )
 
     def test_video_transient_failure_stays_server_error_status(self):
         message, status_code = _video_generation_failure_response("upstream temporary error")
