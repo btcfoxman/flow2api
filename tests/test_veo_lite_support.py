@@ -1,3 +1,4 @@
+import asyncio
 import types
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -116,6 +117,43 @@ class VeoLiteGenerationHandlerTests(unittest.TestCase):
             payload["error"]["message"],
             "视频生成被上游内容安全策略拒绝，请调整提示词或参考图后重试",
         )
+
+    def test_async_video_result_log_records_final_failure(self):
+        class FakeDb:
+            def __init__(self):
+                self.updated = None
+
+            async def update_request_log(self, log_id, **kwargs):
+                self.updated = (log_id, kwargs)
+
+        async def run():
+            handler = GenerationHandler.__new__(GenerationHandler)
+            handler.db = FakeDb()
+            state = {
+                "id": 7,
+                "async_result_log": True,
+                "started_at": 0,
+                "operation": "generate_video_async_result",
+                "request_payload": {"task_id": "task-1"},
+            }
+            await handler._finalize_async_video_result_log(
+                state,
+                token_id=1,
+                response_data={"status": "failed", "error": "policy rejected"},
+                status_code=400,
+                status_text="failed",
+                progress=100,
+            )
+            return handler.db.updated
+
+        log_id, fields = asyncio.run(run())
+
+        self.assertEqual(log_id, 7)
+        self.assertEqual(fields["operation"], "generate_video_async_result")
+        self.assertEqual(fields["status_code"], 400)
+        self.assertEqual(fields["status_text"], "failed")
+        self.assertEqual(fields["progress"], 100)
+        self.assertIn("policy rejected", fields["response_body"])
 
     def test_video_transient_failure_stays_server_error_status(self):
         message, status_code = _video_generation_failure_response("upstream temporary error")

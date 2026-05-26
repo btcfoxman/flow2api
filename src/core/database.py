@@ -1677,6 +1677,7 @@ class Database:
             status_text_column = "rl.status_text," if has_status_text else "'' as status_text,"
             progress_column = "rl.progress," if has_progress else "0 as progress,"
             updated_at_column = "rl.updated_at," if has_updated_at else "rl.created_at as updated_at,"
+            order_timestamp = "COALESCE(rl.updated_at, rl.created_at)" if has_updated_at else "rl.created_at"
 
             if token_id:
                 cursor = await db.execute(f"""
@@ -1697,7 +1698,7 @@ class Database:
                     FROM request_logs rl
                     LEFT JOIN tokens t ON rl.token_id = t.id
                     WHERE rl.token_id = ?
-                    ORDER BY rl.created_at DESC
+                    ORDER BY {order_timestamp} DESC, rl.id DESC
                     LIMIT ?
                 """, (token_id, limit))
             else:
@@ -1718,7 +1719,7 @@ class Database:
                         t.name as token_username
                     FROM request_logs rl
                     LEFT JOIN tokens t ON rl.token_id = t.id
-                    ORDER BY rl.created_at DESC
+                    ORDER BY {order_timestamp} DESC, rl.id DESC
                     LIMIT ?
                 """, (limit,))
 

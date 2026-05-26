@@ -989,6 +989,16 @@ def _video_generation_failure_response(error_message: Any) -> tuple[str, int]:
     return f"视频生成失败: {text}，请重试", 502
 
 
+def _operation_task_id(operations: Optional[List[Dict[str, Any]]]) -> str:
+    if not operations:
+        return ""
+    operation = operations[0] if operations else {}
+    if not isinstance(operation, dict):
+        return ""
+    operation_info = operation.get("operation") or {}
+    return str(operation_info.get("name") or "")
+
+
 def _iter_mp4_boxes(data: bytes, start: int = 0, end: Optional[int] = None):
     data_len = len(data)
     end = min(data_len, data_len if end is None else end)
@@ -2186,6 +2196,17 @@ class GenerationHandler:
             # 检查是否需要放大
             if async_task:
                 response_state["async_task_id"] = task_id
+                async_result_log_state = await self._start_async_video_result_log(
+                    token_id=token.id,
+                    task_id=task_id,
+                    model=model_config["model_key"],
+                    prompt=prompt,
+                    project_id=project_id,
+                    scene_id=scene_id,
+                    operations=operations,
+                    request_id=perf_trace.get("request_id") if isinstance(perf_trace, dict) else None,
+                    watermark=bool(watermark),
+                )
                 self._mark_generation_succeeded(generation_result)
                 asyncio.create_task(
                     self._run_video_task_background(
@@ -2194,6 +2215,7 @@ class GenerationHandler:
                         operations=operations,
                         upsample_config=model_config.get("upsample"),
                         response_state=dict(response_state),
+                        request_log_state=async_result_log_state,
                         extend_source_media_id=video_media_id if video_type == "extend" else None,
                         watermark=bool(watermark),
                     )
@@ -2235,6 +2257,7 @@ class GenerationHandler:
         operations: List[Dict],
         upsample_config: Optional[Dict],
         response_state: Dict[str, Any],
+        request_log_state: Optional[Dict[str, Any]],
         extend_source_media_id: Optional[str],
         watermark: bool,
     ) -> None:
@@ -2248,7 +2271,7 @@ class GenerationHandler:
                 upsample_config,
                 generation_result,
                 response_state,
-                None,
+                request_log_state,
                 extend_source_media_id=extend_source_media_id,
                 watermark=watermark,
             ):
@@ -2259,7 +2282,95 @@ class GenerationHandler:
             error_msg = self._normalize_error_message(exc)
             debug_logger.log_error(f"[VIDEO ASYNC] background task failed: {error_msg}")
             await self._fail_video_task(operations, error_msg)
+            await self._finalize_async_video_result_log(
+                request_log_state,
+                token_id=token.id,
+                response_data={
+                    "status": "failed",
+                    "error": error_msg,
+                    "task_id": _operation_task_id(operations),
+                },
+                status_code=500,
+                status_text="failed",
+                progress=100,
+            )
             await self.token_manager.record_error(token.id)
+
+    async def _start_async_video_result_log(
+        self,
+        *,
+        token_id: int,
+        task_id: str,
+        model: str,
+        prompt: str,
+        project_id: str,
+        scene_id: Optional[str],
+        operations: List[Dict[str, Any]],
+        request_id: Optional[str],
+        watermark: bool,
+    ) -> Dict[str, Any]:
+        prompt_for_log = prompt if len(prompt) <= 2000 else f"{prompt[:2000]}...(truncated)"
+        request_payload: Dict[str, Any] = {
+            "task_id": task_id,
+            "model": model,
+            "prompt": prompt_for_log,
+            "project_id": project_id,
+            "scene_id": scene_id,
+            "operations": operations,
+            "request_id": request_id,
+            "watermark": watermark,
+            "async_video_task": True,
+        }
+        response_data = {
+            "status": "processing",
+            "status_text": "video_submitted",
+            "progress": 45,
+            "task_id": task_id,
+            "request_id": request_id,
+        }
+        log_id = await self._log_request(
+            token_id,
+            "generate_video_async_result",
+            request_payload,
+            response_data,
+            102,
+            0,
+            status_text="video_submitted",
+            progress=45,
+        )
+        return {
+            "id": log_id,
+            "progress": 45,
+            "async_result_log": True,
+            "started_at": time.time(),
+            "operation": "generate_video_async_result",
+            "request_payload": request_payload,
+        }
+
+    async def _finalize_async_video_result_log(
+        self,
+        request_log_state: Optional[Dict[str, Any]],
+        *,
+        token_id: Optional[int],
+        response_data: Dict[str, Any],
+        status_code: int,
+        status_text: str,
+        progress: int,
+    ) -> None:
+        if not isinstance(request_log_state, dict) or not request_log_state.get("async_result_log"):
+            return
+        started_at = float(request_log_state.get("started_at") or time.time())
+        await self._log_request(
+            token_id,
+            str(request_log_state.get("operation") or "generate_video_async_result"),
+            dict(request_log_state.get("request_payload") or {}),
+            response_data,
+            status_code,
+            max(0, time.time() - started_at),
+            log_id=request_log_state.get("id"),
+            status_text=status_text,
+            progress=progress,
+        )
 
     async def _poll_video_result(
         self,
@@ -2356,6 +2467,18 @@ class GenerationHandler:
                         error_msg = "视频生成失败: 视频URL为空"
                         await self._fail_video_task(checked_operations, error_msg)
                         self._mark_generation_failed(generation_result, error_msg)
+                        await self._finalize_async_video_result_log(
+                            request_log_state,
+                            token_id=token.id,
+                            response_data={
+                                "status": "failed",
+                                "error": error_msg,
+                                "task_id": _operation_task_id(checked_operations),
+                            },
+                            status_code=502,
+                            status_text="failed",
+                            progress=100,
+                        )
                         yield self._create_error_response(error_msg, status_code=502)
                         return
 
@@ -2506,6 +2629,19 @@ class GenerationHandler:
                         "final_video_url": local_url,
                         "mediaGenerationId": video_media_id,
                     }
+                    await self._finalize_async_video_result_log(
+                        request_log_state,
+                        token_id=token.id,
+                        response_data={
+                            "status": "success",
+                            "task_id": task_id,
+                            "url": local_url,
+                            "generated_assets": response_state["generated_assets"],
+                        },
+                        status_code=200,
+                        status_text="completed",
+                        progress=100,
+                    )
 
                     # 返回结果
                     self._mark_generation_succeeded(generation_result)
@@ -2538,6 +2674,20 @@ class GenerationHandler:
                     
                     # 内容安全拒绝是上游策略结果，不应包装成 5xx 服务故障。
                     self._mark_generation_failed(generation_result, friendly_error)
+                    await self._finalize_async_video_result_log(
+                        request_log_state,
+                        token_id=token.id,
+                        response_data={
+                            "status": "failed",
+                            "error": friendly_error,
+                            "task_id": _operation_task_id(checked_operations),
+                            "upstream_error": error_message,
+                            "upstream_code": error_code,
+                        },
+                        status_code=response_status_code,
+                        status_text="failed",
+                        progress=100,
+                    )
                     if stream:
                         yield self._create_stream_chunk(f"❌ {friendly_error}\n")
                     yield self._create_error_response(friendly_error, status_code=response_status_code)
@@ -2548,6 +2698,18 @@ class GenerationHandler:
                     error_msg = f"视频生成失败: {status}"
                     await self._fail_video_task(checked_operations, error_msg)
                     self._mark_generation_failed(generation_result, error_msg)
+                    await self._finalize_async_video_result_log(
+                        request_log_state,
+                        token_id=token.id,
+                        response_data={
+                            "status": "failed",
+                            "error": error_msg,
+                            "task_id": _operation_task_id(checked_operations),
+                        },
+                        status_code=502,
+                        status_text="failed",
+                        progress=100,
+                    )
                     yield self._create_error_response(error_msg, status_code=502)
                     return
                     
@@ -2556,6 +2718,18 @@ class GenerationHandler:
                     error_msg = "视频生成超时 (上游卡顿超过4分钟，已自动取消)"
                     await self._fail_video_task(checked_operations, error_msg)
                     self._mark_generation_failed(generation_result, error_msg)
+                    await self._finalize_async_video_result_log(
+                        request_log_state,
+                        token_id=token.id,
+                        response_data={
+                            "status": "failed",
+                            "error": error_msg,
+                            "task_id": _operation_task_id(checked_operations),
+                        },
+                        status_code=504,
+                        status_text="failed",
+                        progress=100,
+                    )
                     if stream:
                         yield self._create_stream_chunk(f"❌ {error_msg}\n")
                     yield self._create_error_response(error_msg, status_code=504)
@@ -2569,6 +2743,18 @@ class GenerationHandler:
                     error_msg = f"视频状态查询失败: {self._normalize_error_message(e)}"
                     await self._fail_video_task(operations, error_msg)
                     self._mark_generation_failed(generation_result, error_msg)
+                    await self._finalize_async_video_result_log(
+                        request_log_state,
+                        token_id=token.id,
+                        response_data={
+                            "status": "failed",
+                            "error": error_msg,
+                            "task_id": _operation_task_id(operations),
+                        },
+                        status_code=502,
+                        status_text="failed",
+                        progress=100,
+                    )
                     if stream:
                         yield self._create_stream_chunk(f"❌ {error_msg}\n")
                     yield self._create_error_response(error_msg, status_code=502)
@@ -2582,6 +2768,18 @@ class GenerationHandler:
             error_msg = f"视频生成超时 (已轮询 {max_attempts} 次)"
         await self._fail_video_task(operations, error_msg)
         self._mark_generation_failed(generation_result, error_msg)
+        await self._finalize_async_video_result_log(
+            request_log_state,
+            token_id=token.id,
+            response_data={
+                "status": "failed",
+                "error": error_msg,
+                "task_id": _operation_task_id(operations),
+            },
+            status_code=504,
+            status_text="failed",
+            progress=100,
+        )
         yield self._create_error_response(error_msg, status_code=504)
 
     # ========== 响应格式化 ==========
