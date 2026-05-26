@@ -90,7 +90,69 @@ def _extract_error_summary(payload: Any) -> str:
                 if summary:
                     return summary
 
-        return ""
+    return ""
+
+
+def _parse_log_json(payload: Any) -> Any:
+    if payload is None or isinstance(payload, (dict, list)):
+        return payload
+    if not isinstance(payload, str):
+        return None
+    raw = payload.strip()
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
+def _find_request_id(payload: Any) -> str:
+    if isinstance(payload, dict):
+        request_id = payload.get("request_id")
+        if isinstance(request_id, str) and request_id.strip():
+            return request_id.strip()
+        for value in payload.values():
+            nested = _find_request_id(value)
+            if nested:
+                return nested
+    elif isinstance(payload, list):
+        for item in payload:
+            nested = _find_request_id(item)
+            if nested:
+                return nested
+    return ""
+
+
+def _log_request_id(log: Dict[str, Any]) -> str:
+    for key in ("request_body", "response_body", "response_body_excerpt"):
+        request_id = _find_request_id(_parse_log_json(log.get(key)))
+        if request_id:
+            return request_id
+    return ""
+
+
+def _filter_superseded_async_video_submit_logs(logs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    async_result_request_ids = {
+        request_id
+        for log in logs
+        if log.get("operation") == "generate_video_async_result"
+        for request_id in [_log_request_id(log)]
+        if request_id
+    }
+    if not async_result_request_ids:
+        return logs
+
+    filtered: List[Dict[str, Any]] = []
+    for log in logs:
+        if (
+            log.get("operation") == "generate_video"
+            and (log.get("status_text") or "") == "video_submitted"
+            and _log_request_id(log) in async_result_request_ids
+        ):
+            continue
+        filtered.append(log)
+    return filtered
 
     if isinstance(payload, list):
         for item in payload:
@@ -1319,7 +1381,8 @@ async def get_logs(
 ):
     """Get lightweight request logs for list view"""
     limit = max(1, min(limit, 100))
-    logs = await db.get_logs(limit=limit, include_payload=False)
+    logs = await db.get_logs(limit=min(500, limit * 3), include_payload=True)
+    logs = _filter_superseded_async_video_submit_logs(logs)[:limit]
 
     result = []
     for log in logs:
