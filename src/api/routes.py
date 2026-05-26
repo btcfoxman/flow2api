@@ -102,7 +102,7 @@ class NormalizedGenerationRequest:
     video_mime_type: Optional[str] = None
     video_file_name: Optional[str] = None
     aspect_ratio_override: Optional[str] = None
-    watermark: bool = True
+    watermark: bool = False
 
 
 def set_generation_handler(handler: GenerationHandler):
@@ -342,7 +342,7 @@ def _decode_video_payload(value: str) -> tuple[bytes, str, str]:
     return base64.b64decode(value), "video/mp4", "upload.mp4"
 
 
-def _coerce_bool(value: Any, default: bool = True) -> bool:
+def _coerce_bool(value: Any, default: bool = False) -> bool:
     if value is None:
         return default
     if isinstance(value, bool):
@@ -664,7 +664,7 @@ async def _normalize_openai_request(
             video_mime_type=video_mime_type,
             video_file_name=video_file_name,
             aspect_ratio_override=_video_aspect_override_from_request(request),
-            watermark=_coerce_bool(getattr(request, "watermark", None), True),
+            watermark=_coerce_bool(getattr(request, "watermark", None), False),
         )
 
     if request.contents:
@@ -680,7 +680,7 @@ async def _normalize_openai_request(
                 normalized.video_mime_type,
                 normalized.video_file_name,
             ) = _decode_video_payload(request.video)
-        normalized.watermark = _coerce_bool(getattr(request, "watermark", None), True)
+        normalized.watermark = _coerce_bool(getattr(request, "watermark", None), False)
         return normalized
 
     raise HTTPException(status_code=400, detail="Messages or contents cannot be empty")
@@ -717,7 +717,7 @@ async def _normalize_gemini_request(
         video_mime_type=video_mime_type,
         video_file_name=video_file_name,
         aspect_ratio_override=_video_aspect_override_from_request(request),
-        watermark=_coerce_bool(getattr(request, "watermark", None), True),
+        watermark=_coerce_bool(getattr(request, "watermark", None), False),
     )
 
 
@@ -831,7 +831,7 @@ async def _collect_non_stream_result(
     video_mime_type: Optional[str] = None,
     video_file_name: Optional[str] = None,
     aspect_ratio_override: Optional[str] = None,
-    watermark: bool = True,
+    watermark: bool = False,
 ) -> str:
     handler = _ensure_generation_handler()
     result = None

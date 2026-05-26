@@ -1186,7 +1186,7 @@ class GenerationHandler:
         video_file_name: Optional[str] = None,
         aspect_ratio_override: Optional[str] = None,
         async_video_task: bool = False,
-        watermark: bool = True,
+        watermark: bool = False,
     ) -> AsyncGenerator:
         """统一生成入口
 
@@ -1855,7 +1855,7 @@ class GenerationHandler:
         video_file_name: Optional[str] = None,
         aspect_ratio_override: Optional[str] = None,
         async_task: bool = False,
-        watermark: bool = True,
+        watermark: bool = False,
     ) -> AsyncGenerator:
         """处理视频生成 (异步轮询)"""
 
@@ -2384,7 +2384,7 @@ class GenerationHandler:
         response_state: Optional[Dict[str, Any]] = None,
         request_log_state: Optional[Dict[str, Any]] = None,
         extend_source_media_id: Optional[str] = None,
-        watermark: bool = True,
+        watermark: bool = False,
     ) -> AsyncGenerator:
         """轮询视频生成结果
         

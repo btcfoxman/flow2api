@@ -544,7 +544,7 @@ class Database:
                 task_columns_to_add = [
                     ("project_id", "TEXT"),
                     ("operations", "TEXT"),
-                    ("watermark", "BOOLEAN DEFAULT 1"),
+                    ("watermark", "BOOLEAN DEFAULT 0"),
                 ]
                 for col_name, col_type in task_columns_to_add:
                     if not await self._column_exists(db, "tasks", col_name):
@@ -792,7 +792,7 @@ class Database:
                     scene_id TEXT,
                     project_id TEXT,
                     operations TEXT,
-                    watermark BOOLEAN DEFAULT 1,
+                    watermark BOOLEAN DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     completed_at TIMESTAMP,
                     FOREIGN KEY (token_id) REFERENCES tokens(id)
@@ -1388,7 +1388,7 @@ class Database:
                     "project_id": task.get("project_id"),
                     "scene_id": task.get("scene_id"),
                     "operations": self._json_or_none(task.get("operations")),
-                    "watermark": bool(task.get("watermark", 1)),
+                    "watermark": bool(task.get("watermark", 0)),
                     "async_video_task": True,
                     "backfilled": True,
                 }

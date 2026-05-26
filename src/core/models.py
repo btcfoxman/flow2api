@@ -95,7 +95,7 @@ class Task(BaseModel):
     scene_id: Optional[str] = None  # Flow API的sceneId
     project_id: Optional[str] = None
     operations: Optional[List[dict]] = None
-    watermark: bool = True
+    watermark: bool = False
     created_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
 
