@@ -48,6 +48,9 @@ async def lifespan(app: FastAPI):
     backfilled_async_logs = await db.backfill_async_video_result_logs()
     if backfilled_async_logs:
         print(f"Backfilled {backfilled_async_logs} async video result log(s)")
+    normalized_finished_tasks = await db.normalize_finished_task_progress()
+    if normalized_finished_tasks:
+        print(f"Normalized {normalized_finished_tasks} finished task progress value(s)")
 
     # 启动时统一把数据库配置同步到内存，避免 personal/brower 相关运行时配置遗漏。
     await db.reload_config_to_memory()

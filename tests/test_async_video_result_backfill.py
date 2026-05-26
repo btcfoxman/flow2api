@@ -126,6 +126,36 @@ class AsyncVideoResultBackfillTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response_body["task_id"], "task-cleared-log")
         self.assertEqual(response_body["status"], "failed")
 
+    async def test_normalizes_finished_task_progress(self):
+        await self.db.create_task(
+            Task(
+                task_id="task-failed-progress",
+                token_id=self.token_id,
+                model="abra_r2v_10s",
+                prompt="hello",
+                status="failed",
+                progress=45,
+            )
+        )
+        await self.db.create_task(
+            Task(
+                task_id="task-processing-progress",
+                token_id=self.token_id,
+                model="abra_r2v_10s",
+                prompt="hello",
+                status="processing",
+                progress=45,
+            )
+        )
+
+        updated = await self.db.normalize_finished_task_progress()
+
+        failed_task = await self.db.get_task("task-failed-progress")
+        processing_task = await self.db.get_task("task-processing-progress")
+        self.assertEqual(updated, 1)
+        self.assertEqual(failed_task.progress, 100)
+        self.assertEqual(processing_task.progress, 45)
+
 
 if __name__ == "__main__":
     unittest.main()

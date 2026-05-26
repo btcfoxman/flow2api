@@ -118,6 +118,23 @@ class VeoLiteGenerationHandlerTests(unittest.TestCase):
             "视频生成被上游内容安全策略拒绝，请调整提示词或参考图后重试",
         )
 
+    def test_terminal_video_task_payload_reports_complete_progress(self):
+        handler = GenerationHandler.__new__(GenerationHandler)
+        task = Task(
+            task_id="task-1",
+            token_id=1,
+            model="abra_r2v_10s",
+            prompt="hello",
+            status="failed",
+            progress=45,
+            error_message="policy rejected",
+        )
+
+        payload = handler._task_to_video_payload(task)
+
+        self.assertEqual(payload["status"], "failed")
+        self.assertEqual(payload["progress"], 100)
+
     def test_async_video_result_log_records_final_failure(self):
         class FakeDb:
             def __init__(self):

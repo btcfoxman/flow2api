@@ -1150,6 +1150,7 @@ class GenerationHandler:
             await self.db.update_task(
                 task_id,
                 status="failed",
+                progress=100,
                 error_message=self._normalize_error_message(error_message),
                 completed_at=time.time()
             )
@@ -2890,11 +2891,14 @@ class GenerationHandler:
         return self._task_to_video_payload(task)
 
     def _task_to_video_payload(self, task: Task) -> Dict[str, Any]:
+        progress = task.progress
+        if task.status in {"completed", "failed"}:
+            progress = 100
         payload: Dict[str, Any] = {
             "id": task.task_id,
             "object": "video",
             "status": task.status,
-            "progress": task.progress,
+            "progress": progress,
             "model": task.model,
         }
         if task.created_at is not None:

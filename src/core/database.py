@@ -1315,6 +1315,20 @@ class Database:
                 await db.execute(query, params)
                 await db.commit()
 
+    async def normalize_finished_task_progress(self) -> int:
+        """Ensure terminal tasks do not remain at a submitted/in-progress percentage."""
+        async with self._connect(write=True) as db:
+            cursor = await db.execute(
+                """
+                UPDATE tasks
+                SET progress = 100
+                WHERE status IN ('completed', 'failed')
+                  AND COALESCE(progress, 0) < 100
+                """
+            )
+            await db.commit()
+            return cursor.rowcount or 0
+
     async def backfill_async_video_result_logs(self, limit: int = 500) -> int:
         """Backfill final request-log rows for async video tasks created by older builds."""
         async with self._connect(write=True) as db:
