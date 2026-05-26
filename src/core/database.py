@@ -1315,6 +1315,161 @@ class Database:
                 await db.execute(query, params)
                 await db.commit()
 
+    async def backfill_async_video_result_logs(self, limit: int = 500) -> int:
+        """Backfill final request-log rows for async video tasks created by older builds."""
+        async with self._connect(write=True) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT task.*
+                FROM tasks task
+                WHERE task.status IN ('completed', 'failed')
+                  AND EXISTS (
+                    SELECT 1
+                    FROM request_logs rl
+                    WHERE rl.operation = 'generate_video'
+                      AND rl.status_text = 'video_submitted'
+                      AND (
+                        COALESCE(rl.request_body, '') LIKE '%' || task.task_id || '%'
+                        OR COALESCE(rl.response_body, '') LIKE '%' || task.task_id || '%'
+                      )
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM request_logs rl2
+                    WHERE rl2.operation = 'generate_video_async_result'
+                      AND (
+                        COALESCE(rl2.request_body, '') LIKE '%' || task.task_id || '%'
+                        OR COALESCE(rl2.response_body, '') LIKE '%' || task.task_id || '%'
+                      )
+                  )
+                ORDER BY task.id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            rows = await cursor.fetchall()
+            if not rows:
+                return 0
+
+            inserted = 0
+            for row in rows:
+                task = dict(row)
+                task_id = str(task.get("task_id") or "")
+                if not task_id:
+                    continue
+
+                prompt = str(task.get("prompt") or "")
+                request_payload = {
+                    "task_id": task_id,
+                    "model": task.get("model"),
+                    "prompt": prompt if len(prompt) <= 2000 else f"{prompt[:2000]}...(truncated)",
+                    "project_id": task.get("project_id"),
+                    "scene_id": task.get("scene_id"),
+                    "operations": self._json_or_none(task.get("operations")),
+                    "watermark": bool(task.get("watermark", 1)),
+                    "async_video_task": True,
+                    "backfilled": True,
+                }
+
+                status = str(task.get("status") or "")
+                result_urls = self._json_or_empty_list(task.get("result_urls"))
+                if status == "completed":
+                    response_body = {
+                        "status": "completed",
+                        "task_id": task_id,
+                        "video_url": result_urls[0] if result_urls else None,
+                        "video_urls": result_urls,
+                    }
+                    status_code = 200
+                    status_text = "completed"
+                    progress = 100
+                else:
+                    error_message = self._readable_video_error_message(task.get("error_message"))
+                    response_body = {
+                        "status": "failed",
+                        "task_id": task_id,
+                        "error": error_message,
+                    }
+                    status_code = 400 if "内容安全策略" in error_message else 502
+                    status_text = "failed"
+                    progress = max(int(task.get("progress") or 0), 100)
+
+                await db.execute(
+                    """
+                    INSERT INTO request_logs (
+                        token_id, operation, request_body, response_body,
+                        status_code, duration, status_text, progress,
+                        created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    """,
+                    (
+                        task.get("token_id"),
+                        "generate_video_async_result",
+                        json.dumps(request_payload, ensure_ascii=False),
+                        json.dumps(response_body, ensure_ascii=False),
+                        status_code,
+                        self._task_duration_seconds(task.get("created_at"), task.get("completed_at")),
+                        status_text,
+                        progress,
+                    ),
+                )
+                inserted += 1
+
+            await db.commit()
+            return inserted
+
+    @staticmethod
+    def _json_or_none(value):
+        if not value:
+            return None
+        if isinstance(value, (dict, list)):
+            return value
+        try:
+            return json.loads(value)
+        except Exception:
+            return None
+
+    @classmethod
+    def _json_or_empty_list(cls, value):
+        parsed = cls._json_or_none(value)
+        return parsed if isinstance(parsed, list) else []
+
+    @staticmethod
+    def _readable_video_error_message(error_message) -> str:
+        message = str(error_message or "").strip()
+        if not message:
+            return "视频生成失败，请重试"
+        if "PUBLIC_ERROR_UNSAFE_GENERATION" in message:
+            return "视频生成被上游内容安全策略拒绝，请调整提示词或参考图后重试"
+        return message
+
+    @staticmethod
+    def _task_duration_seconds(created_at, completed_at) -> float:
+        def _to_timestamp(value):
+            if value is None:
+                return None
+            if isinstance(value, (int, float)):
+                return float(value)
+            text = str(value).strip()
+            if not text:
+                return None
+            try:
+                return float(text)
+            except ValueError:
+                pass
+            try:
+                return datetime.fromisoformat(text).timestamp()
+            except ValueError:
+                return None
+
+        start = _to_timestamp(created_at)
+        end = _to_timestamp(completed_at)
+        if start is None or end is None or end < start:
+            return 0.0
+        return end - start
+
     # Token stats operations (kept for compatibility, now delegates to specific methods)
     async def increment_token_stats(self, token_id: int, stat_type: str):
         """Increment token statistics (delegates to specific methods)"""

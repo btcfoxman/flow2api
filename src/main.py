@@ -45,6 +45,10 @@ async def lifespan(app: FastAPI):
         await db.check_and_migrate_db(config_dict)
         print("✓ Database migration check completed.")
 
+    backfilled_async_logs = await db.backfill_async_video_result_logs()
+    if backfilled_async_logs:
+        print(f"Backfilled {backfilled_async_logs} async video result log(s)")
+
     # 启动时统一把数据库配置同步到内存，避免 personal/brower 相关运行时配置遗漏。
     await db.reload_config_to_memory()
     generation_handler.file_cache.set_timeout(config.cache_timeout)
