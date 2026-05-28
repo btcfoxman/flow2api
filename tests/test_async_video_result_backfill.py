@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 
 from src.core.database import Database
 from src.core.models import RequestLog, Task, Token
@@ -125,6 +126,14 @@ class AsyncVideoResultBackfillTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(async_logs), 1)
         self.assertEqual(response_body["task_id"], "task-cleared-log")
         self.assertEqual(response_body["status"], "failed")
+
+    async def test_backfill_duration_treats_sqlite_timestamp_as_utc(self):
+        created_at = "2026-05-28 08:12:40"
+        completed_at = datetime(2026, 5, 28, 8, 12, 47, 250000, tzinfo=timezone.utc).timestamp()
+
+        duration = self.db._task_duration_seconds(created_at, completed_at)
+
+        self.assertAlmostEqual(duration, 7.25, places=2)
 
     async def test_normalizes_finished_task_progress(self):
         await self.db.create_task(

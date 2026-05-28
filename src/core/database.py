@@ -3,7 +3,7 @@ import asyncio
 import aiosqlite
 import json
 from contextlib import asynccontextmanager
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Optional, List, Dict, Any
 from pathlib import Path
 from .config import DEFAULT_YESCAPTCHA_TASK_TYPE, normalize_yescaptcha_task_type
@@ -1474,6 +1474,11 @@ class Database:
                 return None
             if isinstance(value, (int, float)):
                 return float(value)
+            if isinstance(value, datetime):
+                parsed = value
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                return parsed.timestamp()
             text = str(value).strip()
             if not text:
                 return None
@@ -1482,7 +1487,11 @@ class Database:
             except ValueError:
                 pass
             try:
-                return datetime.fromisoformat(text).timestamp()
+                parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    # SQLite CURRENT_TIMESTAMP is stored as a UTC value without a zone suffix.
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                return parsed.timestamp()
             except ValueError:
                 return None
 
