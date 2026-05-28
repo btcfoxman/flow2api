@@ -653,6 +653,9 @@ async def _normalize_openai_request(
         if request.video and not video_media_id and video_bytes is None:
             video_bytes, video_mime_type, video_file_name = _decode_video_payload(request.video)
         model = _resolve_request_model(request.model, request)
+        model_config = MODEL_CONFIG.get(model)
+        if model_config and model_config.get("type") in {"image", "video"}:
+            prompt = _sanitize_media_prompt(prompt)
         images = await _append_openai_reference_images(model, request.messages, images)
         return NormalizedGenerationRequest(
             model=model,

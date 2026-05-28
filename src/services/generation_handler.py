@@ -7,6 +7,10 @@ from pathlib import Path
 from typing import Optional, AsyncGenerator, List, Dict, Any
 from ..core.logger import debug_logger
 from ..core.config import config
+from ..core.media_errors import (
+    is_media_policy_error,
+    media_generation_failure_response,
+)
 from ..core.monitoring import record_generation_result
 from ..core.models import Task, RequestLog
 from ..core.account_tiers import (
@@ -967,26 +971,15 @@ def _resolve_tier_two_model_key(model_key: str) -> str:
     return candidate if candidate in _known_video_model_keys() else model_key
 
 
-VIDEO_POLICY_ERROR_KEYWORDS = (
-    "public_error_unsafe_generation",
-    "unsafe_generation",
-    "public_error_prominent_people_filter_failed",
-    "prominent_people_filter_failed",
-    "request contains an invalid ar",
-)
 VIDEO_REFERENCE_MAX_DURATION_SECONDS = 10.0
 
 
 def _is_video_policy_error(error_message: Any) -> bool:
-    error_lower = str(error_message or "").strip().lower()
-    return any(keyword in error_lower for keyword in VIDEO_POLICY_ERROR_KEYWORDS)
+    return is_media_policy_error(error_message)
 
 
 def _video_generation_failure_response(error_message: Any) -> tuple[str, int]:
-    text = str(error_message or "").strip() or "未知错误"
-    if _is_video_policy_error(text):
-        return "视频生成被上游内容安全策略拒绝，请调整提示词或参考图后重试", 400
-    return f"视频生成失败: {text}，请重试", 502
+    return media_generation_failure_response("video", error_message)
 
 
 def _operation_task_id(operations: Optional[List[Dict[str, Any]]]) -> str:
@@ -1097,12 +1090,19 @@ class GenerationHandler:
             "async_task_id": None,
         }
 
-    def _mark_generation_failed(self, generation_result: Optional[Dict[str, Any]], error_message: str):
+    def _mark_generation_failed(
+        self,
+        generation_result: Optional[Dict[str, Any]],
+        error_message: str,
+        status_code: Optional[int] = None,
+    ):
         """????????????????????"""
         if isinstance(generation_result, dict):
             generation_result["success"] = False
             generation_result["error_message"] = error_message
             generation_result["error_emitted"] = True
+            if status_code is not None:
+                generation_result["status_code"] = status_code
 
     def _mark_generation_succeeded(self, generation_result: Optional[Dict[str, Any]]):
         """???????"""
@@ -1409,6 +1409,7 @@ class GenerationHandler:
                 if token:
                     await self.token_manager.record_error(token.id)
                 duration = time.time() - start_time
+                response_status_code = int(generation_result.get("status_code") or 500)
                 record_generation_result(generation_type, "failed", duration)
                 perf_trace["status"] = "failed"
                 perf_trace["total_ms"] = int(duration * 1000)
@@ -1419,7 +1420,7 @@ class GenerationHandler:
                     request_operation,
                     request_payload,
                     {"error": error_msg, "performance": perf_trace},
-                    500,
+                    response_status_code,
                     duration,
                     log_id=request_log_state.get("id"),
                     status_text="failed",
@@ -1428,7 +1429,10 @@ class GenerationHandler:
                 if not generation_result.get("error_emitted"):
                     if stream:
                         yield self._create_stream_chunk(f"❌ {error_msg}\n")
-                    yield self._create_error_response(error_msg, status_code=500)
+                    yield self._create_error_response(
+                        error_msg,
+                        status_code=response_status_code,
+                    )
                 return
 
             is_video = (generation_type == "video")
@@ -1509,7 +1513,15 @@ class GenerationHandler:
             )
             raise
         except Exception as e:
-            error_msg = f"生成失败: {str(e)}"
+            raw_error_msg = str(e)
+            if generation_type in {"image", "video"} and is_media_policy_error(raw_error_msg):
+                error_msg, response_status_code = media_generation_failure_response(
+                    generation_type,
+                    raw_error_msg,
+                )
+            else:
+                error_msg = f"生成失败: {raw_error_msg}"
+                response_status_code = 500
             debug_logger.log_error(f"[GENERATION] ❌ {error_msg}")
             if token:
                 # 记录错误（所有错误统一处理，不再特殊处理429）
@@ -1527,7 +1539,7 @@ class GenerationHandler:
                 request_operation if generation_type else "generate_unknown",
                 request_payload if 'request_payload' in locals() else {"model": model},
                 {"error": error_msg, "performance": perf_trace},
-                500,
+                response_status_code,
                 duration,
                 log_id=request_log_state.get("id"),
                 status_text="failed",
@@ -1535,7 +1547,7 @@ class GenerationHandler:
             )
             if stream:
                 yield self._create_stream_chunk(f"❌ {error_msg}\n")
-            yield self._create_error_response(error_msg, status_code=500)
+            yield self._create_error_response(error_msg, status_code=response_status_code)
         finally:
             if pending_token_state.get("active") and token and self.load_balancer:
                 await self.load_balancer.release_pending(
@@ -2674,7 +2686,11 @@ class GenerationHandler:
                     )
                     
                     # 内容安全拒绝是上游策略结果，不应包装成 5xx 服务故障。
-                    self._mark_generation_failed(generation_result, friendly_error)
+                    self._mark_generation_failed(
+                        generation_result,
+                        friendly_error,
+                        status_code=response_status_code,
+                    )
                     await self._finalize_async_video_result_log(
                         request_log_state,
                         token_id=token.id,

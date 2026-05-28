@@ -7,6 +7,7 @@ from datetime import date, datetime
 from typing import Optional, List, Dict, Any
 from pathlib import Path
 from .config import DEFAULT_YESCAPTCHA_TASK_TYPE, normalize_yescaptcha_task_type
+from .media_errors import media_policy_failure_message, is_media_policy_error
 from .models import Token, TokenStats, Task, RequestLog, AdminConfig, ProxyConfig, GenerationConfig, CacheConfig, WatermarkConfig, Project, CaptchaConfig, PluginConfig, CallLogicConfig
 
 
@@ -1462,8 +1463,8 @@ class Database:
         message = str(error_message or "").strip()
         if not message:
             return "视频生成失败，请重试"
-        if "PUBLIC_ERROR_UNSAFE_GENERATION" in message:
-            return "视频生成被上游内容安全策略拒绝，请调整提示词或参考图后重试"
+        if is_media_policy_error(message):
+            return media_policy_failure_message("video")
         return message
 
     @staticmethod

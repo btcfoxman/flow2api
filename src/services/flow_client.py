@@ -14,6 +14,7 @@ import urllib.request
 from curl_cffi.requests import AsyncSession
 from ..core.logger import debug_logger
 from ..core.config import config, get_yescaptcha_min_score
+from ..core.media_errors import is_media_policy_error
 from .browser_cookie_utils import serialize_cookie_header
 
 try:
@@ -2992,6 +2993,8 @@ class FlowClient:
     def _get_retry_reason(self, error_str: str) -> Optional[str]:
         """判断是否需要重试，返回日志提示内容"""
         error_lower = error_str.lower()
+        if is_media_policy_error(error_str):
+            return None
         if "403" in error_lower:
             return "403错误"
         if "429" in error_lower or "too many requests" in error_lower:
