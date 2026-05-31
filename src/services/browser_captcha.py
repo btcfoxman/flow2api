@@ -952,17 +952,128 @@ class TokenBrowser:
                 continue
         return None
 
+    @staticmethod
+    def _page_is_closed(page) -> bool:
+        if not page:
+            return True
+        try:
+            is_closed = getattr(page, "is_closed", None)
+            if callable(is_closed):
+                return bool(is_closed())
+            if is_closed is not None:
+                return bool(is_closed)
+        except Exception:
+            return True
+        return False
+
+    @staticmethod
+    def _is_blank_page_url(url: Any) -> bool:
+        normalized = str(url or "").strip().lower().rstrip("/")
+        return normalized in {
+            "",
+            "about:blank",
+            "chrome://newtab",
+            "chrome://new-tab-page",
+            "chrome://new-tab-page-third-party",
+            "edge://newtab",
+        }
+
+    async def _close_page_quietly(self, page, reason: str = "") -> bool:
+        if self._page_is_closed(page):
+            return False
+        try:
+            close_result = page.close()
+            if hasattr(close_result, "__await__"):
+                await asyncio.wait_for(close_result, timeout=5)
+            return True
+        except Exception as e:
+            debug_logger.log_warning(
+                f"[BrowserCaptcha] Token-{self.token_id} failed to close page ({reason}): {type(e).__name__}: {str(e)[:120]}"
+            )
+            return False
+
+    async def _cleanup_blank_pages(
+        self,
+        context=None,
+        keep_page=None,
+        keep_one: bool = True,
+        reason: str = "",
+    ) -> int:
+        """Close surplus blank tabs in a shared browser context."""
+        target_context = context or self._shared_context
+        if not target_context:
+            return 0
+        try:
+            pages = list(getattr(target_context, "pages", None) or [])
+        except Exception:
+            return 0
+
+        kept_blank = False
+        closed_count = 0
+        for page in pages:
+            if self._page_is_closed(page):
+                continue
+            try:
+                page_url = getattr(page, "url", "")
+            except Exception:
+                page_url = ""
+            is_blank = self._is_blank_page_url(page_url)
+            if page is keep_page:
+                if is_blank:
+                    kept_blank = True
+                continue
+            if not is_blank:
+                continue
+            if keep_one and keep_page is None and not kept_blank:
+                kept_blank = True
+                continue
+            if await self._close_page_quietly(page, reason=reason or "blank_cleanup"):
+                closed_count += 1
+
+        if closed_count:
+            debug_logger.log_info(
+                f"[BrowserCaptcha] Token-{self.token_id} closed {closed_count} surplus blank page(s), reason={reason or 'blank_cleanup'}"
+            )
+        return closed_count
+
     async def _ensure_shared_keepalive_page(self):
         """Ensure the shared browser always keeps one keepalive page alive."""
         keepalive_page = self._shared_keepalive_page
-        try:
-            if keepalive_page and not keepalive_page.is_closed():
-                return keepalive_page
-        except Exception:
-            keepalive_page = None
+        if keepalive_page and not self._page_is_closed(keepalive_page):
+            await self._cleanup_blank_pages(
+                self._shared_context,
+                keep_page=keepalive_page,
+                reason="keepalive_reuse",
+            )
+            return keepalive_page
+        self._shared_keepalive_page = None
 
         if not self._shared_context:
             return None
+
+        try:
+            pages = list(getattr(self._shared_context, "pages", None) or [])
+        except Exception:
+            pages = []
+        for page in pages:
+            if self._page_is_closed(page):
+                continue
+            try:
+                page_url = getattr(page, "url", "")
+            except Exception:
+                page_url = ""
+            if not self._is_blank_page_url(page_url):
+                continue
+            self._shared_keepalive_page = page
+            await self._cleanup_blank_pages(
+                self._shared_context,
+                keep_page=page,
+                reason="keepalive_adopt",
+            )
+            debug_logger.log_info(
+                f"[BrowserCaptcha] Token-{self.token_id} keepalive page adopted"
+            )
+            return page
 
         keepalive_page = await self._shared_context.new_page()
         try:
@@ -970,6 +1081,11 @@ class TokenBrowser:
         except Exception:
             pass
         self._shared_keepalive_page = keepalive_page
+        await self._cleanup_blank_pages(
+            self._shared_context,
+            keep_page=keepalive_page,
+            reason="keepalive_create",
+        )
         debug_logger.log_info(
             f"[BrowserCaptcha] Token-{self.token_id} keepalive page created"
         )
@@ -1763,10 +1879,12 @@ class TokenBrowser:
             return None
         finally:
             if page:
-                try:
-                    await page.close()
-                except:
-                    pass
+                await self._close_page_quietly(page, reason="captcha_finished")
+            await self._cleanup_blank_pages(
+                context,
+                keep_page=self._shared_keepalive_page,
+                reason="captcha_finished",
+            )
 
     async def _execute_custom_captcha(
         self,
@@ -1951,10 +2069,12 @@ class TokenBrowser:
             return None
         finally:
             if page:
-                try:
-                    await page.close()
-                except:
-                    pass
+                await self._close_page_quietly(page, reason="custom_captcha_finished")
+            await self._cleanup_blank_pages(
+                context,
+                keep_page=self._shared_keepalive_page,
+                reason="custom_captcha_finished",
+            )
 
     def is_busy(self) -> bool:
         return self._solve_inflight > 0
@@ -2115,10 +2235,12 @@ class TokenBrowser:
             return parsed
         finally:
             if page:
-                try:
-                    await page.close()
-                except Exception:
-                    pass
+                await self._close_page_quietly(page, reason="browser_fetch_finished")
+            await self._cleanup_blank_pages(
+                context,
+                keep_page=self._shared_keepalive_page,
+                reason="browser_fetch_finished",
+            )
     
     async def get_token(
         self,
