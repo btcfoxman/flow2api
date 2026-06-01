@@ -36,6 +36,21 @@ def _is_recaptcha_resource_url(url: str) -> bool:
     return any(host in (url or "") for host in RECAPTCHA_RESOURCE_HOST_MARKERS)
 
 
+def _is_browser_context_closed_error(exc: BaseException) -> bool:
+    message = f"{type(exc).__name__}: {str(exc)}".lower()
+    return any(
+        marker in message
+        for marker in (
+            "target page, context or browser has been closed",
+            "browsercontext.new_page",
+            "target closed",
+            "browser has been closed",
+            "context has been closed",
+            "connection closed",
+        )
+    )
+
+
 def _adspower_env(name: str, default: str = "") -> str:
     return (os.environ.get(name, default) or "").strip()
 
@@ -624,6 +639,7 @@ else:
 
 # 配置
 LABS_URL = "https://labs.google/fx/tools/flow"
+BROWSER_FETCH_BOOTSTRAP_URL = "https://labs.google/fx/api/auth/providers"
 
 # ==========================================
 # 代理解析工具函数
@@ -811,6 +827,7 @@ class TokenBrowser:
         self._shared_reuse_count = 0
         self._consecutive_browser_failures = 0
         self._solve_inflight = 0
+        self._browser_fetch_inflight = 0
         self._last_idle_since = time.monotonic()
         self._refresh_browser_profile()
 
@@ -2077,10 +2094,10 @@ class TokenBrowser:
             )
 
     def is_busy(self) -> bool:
-        return self._solve_inflight > 0
+        return self._solve_inflight > 0 or self._browser_fetch_inflight > 0
 
     def note_idle(self):
-        if self._solve_inflight <= 0:
+        if self._solve_inflight <= 0 and self._browser_fetch_inflight <= 0:
             self._last_idle_since = time.monotonic()
 
     def idle_seconds(self) -> float:
@@ -2152,95 +2169,115 @@ class TokenBrowser:
         timeout: int = 60,
     ) -> Dict[str, Any]:
         """Execute a JSON request inside the real browser context used for captcha."""
-        _, _, context = await self._get_or_create_shared_browser()
-        page = None
-        route_url = "https://labs.google/flow2api-browser-fetch"
+        self._browser_fetch_inflight += 1
         try:
-            page = await context.new_page()
+            last_error: Optional[Exception] = None
+            for attempt in range(2):
+                _, _, context = await self._get_or_create_shared_browser()
+                page = None
+                route_url = BROWSER_FETCH_BOOTSTRAP_URL
+                try:
+                    page = await context.new_page()
 
-            async def handle_route(route):
-                if route.request.url.rstrip("/") == route_url.rstrip("/"):
-                    await route.fulfill(
-                        status=200,
-                        content_type="text/html",
-                        body="<html><head><title>flow2api fetch</title></head><body></body></html>",
-                    )
-                else:
-                    await route.continue_()
+                    async def handle_route(route):
+                        if route.request.url.rstrip("/") == route_url.rstrip("/"):
+                            await route.fulfill(
+                                status=200,
+                                content_type="text/html",
+                                body="<html><head><title>flow2api fetch</title></head><body></body></html>",
+                            )
+                        else:
+                            await route.continue_()
 
-            await page.route(route_url, handle_route)
-            await page.goto(route_url, wait_until="domcontentloaded", timeout=15000)
-            await self._capture_page_fingerprint(page)
+                    await page.route(route_url, handle_route)
+                    await page.goto(route_url, wait_until="domcontentloaded", timeout=15000)
+                    await self._capture_page_fingerprint(page)
 
-            payload = {
-                "url": url,
-                "method": (method or "POST").upper(),
-                "headers": self._browser_fetch_headers(headers),
-                "body": json.dumps(json_data or {}, ensure_ascii=False),
-                "timeoutMs": max(1000, int(timeout * 1000)),
-            }
-            result = await asyncio.wait_for(
-                page.evaluate(
-                    """
-                    async (payload) => {
-                        const controller = new AbortController();
-                        const timer = setTimeout(() => controller.abort(), payload.timeoutMs);
-                        try {
-                            const response = await fetch(payload.url, {
-                                method: payload.method,
-                                headers: payload.headers,
-                                body: payload.method === 'GET' ? undefined : payload.body,
-                                credentials: 'omit',
-                                mode: 'cors',
-                                signal: controller.signal
-                            });
-                            const text = await response.text();
-                            return {
-                                status: response.status,
-                                statusText: response.statusText || '',
-                                text
-                            };
-                        } catch (error) {
-                            return {
-                                fetchError: `${error && error.name ? error.name : 'Error'}: ${error && error.message ? error.message : String(error)}`
-                            };
-                        } finally {
-                            clearTimeout(timer);
-                        }
+                    payload = {
+                        "url": url,
+                        "method": (method or "POST").upper(),
+                        "headers": self._browser_fetch_headers(headers),
+                        "body": json.dumps(json_data or {}, ensure_ascii=False),
+                        "timeoutMs": max(1000, int(timeout * 1000)),
                     }
-                    """,
-                    payload,
-                ),
-                timeout=max(1, timeout + 5),
-            )
+                    result = await asyncio.wait_for(
+                        page.evaluate(
+                            """
+                            async (payload) => {
+                                const controller = new AbortController();
+                                const timer = setTimeout(() => controller.abort(), payload.timeoutMs);
+                                try {
+                                    const response = await fetch(payload.url, {
+                                        method: payload.method,
+                                        headers: payload.headers,
+                                        body: payload.method === 'GET' ? undefined : payload.body,
+                                        credentials: 'omit',
+                                        mode: 'cors',
+                                        signal: controller.signal
+                                    });
+                                    const text = await response.text();
+                                    return {
+                                        status: response.status,
+                                        statusText: response.statusText || '',
+                                        text
+                                    };
+                                } catch (error) {
+                                    return {
+                                        fetchError: `${error && error.name ? error.name : 'Error'}: ${error && error.message ? error.message : String(error)}`
+                                    };
+                                } finally {
+                                    clearTimeout(timer);
+                                }
+                            }
+                            """,
+                            payload,
+                        ),
+                        timeout=max(1, timeout + 5),
+                    )
 
-            if not isinstance(result, dict):
-                raise RuntimeError("browser fetch returned invalid result")
-            fetch_error = result.get("fetchError")
-            if fetch_error:
-                raise RuntimeError(f"browser fetch failed: {fetch_error}")
+                    if not isinstance(result, dict):
+                        raise RuntimeError("browser fetch returned invalid result")
+                    fetch_error = result.get("fetchError")
+                    if fetch_error:
+                        raise RuntimeError(f"browser fetch failed: {fetch_error}")
 
-            status = int(result.get("status") or 0)
-            text = result.get("text") or ""
-            if status >= 400:
-                raise RuntimeError(self._format_browser_fetch_http_error(status, text))
-            if not text:
-                return {}
-            try:
-                parsed = json.loads(text)
-            except Exception as exc:
-                raise RuntimeError(f"browser fetch returned non-JSON response: {text[:300]}") from exc
-            if not isinstance(parsed, dict):
-                raise RuntimeError(f"browser fetch returned unexpected JSON type: {type(parsed).__name__}")
-            return parsed
+                    status = int(result.get("status") or 0)
+                    text = result.get("text") or ""
+                    if status >= 400:
+                        raise RuntimeError(self._format_browser_fetch_http_error(status, text))
+                    if not text:
+                        return {}
+                    try:
+                        parsed = json.loads(text)
+                    except Exception as exc:
+                        raise RuntimeError(f"browser fetch returned non-JSON response: {text[:300]}") from exc
+                    if not isinstance(parsed, dict):
+                        raise RuntimeError(f"browser fetch returned unexpected JSON type: {type(parsed).__name__}")
+                    return parsed
+                except Exception as exc:
+                    last_error = exc
+                    if attempt == 0 and _is_browser_context_closed_error(exc):
+                        debug_logger.log_warning(
+                            f"[BrowserCaptcha] Token-{self.token_id} browser fetch context closed; recycling and retrying once: "
+                            f"{type(exc).__name__}: {str(exc)[:160]}"
+                        )
+                        await self.recycle_browser(reason="browser_fetch_context_closed", rotate_profile=False)
+                        continue
+                    raise
+                finally:
+                    if page:
+                        await self._close_page_quietly(page, reason="browser_fetch_finished")
+                    await self._cleanup_blank_pages(
+                        context,
+                        keep_page=self._shared_keepalive_page,
+                        reason="browser_fetch_finished",
+                    )
+            if last_error:
+                raise last_error
+            raise RuntimeError("browser fetch failed without result")
         finally:
-            if page:
-                await self._close_page_quietly(page, reason="browser_fetch_finished")
-            await self._cleanup_blank_pages(
-                context,
-                keep_page=self._shared_keepalive_page,
-                reason="browser_fetch_finished",
-            )
+            self._browser_fetch_inflight = max(0, self._browser_fetch_inflight - 1)
+            self.note_idle()
     
     async def get_token(
         self,

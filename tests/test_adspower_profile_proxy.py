@@ -38,6 +38,30 @@ class _FakePlaywrightContext:
         return page
 
 
+class _FakeFetchPage(_FakePlaywrightPage):
+    async def route(self, url, handler):
+        self.route_url = url
+        self.route_handler = handler
+
+    async def evaluate(self, script, payload=None):
+        return {"status": 200, "statusText": "OK", "text": '{"ok": true}'}
+
+
+class _FakeFetchContext(_FakePlaywrightContext):
+    async def new_page(self):
+        page = _FakeFetchPage()
+        self.pages.append(page)
+        self.created_pages.append(page)
+        return page
+
+
+class _FailingNewPageContext:
+    pages = []
+
+    async def new_page(self):
+        raise RuntimeError("BrowserContext.new_page: Target page, context or browser has been closed")
+
+
 class AdsPowerProfileProxyTests(unittest.TestCase):
     def test_resolves_profile_proxy_from_v1_user_list(self):
         payload = {
@@ -208,3 +232,36 @@ class AdsPowerBlankPageCleanupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(keepalive.url, "about:blank")
         self.assertFalse(keepalive.closed)
         self.assertFalse(real_page.closed)
+
+
+class BrowserFetchLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_browser_fetch_retries_once_when_context_was_closed(self):
+        browser = TokenBrowser(token_id=0, user_data_dir="tmp/unit-browser-fetch")
+        contexts = [_FailingNewPageContext(), _FakeFetchContext()]
+        recycle_reasons = []
+        busy_seen = []
+
+        async def fake_get_or_create_shared_browser():
+            busy_seen.append(browser.is_busy())
+            return None, None, contexts.pop(0)
+
+        async def fake_recycle_browser(reason="unknown", rotate_profile=True):
+            recycle_reasons.append((reason, rotate_profile))
+
+        async def fake_capture_page_fingerprint(page):
+            return None
+
+        browser._get_or_create_shared_browser = fake_get_or_create_shared_browser
+        browser.recycle_browser = fake_recycle_browser
+        browser._capture_page_fingerprint = fake_capture_page_fingerprint
+
+        result = await browser.fetch_json(
+            url="https://aisandbox-pa.googleapis.com/v1/video:poll",
+            json_data={"operation": "op-1"},
+            timeout=10,
+        )
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(recycle_reasons, [("browser_fetch_context_closed", False)])
+        self.assertEqual(busy_seen, [True, True])
+        self.assertFalse(browser.is_busy())
