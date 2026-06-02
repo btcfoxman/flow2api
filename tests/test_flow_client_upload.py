@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from src.services.flow_client import FlowClient
 
@@ -87,7 +87,10 @@ class FlowClientUploadImageTests(unittest.IsolatedAsyncioTestCase):
 
         client._make_request = AsyncMock(side_effect=fake_make_request)
 
-        with self.assertRaisesRegex(RuntimeError, "legacy :uploadUserImage fallback is disabled"):
+        with patch("builtins.print") as mock_print, self.assertRaisesRegex(
+            RuntimeError,
+            "legacy :uploadUserImage fallback is disabled",
+        ) as ctx:
             await client.upload_image(
                 at="test-at",
                 image_bytes=JPEG_BYTES,
@@ -95,6 +98,16 @@ class FlowClientUploadImageTests(unittest.IsolatedAsyncioTestCase):
                 project_id="project-123",
             )
 
+        error_message = str(ctx.exception)
+        self.assertIn("HTTP 500: upstream failed", error_message)
+        self.assertIn("mime=image/jpeg", error_message)
+        self.assertIn(f"bytes={len(JPEG_BYTES)}", error_message)
+        self.assertTrue(
+            any(
+                "[UPLOAD] /flow/uploadImage failed project_id=project-123" in str(call.args[0])
+                for call in mock_print.call_args_list
+            )
+        )
         self.assertEqual(len(request_calls), 1)
         self.assertEqual(
             request_calls[0]["json_data"]["clientContext"]["projectId"],

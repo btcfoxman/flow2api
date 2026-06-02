@@ -901,6 +901,14 @@ class FlowClient:
         img.save(output, format='JPEG', quality=95)
         return output.getvalue()
 
+    @staticmethod
+    def _summarize_exception(error: Any, max_length: int = 600) -> str:
+        text = str(error or "").strip() or type(error).__name__
+        text = " ".join(text.replace("\r", " ").replace("\n", " ").split())
+        if len(text) > max_length:
+            return f"{text[:max_length]}...(truncated)"
+        return text
+
     async def upload_image(
         self,
         at: str,
@@ -927,6 +935,7 @@ class FlowClient:
 
         # 自动检测图片 MIME 类型
         mime_type = self._detect_image_mime_type(image_bytes)
+        image_size = len(image_bytes)
 
         # 编码为base64 (去掉前缀)
         image_base64 = base64.b64encode(image_bytes).decode('utf-8')
@@ -1002,10 +1011,15 @@ class FlowClient:
                     or new_result.get("mediaGenerationId", {}).get("mediaGenerationId")
                 )
                 if media_id:
+                    debug_logger.log_info(
+                        f"[UPLOAD] /flow/uploadImage success project_id={normalized_project_id or '-'} "
+                        f"mime={mime_type} bytes={image_size} media_id={media_id}"
+                    )
                     return media_id
                 raise Exception(f"Invalid upload response: missing media id, keys={list(new_result.keys())}")
             except Exception as new_upload_error:
                 last_error = new_upload_error
+                upload_error_summary = self._summarize_exception(new_upload_error)
                 retry_reason = "网络超时" if self._is_timeout_error(new_upload_error) else self._get_retry_reason(str(new_upload_error))
 
                 # 旧接口不携带 projectId，带项目上下文的上传一旦回退就可能把图片挂到错误项目。
@@ -1013,18 +1027,28 @@ class FlowClient:
                     if retry_reason and retry_attempt < max_retries - 1:
                         debug_logger.log_warning(
                             f"[UPLOAD] Project-scoped upload 遇到{retry_reason}，准备重试新版接口 "
-                            f"({retry_attempt + 2}/{max_retries}, project_id={normalized_project_id})..."
+                            f"({retry_attempt + 2}/{max_retries}, project_id={normalized_project_id}, "
+                            f"mime={mime_type}, bytes={image_size}, cause={upload_error_summary})..."
                         )
                         await asyncio.sleep(1)
                         continue
+                    upload_failure_log = (
+                        f"[UPLOAD] /flow/uploadImage failed project_id={normalized_project_id} "
+                        f"mime={mime_type} bytes={image_size} attempt={retry_attempt + 1}/{max_retries} "
+                        f"cause={upload_error_summary}"
+                    )
+                    print(upload_failure_log, flush=True)
+                    debug_logger.log_error(upload_failure_log)
                     raise RuntimeError(
-                        "Project-scoped image upload failed via /flow/uploadImage; "
+                        "Project-scoped image upload failed via /flow/uploadImage "
+                        f"(project_id={normalized_project_id}, mime={mime_type}, bytes={image_size}, "
+                        f"cause={upload_error_summary}); "
                         "legacy :uploadUserImage fallback is disabled because it may attach media "
-                        f"to a different project (project_id={normalized_project_id})."
+                        "to a different project."
                     ) from new_upload_error
 
                 debug_logger.log_warning(
-                    f"[UPLOAD] New upload API failed, fallback to legacy endpoint: {new_upload_error}"
+                    f"[UPLOAD] New upload API failed, fallback to legacy endpoint: {upload_error_summary}"
                 )
 
             try:

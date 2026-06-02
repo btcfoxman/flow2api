@@ -5,6 +5,7 @@ from src.core.media_errors import (
     media_generation_failure_response,
 )
 from src.services.flow_client import FlowClient
+from src.services.generation_handler import GenerationHandler
 
 
 class MediaPolicyErrorTests(unittest.TestCase):
@@ -34,6 +35,23 @@ class MediaPolicyErrorTests(unittest.TestCase):
         reason = FlowClient(None)._get_retry_reason("PUBLIC_ERROR_INTERNAL")
 
         self.assertIsNotNone(reason)
+
+    def test_task_level_failures_do_not_count_as_token_errors(self):
+        handler = GenerationHandler.__new__(GenerationHandler)
+
+        self.assertFalse(
+            handler._should_record_token_error("PUBLIC_ERROR_UNSAFE_GENERATION", 400)
+        )
+        self.assertFalse(
+            handler._should_record_token_error(
+                "Project-scoped image upload failed via /flow/uploadImage "
+                "(project_id=project-123, cause=HTTP Error 500)",
+                500,
+            )
+        )
+        self.assertTrue(
+            handler._should_record_token_error("Token AT invalid or refresh failed", 503)
+        )
 
 
 if __name__ == "__main__":

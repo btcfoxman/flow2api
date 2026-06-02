@@ -1118,6 +1118,28 @@ class GenerationHandler:
             return text
         return f"{text[:max_length - 3]}..."
 
+    def _should_record_token_error(
+        self,
+        error_message: Any,
+        status_code: Optional[int] = None,
+    ) -> bool:
+        text = str(error_message or "").strip()
+        lowered = text.lower()
+        numeric_status_code = None
+        if status_code is not None:
+            try:
+                numeric_status_code = int(status_code)
+            except (TypeError, ValueError):
+                numeric_status_code = None
+
+        if numeric_status_code is not None and numeric_status_code < 500:
+            return False
+        if is_media_policy_error(text):
+            return False
+        if "project-scoped image upload failed via /flow/uploadimage" in lowered:
+            return False
+        return True
+
     def _resolve_video_model_key_for_tier(self, model_config: Dict[str, Any], user_tier: str) -> tuple[str, Optional[str]]:
         """根据账号层级调整视频模型 key。"""
         model_key = model_config["model_key"]
@@ -1406,10 +1428,14 @@ class GenerationHandler:
             if not generation_result.get("success"):
                 error_msg = generation_result.get("error_message") or "生成未成功完成"
                 debug_logger.log_warning(f"[GENERATION] 生成未成功，不扣次数: {error_msg}")
-                if token:
-                    await self.token_manager.record_error(token.id)
-                duration = time.time() - start_time
                 response_status_code = int(generation_result.get("status_code") or 500)
+                if token and self._should_record_token_error(error_msg, response_status_code):
+                    await self.token_manager.record_error(token.id)
+                elif token:
+                    debug_logger.log_info(
+                        f"[GENERATION] Skip token error count for token {token.id}: {error_msg}"
+                    )
+                duration = time.time() - start_time
                 record_generation_result(generation_type, "failed", duration)
                 perf_trace["status"] = "failed"
                 perf_trace["total_ms"] = int(duration * 1000)
@@ -1523,9 +1549,13 @@ class GenerationHandler:
                 error_msg = f"生成失败: {raw_error_msg}"
                 response_status_code = 500
             debug_logger.log_error(f"[GENERATION] ❌ {error_msg}")
-            if token:
+            if token and self._should_record_token_error(error_msg, response_status_code):
                 # 记录错误（所有错误统一处理，不再特殊处理429）
                 await self.token_manager.record_error(token.id)
+            elif token:
+                debug_logger.log_info(
+                    f"[GENERATION] Skip token error count for token {token.id}: {error_msg}"
+                )
 
             # 先将最终失败状态落库，再返回错误响应，避免日志停在 102。
             duration = time.time() - start_time
@@ -2290,7 +2320,14 @@ class GenerationHandler:
             ):
                 pass
             if not generation_result.get("success"):
-                await self.token_manager.record_error(token.id)
+                error_msg = generation_result.get("error_message") or "video task failed"
+                status_code = int(generation_result.get("status_code") or 500)
+                if self._should_record_token_error(error_msg, status_code):
+                    await self.token_manager.record_error(token.id)
+                else:
+                    debug_logger.log_info(
+                        f"[VIDEO ASYNC] Skip token error count for token {token.id}: {error_msg}"
+                    )
         except Exception as exc:
             error_msg = self._normalize_error_message(exc)
             debug_logger.log_error(f"[VIDEO ASYNC] background task failed: {error_msg}")
@@ -2307,7 +2344,12 @@ class GenerationHandler:
                 status_text="failed",
                 progress=100,
             )
-            await self.token_manager.record_error(token.id)
+            if self._should_record_token_error(error_msg, 500):
+                await self.token_manager.record_error(token.id)
+            else:
+                debug_logger.log_info(
+                    f"[VIDEO ASYNC] Skip token error count for token {token.id}: {error_msg}"
+                )
 
     async def _start_async_video_result_log(
         self,
