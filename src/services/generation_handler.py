@@ -1046,8 +1046,15 @@ def _mp4_duration_seconds(data: bytes) -> Optional[float]:
 def _video_end_frame_index_from_bytes(data: Optional[bytes], fallback: int = 240) -> int:
     duration = _mp4_duration_seconds(data or b"")
     if not duration:
-        return max(1, fallback - 1)
-    return max(1, min(max(1, fallback - 1), int(duration * 24)))
+        return max(1, fallback)
+    return max(1, min(max(1, fallback), int(duration * 24)))
+
+
+def _video_offset_end_from_duration(duration: Optional[float]) -> str:
+    seconds = VIDEO_REFERENCE_MAX_DURATION_SECONDS if duration is None else min(duration, VIDEO_REFERENCE_MAX_DURATION_SECONDS)
+    if abs(seconds - round(seconds)) < 0.001:
+        return f"{int(round(seconds))}s"
+    return f"{seconds:.3f}".rstrip("0").rstrip(".") + "s"
 
 
 def _validate_reference_video_duration(data: Optional[bytes]) -> Optional[float]:
@@ -2076,13 +2083,39 @@ class GenerationHandler:
                         video_trace["input_video_end_frame_index"] = video_end_frame_index
                     if stream:
                         yield self._create_stream_chunk("上传参考视频...\n")
-                    video_media_id = await self.flow_client.upload_video(
+                    video_upload = await self.flow_client.upload_video_with_metadata(
                         st=token.st,
                         project_id=project_id,
                         video_bytes=video_bytes,
                         mime_type=video_mime_type or "video/mp4",
                         file_name=video_file_name or "upload.mp4",
                     )
+                    video_media_id = str(video_upload.get("mediaServerId") or "").strip()
+                    video_workflow_id = str(video_upload.get("workflowServerId") or "").strip()
+                    if not video_media_id:
+                        raise RuntimeError(f"upload-video final response missing mediaServerId: {video_upload}")
+                    if stream:
+                        yield self._create_stream_chunk("设置参考视频截取区间...\n")
+                    await self.flow_client.update_video_offset(
+                        st=token.st,
+                        media_id=video_media_id,
+                        start_offset="0s",
+                        end_offset=_video_offset_end_from_duration(video_duration_seconds),
+                    )
+                    if stream:
+                        yield self._create_stream_chunk("等待参考视频处理完成...\n")
+                    await self.flow_client.wait_uploaded_video_ready(
+                        at=token.at,
+                        project_id=project_id,
+                        media_id=video_media_id,
+                    )
+                    if video_workflow_id:
+                        await self.flow_client.update_flow_workflow_primary_media(
+                            at=token.at,
+                            project_id=project_id,
+                            workflow_id=video_workflow_id,
+                            media_id=video_media_id,
+                        )
                 debug_logger.log_info(f"[V2V] Uploaded {len(reference_images)} reference images, video={str(video_media_id or '')[:12]}...")
                 if stream:
                     yield self._create_stream_chunk("提交视频生成任务...\n")

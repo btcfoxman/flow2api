@@ -545,7 +545,12 @@ class FlowClient:
             except asyncio.TimeoutError as exc:
                 raise Exception(f"Flow browser video API request timed out after {timeout}s") from exc
             except Exception as exc:
-                raise Exception(f"Flow browser API request failed: {exc}") from exc
+                error_msg = str(exc)
+                if not self._should_fallback_browser_video_request(error_msg):
+                    raise Exception(f"Flow browser API request failed: {exc}") from exc
+                debug_logger.log_warning(
+                    f"[VIDEO SUBMIT FALLBACK] browser fetch rejected by upstream, retrying with HTTP client: {error_msg}"
+                )
 
         try:
             return await asyncio.wait_for(
@@ -567,6 +572,18 @@ class FlowClient:
             )
         except asyncio.TimeoutError as exc:
             raise Exception(f"Flow video API request timed out after {timeout}s") from exc
+
+    def _should_fallback_browser_video_request(self, error_message: str) -> bool:
+        """Return whether a browser-fetched video submit should retry via the HTTP client."""
+        error_lower = (error_message or "").lower()
+        return any(
+            keyword in error_lower
+            for keyword in [
+                "recaptcha evaluation failed",
+                "public_error_unusual_activity",
+                "too_much_traffic",
+            ]
+        )
 
     async def _acquire_image_launch_gate(
         self,
@@ -1137,6 +1154,26 @@ class FlowClient:
         mime_type: str = "video/mp4",
         file_name: str = "upload.mp4",
     ) -> str:
+        final_payload = await self.upload_video_with_metadata(
+            st=st,
+            project_id=project_id,
+            video_bytes=video_bytes,
+            mime_type=mime_type,
+            file_name=file_name,
+        )
+        media_id = final_payload.get("mediaServerId")
+        if not isinstance(media_id, str) or not media_id.strip():
+            raise RuntimeError(f"upload-video final response missing mediaServerId: {final_payload}")
+        return media_id.strip()
+
+    async def upload_video_with_metadata(
+        self,
+        st: str,
+        project_id: str,
+        video_bytes: bytes,
+        mime_type: str = "video/mp4",
+        file_name: str = "upload.mp4",
+    ) -> Dict[str, Any]:
         normalized_project_id = str(project_id or "").strip()
         if not normalized_project_id:
             raise RuntimeError("project_id is required for video upload")
@@ -1210,12 +1247,75 @@ class FlowClient:
         except Exception as e:
             raise RuntimeError(f"upload-video request failed: {e}") from e
 
+        if not isinstance(final_payload, dict) or not final_payload:
+            raise RuntimeError(f"upload-video final response missing payload: {final_payload}")
         media_id = final_payload.get("mediaServerId")
         if not isinstance(media_id, str) or not media_id.strip():
             raise RuntimeError(f"upload-video final response missing mediaServerId: {final_payload}")
-        return media_id.strip()
+        return dict(final_payload)
 
     # ========== 图片生成 (使用AT) - 同步返回 ==========
+
+    async def update_video_offset(
+        self,
+        st: str,
+        media_id: str,
+        start_offset: str = "0s",
+        end_offset: str = "10s",
+    ) -> Dict[str, Any]:
+        normalized_media_id = str(media_id or "").strip()
+        if not normalized_media_id:
+            raise RuntimeError("media_id is required for video offset update")
+        return await self._make_request(
+            method="POST",
+            url=f"{self.labs_base_url}/trpc/videoFx.updateVideoOffset",
+            headers={"Content-Type": "application/json"},
+            json_data={
+                "json": {
+                    "mediaId": normalized_media_id,
+                    "startOffset": str(start_offset or "0s"),
+                    "endOffset": str(end_offset or "10s"),
+                }
+            },
+            use_st=True,
+            st_token=st,
+            timeout=self._get_control_plane_timeout(),
+        )
+
+    async def wait_uploaded_video_ready(
+        self,
+        at: str,
+        project_id: str,
+        media_id: str,
+        *,
+        max_attempts: int = 12,
+        poll_interval_seconds: float = 10.0,
+    ) -> Dict[str, Any]:
+        normalized_media_id = str(media_id or "").strip()
+        normalized_project_id = str(project_id or "").strip()
+        if not normalized_media_id or not normalized_project_id:
+            raise RuntimeError("media_id and project_id are required for uploaded video readiness check")
+
+        operations = [{
+            "mediaName": normalized_media_id,
+            "projectId": normalized_project_id,
+            "operation": {"name": normalized_media_id},
+        }]
+        last_result: Dict[str, Any] = {}
+        attempts = max(1, int(max_attempts or 1))
+        for attempt in range(attempts):
+            last_result = await self.check_video_status(at, operations)
+            checked_operations = last_result.get("operations") if isinstance(last_result, dict) else None
+            operation = checked_operations[0] if isinstance(checked_operations, list) and checked_operations else {}
+            status = str(operation.get("status") or "").strip()
+            if status == "MEDIA_GENERATION_STATUS_SUCCESSFUL":
+                return last_result
+            if status in {"MEDIA_GENERATION_STATUS_FAILED", "MEDIA_GENERATION_STATUS_CANCELLED"}:
+                raise RuntimeError(f"uploaded video processing failed: {status}")
+            if attempt < attempts - 1:
+                await asyncio.sleep(max(0.0, float(poll_interval_seconds or 0.0)))
+
+        raise RuntimeError(f"uploaded video processing did not finish: {normalized_media_id}")
 
     async def generate_image(
         self,
@@ -1992,7 +2092,7 @@ class FlowClient:
         aspect_ratio: str,
         video_media_id: str,
         reference_images: List[Dict],
-        video_end_frame_index: int = 239,
+        video_end_frame_index: int = 240,
         user_paygate_tier: str = "PAYGATE_TIER_ONE",
         token_id: Optional[int] = None,
         token_video_concurrency: Optional[int] = None,
@@ -2063,7 +2163,7 @@ class FlowClient:
                     "videoInput": {
                         "mediaId": video_media_id,
                         "startFrameIndex": 0,
-                        "endFrameIndex": max(1, int(video_end_frame_index or 239))
+                        "endFrameIndex": max(1, int(video_end_frame_index or 240))
                     },
                     "referenceImages": reference_images
                 }]

@@ -3,6 +3,7 @@ import types
 import unittest
 from unittest.mock import AsyncMock, patch
 
+from src.core.config import config
 from src.core.models import Task
 from src.core.model_resolver import resolve_model_name
 from src.services.flow_client import FlowClient
@@ -11,6 +12,7 @@ from src.services.generation_handler import (
     GenerationHandler,
     _validate_reference_video_duration,
     _video_end_frame_index_from_bytes,
+    _video_offset_end_from_duration,
     _video_generation_failure_response,
 )
 
@@ -83,8 +85,11 @@ class VeoLiteGenerationHandlerTests(unittest.TestCase):
 
     def test_video_edit_frame_index_uses_uploaded_video_duration(self):
         self.assertEqual(_video_end_frame_index_from_bytes(self._mp4_with_duration(4)), 96)
-        self.assertEqual(_video_end_frame_index_from_bytes(self._mp4_with_duration(10)), 239)
-        self.assertEqual(_video_end_frame_index_from_bytes(self._mp4_with_duration(20)), 239)
+        self.assertEqual(_video_end_frame_index_from_bytes(self._mp4_with_duration(10)), 240)
+        self.assertEqual(_video_end_frame_index_from_bytes(self._mp4_with_duration(20)), 240)
+        self.assertEqual(_video_end_frame_index_from_bytes(None), 240)
+        self.assertEqual(_video_offset_end_from_duration(10.0), "10s")
+        self.assertEqual(_video_offset_end_from_duration(4.25), "4.25s")
 
     def test_reference_video_duration_limit_is_ten_seconds(self):
         self.assertEqual(_validate_reference_video_duration(self._mp4_with_duration(10)), 10.0)
@@ -313,6 +318,107 @@ class VeoLiteFlowClientTests(unittest.IsolatedAsyncioTestCase):
         self.client._release_video_launch_gate = AsyncMock()
         self.client._get_recaptcha_token = AsyncMock(return_value=("recaptcha-token", "browser-1"))
         self.client._notify_browser_captcha_request_finished = AsyncMock()
+
+    async def test_video_api_request_falls_back_when_browser_submit_hits_recaptcha_traffic_error(self):
+        original_method = config.captcha_method
+        config.set_captcha_method("adspower")
+        self.client._set_request_fingerprint({
+            "browser_ref": "1:req-1",
+            "user_agent": "Mozilla/5.0 test",
+            "proxy_url": "",
+        })
+        captured = {}
+
+        class FakeBrowserCaptchaService:
+            async def fetch_json(self, **kwargs):
+                captured["browser_fetch"] = kwargs
+                raise Exception(
+                    "PUBLIC_ERROR_UNUSUAL_ACTIVITY_TOO_MUCH_TRAFFIC: reCAPTCHA evaluation failed"
+                )
+
+        async def fake_make_request(method, url, json_data, use_at, at_token, **kwargs):
+            captured["http_request"] = {
+                "method": method,
+                "url": url,
+                "json_data": json_data,
+                "use_at": use_at,
+                "at_token": at_token,
+                "kwargs": kwargs,
+            }
+            return {"operations": [{"operation": {"name": "task-fallback"}}]}
+
+        self.client._make_request = AsyncMock(side_effect=fake_make_request)
+        try:
+            with patch(
+                "src.services.browser_captcha.BrowserCaptchaService.get_instance",
+                AsyncMock(return_value=FakeBrowserCaptchaService()),
+            ):
+                result = await self.client._make_video_api_request(
+                    url="https://aisandbox-pa.googleapis.com/v1/video:batchAsyncGenerateVideoEditVideo",
+                    json_data={"requests": [{"videoModelKey": "abra_edit"}]},
+                    at="at-token",
+                    timeout=10,
+                )
+        finally:
+            config.set_captcha_method(original_method)
+            self.client.clear_request_fingerprint()
+
+        self.assertIn("browser_fetch", captured)
+        self.assertEqual(captured["http_request"]["method"], "POST")
+        self.assertTrue(captured["http_request"]["use_at"])
+        self.assertEqual(captured["http_request"]["at_token"], "at-token")
+        self.assertEqual(result["operations"][0]["operation"]["name"], "task-fallback")
+
+    async def test_update_video_offset_uses_labs_trpc_payload(self):
+        captured = {}
+
+        async def fake_make_request(method, url, json_data, use_st, st_token, **kwargs):
+            captured.update({
+                "method": method,
+                "url": url,
+                "json_data": json_data,
+                "use_st": use_st,
+                "st_token": st_token,
+                "kwargs": kwargs,
+            })
+            return {"result": {"data": {"json": {"ok": True}}}}
+
+        self.client._make_request = AsyncMock(side_effect=fake_make_request)
+
+        await self.client.update_video_offset(
+            st="session-token",
+            media_id="video-media-1",
+            start_offset="0s",
+            end_offset="10s",
+        )
+
+        self.assertTrue(captured["url"].endswith("/trpc/videoFx.updateVideoOffset"))
+        self.assertEqual(captured["method"], "POST")
+        self.assertTrue(captured["use_st"])
+        self.assertEqual(captured["st_token"], "session-token")
+        self.assertEqual(
+            captured["json_data"],
+            {"json": {"mediaId": "video-media-1", "startOffset": "0s", "endOffset": "10s"}},
+        )
+
+    async def test_wait_uploaded_video_ready_polls_media_status_until_success(self):
+        self.client.check_video_status = AsyncMock(side_effect=[
+            {"operations": [{"status": "MEDIA_GENERATION_STATUS_PENDING"}]},
+            {"operations": [{"status": "MEDIA_GENERATION_STATUS_SUCCESSFUL"}]},
+        ])
+
+        result = await self.client.wait_uploaded_video_ready(
+            at="at-token",
+            project_id="project-1",
+            media_id="video-media-1",
+            poll_interval_seconds=0,
+        )
+
+        self.assertEqual(self.client.check_video_status.await_count, 2)
+        call_operations = self.client.check_video_status.await_args_list[0].args[1]
+        self.assertEqual(call_operations[0]["mediaName"], "video-media-1")
+        self.assertEqual(call_operations[0]["projectId"], "project-1")
+        self.assertEqual(result["operations"][0]["status"], "MEDIA_GENERATION_STATUS_SUCCESSFUL")
 
     async def test_generate_video_text_uses_v2_payload_for_lite(self):
         captured = {}
@@ -588,7 +694,7 @@ class VeoLiteFlowClientTests(unittest.IsolatedAsyncioTestCase):
             {
                 "mediaId": "video-media-1",
                 "startFrameIndex": 0,
-                "endFrameIndex": 239,
+                "endFrameIndex": 240,
             },
         )
         self.assertEqual(request_data["referenceImages"][0]["mediaId"], "image-1")
