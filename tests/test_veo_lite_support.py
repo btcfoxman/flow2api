@@ -68,8 +68,8 @@ class VeoLiteModelResolverTests(unittest.TestCase):
 
 class VeoLiteGenerationHandlerTests(unittest.TestCase):
     @staticmethod
-    def _mp4_with_duration(duration_seconds: int, timescale: int = 1000) -> bytes:
-        duration = duration_seconds * timescale
+    def _mp4_with_duration(duration_seconds: float, timescale: int = 1000) -> bytes:
+        duration = int(round(duration_seconds * timescale))
         mvhd_payload = (
             b"\x00\x00\x00\x00"
             + (0).to_bytes(4, "big")
@@ -93,6 +93,8 @@ class VeoLiteGenerationHandlerTests(unittest.TestCase):
 
     def test_reference_video_duration_limit_is_ten_seconds(self):
         self.assertEqual(_validate_reference_video_duration(self._mp4_with_duration(10)), 10.0)
+        self.assertEqual(_validate_reference_video_duration(self._mp4_with_duration(10.75)), 10.75)
+        self.assertEqual(_video_offset_end_from_duration(10.75), "10s")
         with self.assertRaisesRegex(ValueError, "参考视频不能超过10秒"):
             _validate_reference_video_duration(self._mp4_with_duration(11))
 

@@ -972,6 +972,7 @@ def _resolve_tier_two_model_key(model_key: str) -> str:
 
 
 VIDEO_REFERENCE_MAX_DURATION_SECONDS = 10.0
+VIDEO_REFERENCE_REJECT_DURATION_SECONDS = 11.0
 
 
 def _is_video_policy_error(error_message: Any) -> bool:
@@ -1061,7 +1062,7 @@ def _validate_reference_video_duration(data: Optional[bytes]) -> Optional[float]
     duration = _mp4_duration_seconds(data or b"")
     if duration is None:
         return None
-    if duration > VIDEO_REFERENCE_MAX_DURATION_SECONDS:
+    if duration >= VIDEO_REFERENCE_REJECT_DURATION_SECONDS:
         raise ValueError(f"参考视频不能超过10秒，当前约 {duration:.2f} 秒")
     return duration
 
