@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from src.services.browser_captcha import (
+    BROWSER_FETCH_BOOTSTRAP_URL,
     TokenBrowser,
     _active_adspower_profile_payload,
     _adspower_profile_proxy_url,
@@ -219,6 +220,28 @@ class AdsPowerBlankPageCleanupTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(surplus_blank.closed)
         self.assertTrue(new_tab.closed)
         self.assertFalse(real_page.closed)
+
+    async def test_cleanup_closes_auth_provider_bootstrap_pages(self):
+        keepalive = _FakePlaywrightPage("about:blank")
+        auth_provider = _FakePlaywrightPage(BROWSER_FETCH_BOOTSTRAP_URL)
+        auth_provider_query = _FakePlaywrightPage(f"{BROWSER_FETCH_BOOTSTRAP_URL}?x=1")
+        flow_page = _FakePlaywrightPage("https://labs.google/fx/tools/flow")
+        context = _FakePlaywrightContext([keepalive, auth_provider, auth_provider_query, flow_page])
+        browser = TokenBrowser(token_id=0, user_data_dir="tmp/unit-adspower")
+        browser._shared_context = context
+        browser._shared_keepalive_page = keepalive
+
+        closed_count = await browser._cleanup_blank_pages(
+            context,
+            keep_page=keepalive,
+            reason="unit_test_auth_provider",
+        )
+
+        self.assertEqual(closed_count, 2)
+        self.assertFalse(keepalive.closed)
+        self.assertTrue(auth_provider.closed)
+        self.assertTrue(auth_provider_query.closed)
+        self.assertFalse(flow_page.closed)
 
     async def test_keepalive_creates_one_blank_page_when_context_has_no_blank(self):
         real_page = _FakePlaywrightPage("https://example.com")

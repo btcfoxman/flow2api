@@ -995,6 +995,14 @@ class TokenBrowser:
             "edge://newtab",
         }
 
+    @staticmethod
+    def _is_temporary_page_url(url: Any) -> bool:
+        normalized = str(url or "").strip().lower().rstrip("/")
+        if TokenBrowser._is_blank_page_url(normalized):
+            return True
+        bootstrap_url = BROWSER_FETCH_BOOTSTRAP_URL.lower().rstrip("/")
+        return normalized == bootstrap_url or normalized.startswith(f"{bootstrap_url}?")
+
     async def _close_page_quietly(self, page, reason: str = "") -> bool:
         if self._page_is_closed(page):
             return False
@@ -1016,7 +1024,7 @@ class TokenBrowser:
         keep_one: bool = True,
         reason: str = "",
     ) -> int:
-        """Close surplus blank tabs in a shared browser context."""
+        """Close surplus blank/bootstrap tabs in a shared browser context."""
         target_context = context or self._shared_context
         if not target_context:
             return 0
@@ -1035,11 +1043,16 @@ class TokenBrowser:
             except Exception:
                 page_url = ""
             is_blank = self._is_blank_page_url(page_url)
+            is_temporary = self._is_temporary_page_url(page_url)
             if page is keep_page:
                 if is_blank:
                     kept_blank = True
                 continue
+            if not is_temporary:
+                continue
             if not is_blank:
+                if await self._close_page_quietly(page, reason=reason or "temporary_page_cleanup"):
+                    closed_count += 1
                 continue
             if keep_one and keep_page is None and not kept_blank:
                 kept_blank = True
@@ -1611,6 +1624,16 @@ class TokenBrowser:
             self._shared_keepalive_page = None
             self._shared_browser_pid = None
             self._shared_proxy_url = None
+        try:
+            if context:
+                await self._cleanup_blank_pages(
+                    context,
+                    keep_page=None,
+                    keep_one=False,
+                    reason="browser_close",
+                )
+        except Exception:
+            pass
         try:
             if context:
                 await asyncio.wait_for(context.close(), timeout=10)
