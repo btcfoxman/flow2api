@@ -1976,7 +1976,7 @@ class GenerationHandler:
                     error_msg = f"❌ 首尾帧模型需要 {min_images}-{max_images} 张图片,当前提供了 {image_count} 张"
                     if stream:
                         yield self._create_stream_chunk(f"{error_msg}\n")
-                    self._mark_generation_failed(generation_result, error_msg)
+                    self._mark_generation_failed(generation_result, error_msg, status_code=400)
                     yield self._create_error_response(error_msg, status_code=400)
                     return
 
@@ -1986,7 +1986,7 @@ class GenerationHandler:
                     error_msg = f"❌ 多图视频模型需要 {min_images}-{max_images} 张参考图,当前提供了 {image_count} 张"
                     if stream:
                         yield self._create_stream_chunk(f"{error_msg}\n")
-                    self._mark_generation_failed(generation_result, error_msg)
+                    self._mark_generation_failed(generation_result, error_msg, status_code=400)
                     yield self._create_error_response(error_msg, status_code=400)
                     return
 
@@ -1996,14 +1996,14 @@ class GenerationHandler:
                     error_msg = "❌ 视频编辑模型需要提供参考视频"
                     if stream:
                         yield self._create_stream_chunk(f"{error_msg}\n")
-                    self._mark_generation_failed(generation_result, error_msg)
+                    self._mark_generation_failed(generation_result, error_msg, status_code=400)
                     yield self._create_error_response(error_msg, status_code=400)
                     return
                 if image_count < min_images or (max_images is not None and image_count > max_images):
                     error_msg = f"❌ 视频编辑模型需要 {min_images}-{max_images} 张参考图,当前提供了 {image_count} 张"
                     if stream:
                         yield self._create_stream_chunk(f"{error_msg}\n")
-                    self._mark_generation_failed(generation_result, error_msg)
+                    self._mark_generation_failed(generation_result, error_msg, status_code=400)
                     yield self._create_error_response(error_msg, status_code=400)
                     return
 
@@ -2074,7 +2074,7 @@ class GenerationHandler:
                         error_msg = f"❌ {exc}"
                         if stream:
                             yield self._create_stream_chunk(f"{error_msg}\n")
-                        self._mark_generation_failed(generation_result, error_msg)
+                        self._mark_generation_failed(generation_result, error_msg, status_code=400)
                         yield self._create_error_response(error_msg, status_code=400)
                         return
                     video_end_frame_index = _video_end_frame_index_from_bytes(video_bytes)
@@ -2198,7 +2198,7 @@ class GenerationHandler:
                     error_msg = "❌ 视频续写需要提供源视频的 mediaGenerationId，请在 image_url 中传入 extend://VIDEO_MEDIA_ID"
                     if stream:
                         yield self._create_stream_chunk(f"{error_msg}\n")
-                    self._mark_generation_failed(generation_result, error_msg)
+                    self._mark_generation_failed(generation_result, error_msg, status_code=400)
                     yield self._create_error_response(error_msg, status_code=400)
                     return
 

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import types
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -184,6 +185,32 @@ class VeoLiteGenerationHandlerTests(unittest.TestCase):
 
         self.assertEqual(status_code, 502)
         self.assertIn("请重试", message)
+
+    def test_r2v_missing_images_marks_client_error_status(self):
+        async def run():
+            handler = GenerationHandler.__new__(GenerationHandler)
+            generation_result = handler._create_generation_result()
+            chunks = []
+            token = types.SimpleNamespace(id=1, user_paygate_tier="PAYGATE_TIER_ONE")
+            async for chunk in handler._handle_video_generation(
+                token=token,
+                project_id="project-1",
+                model_config=dict(MODEL_CONFIG["abra_r2v_10s"]),
+                prompt="hello",
+                images=None,
+                stream=False,
+                generation_result=generation_result,
+                request_log_state={"id": None, "progress": 0},
+            ):
+                chunks.append(chunk)
+            return generation_result, chunks
+
+        generation_result, chunks = asyncio.run(run())
+        self.assertEqual(generation_result["status_code"], 400)
+        self.assertTrue(chunks)
+        payload = json.loads(chunks[0])
+        self.assertEqual(payload["error"]["status_code"], 400)
+        self.assertIn("参考图", payload["error"]["message"])
 
     def test_tier_two_does_not_upgrade_lite_model_to_fake_ultra(self):
         handler = GenerationHandler.__new__(GenerationHandler)
