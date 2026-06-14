@@ -585,6 +585,21 @@ class FlowClient:
             ]
         )
 
+    @staticmethod
+    def _is_browser_runtime_closed_error(error_message: str) -> bool:
+        error_lower = (error_message or "").lower()
+        return any(
+            keyword in error_lower
+            for keyword in [
+                "target page, context or browser has been closed",
+                "browsercontext.new_page",
+                "target closed",
+                "browser has been closed",
+                "context has been closed",
+                "connection closed",
+            ]
+        )
+
     async def _acquire_image_launch_gate(
         self,
         token_id: Optional[int],
@@ -3119,6 +3134,8 @@ class FlowClient:
         error_lower = error_str.lower()
         if is_media_policy_error(error_str):
             return None
+        if self._is_browser_runtime_closed_error(error_str):
+            return "browser runtime closed"
         if "403" in error_lower:
             return "403错误"
         if "429" in error_lower or "too many requests" in error_lower:

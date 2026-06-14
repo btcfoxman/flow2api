@@ -243,6 +243,27 @@ class AdsPowerBlankPageCleanupTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(auth_provider_query.closed)
         self.assertFalse(flow_page.closed)
 
+    async def test_cleanup_keeps_inflight_browser_fetch_bootstrap_page(self):
+        keepalive = _FakePlaywrightPage("about:blank")
+        inflight_fetch = _FakePlaywrightPage(BROWSER_FETCH_BOOTSTRAP_URL)
+        stale_fetch = _FakePlaywrightPage(BROWSER_FETCH_BOOTSTRAP_URL)
+        context = _FakePlaywrightContext([keepalive, inflight_fetch, stale_fetch])
+        browser = TokenBrowser(token_id=0, user_data_dir="tmp/unit-adspower")
+        browser._shared_context = context
+        browser._shared_keepalive_page = keepalive
+        browser._protected_temporary_page_ids.add(id(inflight_fetch))
+
+        closed_count = await browser._cleanup_blank_pages(
+            context,
+            keep_page=keepalive,
+            reason="unit_test_inflight_fetch",
+        )
+
+        self.assertEqual(closed_count, 1)
+        self.assertFalse(keepalive.closed)
+        self.assertFalse(inflight_fetch.closed)
+        self.assertTrue(stale_fetch.closed)
+
     async def test_keepalive_creates_one_blank_page_when_context_has_no_blank(self):
         real_page = _FakePlaywrightPage("https://example.com")
         context = _FakePlaywrightContext([real_page])

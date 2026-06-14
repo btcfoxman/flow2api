@@ -828,6 +828,7 @@ class TokenBrowser:
         self._consecutive_browser_failures = 0
         self._solve_inflight = 0
         self._browser_fetch_inflight = 0
+        self._protected_temporary_page_ids = set()
         self._last_idle_since = time.monotonic()
         self._refresh_browser_profile()
 
@@ -1047,6 +1048,8 @@ class TokenBrowser:
             if page is keep_page:
                 if is_blank:
                     kept_blank = True
+                continue
+            if id(page) in self._protected_temporary_page_ids:
                 continue
             if not is_temporary:
                 continue
@@ -2201,6 +2204,7 @@ class TokenBrowser:
                 route_url = BROWSER_FETCH_BOOTSTRAP_URL
                 try:
                     page = await context.new_page()
+                    self._protected_temporary_page_ids.add(id(page))
 
                     async def handle_route(route):
                         if route.request.url.rstrip("/") == route_url.rstrip("/"):
@@ -2288,6 +2292,8 @@ class TokenBrowser:
                         continue
                     raise
                 finally:
+                    if page:
+                        self._protected_temporary_page_ids.discard(id(page))
                     if page:
                         await self._close_page_quietly(page, reason="browser_fetch_finished")
                     await self._cleanup_blank_pages(

@@ -26,6 +26,14 @@ class FlowClientCaptchaRetriesTests(unittest.TestCase):
 
         self.assertEqual(FlowClient(None)._captcha_aware_max_retries(), 1)
 
+    def test_browser_runtime_closed_error_is_retryable(self):
+        reason = FlowClient(None)._get_retry_reason(
+            "Flow browser API request failed: Page.evaluate: "
+            "Target page, context or browser has been closed"
+        )
+
+        self.assertEqual(reason, "browser runtime closed")
+
 
 class FlowClientBrowserFetchTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
