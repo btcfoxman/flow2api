@@ -4,6 +4,10 @@ import random
 from typing import Optional, Dict
 from ..core.models import Token
 from ..core.config import config
+from ..core.credits import (
+    MIN_GENERATION_CREDITS,
+    has_minimum_generation_credits,
+)
 from ..core.account_tiers import (
     get_paygate_tier_label,
     get_required_paygate_tier_for_model,
@@ -182,6 +186,10 @@ class LoadBalancer:
         required_tier = get_required_paygate_tier_for_model(model)
 
         for token in active_tokens:
+            if not has_minimum_generation_credits(token.credits):
+                filtered_reasons[token.id] = f"credits below {MIN_GENERATION_CREDITS}"
+                continue
+
             normalized_tier = normalize_user_paygate_tier(token.user_paygate_tier)
             if model and not supports_model_for_tier(model, normalized_tier):
                 filtered_reasons[token.id] = '账号等级不足，需要 ' + get_paygate_tier_label(required_tier)
@@ -345,6 +353,19 @@ class LoadBalancer:
             if for_video_generation and not token.video_enabled:
                 continue
             capability_tokens.append(token)
+
+        funded_tokens = [
+            token for token in capability_tokens
+            if has_minimum_generation_credits(token.credits)
+        ]
+        if capability_tokens and not funded_tokens:
+            return (
+                f"\u5f53\u524d\u7b26\u5408\u6761\u4ef6\u7684\u8d26\u53f7"
+                f"\u989d\u5ea6\u5747\u4f4e\u4e8e {MIN_GENERATION_CREDITS}"
+                "\uff0c\u5df2\u505c\u6b62\u8c03\u7528\u4f4e\u989d\u5ea6"
+                "\u8d26\u53f7\u3002\u8bf7\u5237\u65b0\u989d\u5ea6"
+                "\u6216\u8865\u5145\u53ef\u7528\u8d26\u53f7\u3002"
+            )
 
         if supported_tokens and not capability_tokens:
             if for_image_generation:

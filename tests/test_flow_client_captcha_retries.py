@@ -34,6 +34,13 @@ class FlowClientCaptchaRetriesTests(unittest.TestCase):
 
         self.assertEqual(reason, "browser runtime closed")
 
+    def test_quota_reached_error_is_not_retryable(self):
+        reason = FlowClient(None)._get_retry_reason(
+            "PUBLIC_ERROR_USER_QUOTA_REACHED: Resource has been exhausted (e.g. check quota)."
+        )
+
+        self.assertIsNone(reason)
+
 
 class FlowClientBrowserFetchTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):

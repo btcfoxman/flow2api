@@ -14,6 +14,7 @@ import urllib.request
 from curl_cffi.requests import AsyncSession
 from ..core.logger import debug_logger
 from ..core.config import config, get_yescaptcha_min_score
+from ..core.credits import is_quota_exhausted_error
 from ..core.media_errors import is_media_policy_error
 from .browser_cookie_utils import serialize_cookie_header
 
@@ -3133,6 +3134,8 @@ class FlowClient:
         """判断是否需要重试，返回日志提示内容"""
         error_lower = error_str.lower()
         if is_media_policy_error(error_str):
+            return None
+        if is_quota_exhausted_error(error_str):
             return None
         if self._is_browser_runtime_closed_error(error_str):
             return "browser runtime closed"

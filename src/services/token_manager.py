@@ -4,6 +4,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, List
 from ..core.database import Database
 from ..core.config import config
+from ..core.credits import (
+    MIN_GENERATION_CREDITS,
+    has_minimum_generation_credits,
+)
 from ..core.models import Token, Project
 from ..core.logger import debug_logger
 from ..core.monitoring import record_token_refresh
@@ -777,3 +781,29 @@ class TokenManager:
         except Exception as e:
             debug_logger.log_error(f"Failed to refresh credits for token {token_id}: {str(e)}")
             return 0
+
+    async def mark_quota_exhausted(self, token_id: int) -> int:
+        """Refresh credits after upstream reports quota exhaustion.
+
+        If the refresh itself fails, keep scheduling conservative by writing 0
+        so the low-credit filter will not select this token again.
+        """
+        refreshed_credits = await self.refresh_credits(token_id)
+        token = await self.db.get_token(token_id)
+        stored_credits = int(getattr(token, "credits", refreshed_credits) or 0) if token else refreshed_credits
+
+        if refreshed_credits <= 0 and (not token or stored_credits > 0):
+            await self.db.update_token(token_id, credits=0)
+            stored_credits = 0
+
+        if not has_minimum_generation_credits(stored_credits):
+            debug_logger.log_warning(
+                f"[QUOTA] Token {token_id} credits={stored_credits} below minimum "
+                f"{MIN_GENERATION_CREDITS}; it will be excluded from generation scheduling"
+            )
+        else:
+            debug_logger.log_warning(
+                f"[QUOTA] Token {token_id} reported quota exhausted but refreshed credits={stored_credits}"
+            )
+
+        return stored_credits

@@ -7,6 +7,10 @@ from pathlib import Path
 from typing import Optional, AsyncGenerator, List, Dict, Any
 from ..core.logger import debug_logger
 from ..core.config import config
+from ..core.credits import (
+    is_quota_exhausted_error,
+    quota_exhausted_message,
+)
 from ..core.media_errors import (
     is_media_policy_error,
     media_generation_failure_response,
@@ -1126,6 +1130,20 @@ class GenerationHandler:
             return text
         return f"{text[:max_length - 3]}..."
 
+    async def _handle_quota_exhausted_error(self, token: Any, error_message: Any) -> bool:
+        if not is_quota_exhausted_error(error_message):
+            return False
+        token_id = getattr(token, "id", None)
+        if token_id is None:
+            return True
+        try:
+            await self.token_manager.mark_quota_exhausted(token_id)
+        except Exception as exc:
+            debug_logger.log_warning(
+                f"[QUOTA] Failed to refresh quota after exhaustion for token {token_id}: {exc}"
+            )
+        return True
+
     def _should_record_token_error(
         self,
         error_message: Any,
@@ -1141,6 +1159,8 @@ class GenerationHandler:
                 numeric_status_code = None
 
         if numeric_status_code is not None and numeric_status_code < 500:
+            return False
+        if is_quota_exhausted_error(text):
             return False
         if is_media_policy_error(text):
             return False
@@ -1436,7 +1456,11 @@ class GenerationHandler:
             if not generation_result.get("success"):
                 error_msg = generation_result.get("error_message") or "生成未成功完成"
                 debug_logger.log_warning(f"[GENERATION] 生成未成功，不扣次数: {error_msg}")
-                response_status_code = int(generation_result.get("status_code") or 500)
+                if await self._handle_quota_exhausted_error(token, error_msg):
+                    error_msg = quota_exhausted_message()
+                    response_status_code = 503
+                else:
+                    response_status_code = int(generation_result.get("status_code") or 500)
                 if token and self._should_record_token_error(error_msg, response_status_code):
                     await self.token_manager.record_error(token.id)
                 elif token:
@@ -1548,7 +1572,11 @@ class GenerationHandler:
             raise
         except Exception as e:
             raw_error_msg = str(e)
-            if generation_type in {"image", "video"} and is_media_policy_error(raw_error_msg):
+            if is_quota_exhausted_error(raw_error_msg):
+                await self._handle_quota_exhausted_error(token, raw_error_msg)
+                error_msg = quota_exhausted_message()
+                response_status_code = 503
+            elif generation_type in {"image", "video"} and is_media_policy_error(raw_error_msg):
                 error_msg, response_status_code = media_generation_failure_response(
                     generation_type,
                     raw_error_msg,
