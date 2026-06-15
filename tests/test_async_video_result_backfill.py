@@ -99,7 +99,7 @@ class AsyncVideoResultBackfillTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(inserted, 0)
 
-    async def test_backfills_failed_post_submit_task_when_request_logs_were_cleared(self):
+    async def test_backfills_failed_post_submit_task_when_submit_log_is_missing(self):
         await self.db.create_task(
             Task(
                 task_id="task-cleared-log",
@@ -126,6 +126,57 @@ class AsyncVideoResultBackfillTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(async_logs), 1)
         self.assertEqual(response_body["task_id"], "task-cleared-log")
         self.assertEqual(response_body["status"], "failed")
+
+    async def test_backfill_does_not_recreate_logs_cleared_after_task_finished(self):
+        await self.db.create_task(
+            Task(
+                task_id="task-before-clear",
+                token_id=self.token_id,
+                model="abra_r2v_10s",
+                prompt="hello",
+                status="failed",
+                progress=100,
+                operations=[{"operation": {"name": "task-before-clear"}}],
+            )
+        )
+        await self.db.update_task(
+            "task-before-clear",
+            error_message="video failed",
+            completed_at=datetime.now(timezone.utc).timestamp(),
+        )
+
+        await self.db.clear_all_logs()
+        inserted = await self.db.backfill_async_video_result_logs()
+
+        logs = await self.db.get_logs(include_payload=True)
+        self.assertEqual(inserted, 0)
+        self.assertEqual(logs, [])
+
+    async def test_backfill_keeps_tasks_completed_after_log_clear(self):
+        await self.db.clear_all_logs()
+        await self.db.create_task(
+            Task(
+                task_id="task-after-clear",
+                token_id=self.token_id,
+                model="abra_r2v_10s",
+                prompt="hello",
+                status="failed",
+                progress=100,
+                operations=[{"operation": {"name": "task-after-clear"}}],
+            )
+        )
+        await self.db.update_task(
+            "task-after-clear",
+            error_message="video failed",
+            completed_at=datetime.now(timezone.utc).timestamp() + 1,
+        )
+
+        inserted = await self.db.backfill_async_video_result_logs()
+
+        logs = await self.db.get_logs(include_payload=True)
+        async_logs = [log for log in logs if log["operation"] == "generate_video_async_result"]
+        self.assertEqual(inserted, 1)
+        self.assertEqual(len(async_logs), 1)
 
     async def test_backfill_duration_treats_sqlite_timestamp_as_utc(self):
         created_at = "2026-05-28 08:12:40"

@@ -818,6 +818,15 @@ class Database:
                 )
             """)
 
+            # App metadata table for lightweight migration/runtime markers
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS app_metadata (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
             # Admin config table
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS admin_config (
@@ -1334,11 +1343,18 @@ class Database:
         """Backfill final request-log rows for async video tasks created by older builds."""
         async with self._connect(write=True) as db:
             db.row_factory = aiosqlite.Row
+            clear_cutoff = await self._get_app_metadata_value(db, "request_logs_cleared_at")
+            clear_cutoff_seconds = self._timestamp_seconds(clear_cutoff)
+            query_limit = limit if clear_cutoff_seconds is None else max(limit * 5, limit)
             cursor = await db.execute(
                 """
                 SELECT task.*
                 FROM tasks task
                 WHERE task.status IN ('completed', 'failed')
+                  AND (
+                    ? IS NULL
+                    OR task.completed_at IS NOT NULL
+                  )
                   AND (
                     EXISTS (
                       SELECT 1
@@ -1364,11 +1380,11 @@ class Database:
                         COALESCE(rl2.request_body, '') LIKE '%' || task.task_id || '%'
                         OR COALESCE(rl2.response_body, '') LIKE '%' || task.task_id || '%'
                       )
-                  )
+                )
                 ORDER BY task.id DESC
                 LIMIT ?
                 """,
-                (limit,),
+                (clear_cutoff_seconds, query_limit),
             )
             rows = await cursor.fetchall()
             if not rows:
@@ -1380,6 +1396,10 @@ class Database:
                 task_id = str(task.get("task_id") or "")
                 if not task_id:
                     continue
+                if clear_cutoff_seconds is not None:
+                    completed_seconds = self._timestamp_seconds(task.get("completed_at"))
+                    if completed_seconds is None or completed_seconds <= clear_cutoff_seconds:
+                        continue
 
                 prompt = str(task.get("prompt") or "")
                 request_payload = {
@@ -1438,9 +1458,35 @@ class Database:
                     ),
                 )
                 inserted += 1
+                if inserted >= limit:
+                    break
 
             await db.commit()
             return inserted
+
+    async def _get_app_metadata_value(self, db, key: str) -> Optional[str]:
+        try:
+            cursor = await db.execute("SELECT value FROM app_metadata WHERE key = ?", (key,))
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            if isinstance(row, aiosqlite.Row):
+                return row["value"]
+            return row[0]
+        except Exception:
+            return None
+
+    async def _set_app_metadata_value(self, db, key: str, value: str):
+        await db.execute(
+            """
+            INSERT INTO app_metadata (key, value, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (key, value),
+        )
 
     @staticmethod
     def _json_or_none(value):
@@ -1469,37 +1515,38 @@ class Database:
 
     @staticmethod
     def _task_duration_seconds(created_at, completed_at) -> float:
-        def _to_timestamp(value):
-            if value is None:
-                return None
-            if isinstance(value, (int, float)):
-                return float(value)
-            if isinstance(value, datetime):
-                parsed = value
-                if parsed.tzinfo is None:
-                    parsed = parsed.replace(tzinfo=timezone.utc)
-                return parsed.timestamp()
-            text = str(value).strip()
-            if not text:
-                return None
-            try:
-                return float(text)
-            except ValueError:
-                pass
-            try:
-                parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-                if parsed.tzinfo is None:
-                    # SQLite CURRENT_TIMESTAMP is stored as a UTC value without a zone suffix.
-                    parsed = parsed.replace(tzinfo=timezone.utc)
-                return parsed.timestamp()
-            except ValueError:
-                return None
-
-        start = _to_timestamp(created_at)
-        end = _to_timestamp(completed_at)
+        start = Database._timestamp_seconds(created_at)
+        end = Database._timestamp_seconds(completed_at)
         if start is None or end is None or end < start:
             return 0.0
         return end - start
+
+    @staticmethod
+    def _timestamp_seconds(value) -> Optional[float]:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, datetime):
+            parsed = value
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.timestamp()
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            pass
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                # SQLite CURRENT_TIMESTAMP is stored as a UTC value without a zone suffix.
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.timestamp()
+        except ValueError:
+            return None
 
     # Token stats operations (kept for compatibility, now delegates to specific methods)
     async def increment_token_stats(self, token_id: int, stat_type: str):
@@ -1949,6 +1996,11 @@ class Database:
         """Clear all request logs"""
         async with self._connect(write=True) as db:
             await db.execute("DELETE FROM request_logs")
+            await self._set_app_metadata_value(
+                db,
+                "request_logs_cleared_at",
+                str(datetime.now(timezone.utc).timestamp()),
+            )
             await db.commit()
 
     async def init_config_from_toml(self, config_dict: dict, is_first_startup: bool = True):
