@@ -65,8 +65,15 @@ class _FailingNewPageContext:
 
 
 class _FakeServiceBrowser:
-    def __init__(self):
+    def __init__(self, token="recaptcha-token", request_ref=None):
+        self.token = token
+        self.request_ref = request_ref
+        self.get_token_calls = []
         self.recycle_calls = []
+
+    async def get_token(self, project_id, website_key, action, token_proxy_url=None):
+        self.get_token_calls.append((project_id, website_key, action, token_proxy_url))
+        return self.token, self.request_ref
 
     async def recycle_browser(self, reason="unknown", rotate_profile=True):
         self.recycle_calls.append((reason, rotate_profile))
@@ -351,6 +358,23 @@ class BrowserFetchLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
 
 class BrowserCaptchaServiceRuntimeClosedTests(unittest.IsolatedAsyncioTestCase):
+    async def test_get_token_recycles_slot_when_token_missing(self):
+        service = BrowserCaptchaService(db=None)
+        service._check_available = lambda: None
+        fake_browser = _FakeServiceBrowser(token=None)
+        service._browsers[0] = fake_browser
+
+        token, browser_ref = await service.get_token("project-1", action="VIDEO_GENERATION")
+
+        self.assertIsNone(token)
+        self.assertEqual(browser_ref, 0)
+        self.assertEqual(
+            fake_browser.get_token_calls,
+            [("project-1", service.website_key, "VIDEO_GENERATION", None)],
+        )
+        self.assertEqual(fake_browser.recycle_calls, [("token_missing_after_attempts", False)])
+        self.assertEqual(service._slot_reservations, {})
+
     async def test_report_error_recycles_runtime_closed_without_profile_rotation(self):
         service = BrowserCaptchaService(db=None)
         fake_browser = _FakeServiceBrowser()

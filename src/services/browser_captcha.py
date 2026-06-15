@@ -2782,7 +2782,30 @@ class BrowserCaptchaService:
         except Exception as e:
             debug_logger.log_warning(f"[BrowserCaptcha] 读取 token({token_id}) 打码代理失败: {e}")
         return None
-    
+
+    async def _get_token_from_slot(
+        self,
+        browser_id: int,
+        project_id: str,
+        action: str,
+        token_proxy_url: Optional[str],
+    ) -> tuple[Optional[str], Optional[str]]:
+        browser = await self._get_or_create_browser(browser_id)
+        token, request_ref = await browser.get_token(
+            project_id,
+            self.website_key,
+            action,
+            token_proxy_url=token_proxy_url
+        )
+        if not token:
+            try:
+                await browser.recycle_browser(reason="token_missing_after_attempts", rotate_profile=False)
+            except Exception as e:
+                debug_logger.log_warning(
+                    f"[BrowserCaptcha] browser {browser_id} recycle after missing token failed: {e}"
+                )
+        return token, request_ref
+
     async def get_token(self, project_id: str, action: str = "IMAGE_GENERATION", token_id: int = None) -> tuple[Optional[str], Union[int, str]]:
         """获取 reCAPTCHA Token（从共享浏览器池选择 slot）
         
@@ -2808,12 +2831,11 @@ class BrowserCaptchaService:
             async with self._token_semaphore:
                 browser_id = await self._select_browser_id(project_id)
                 try:
-                    browser = await self._get_or_create_browser(browser_id)
-                    token, request_ref = await browser.get_token(
+                    token, request_ref = await self._get_token_from_slot(
+                        browser_id,
                         project_id,
-                        self.website_key,
                         action,
-                        token_proxy_url=token_proxy_url
+                        token_proxy_url,
                     )
                 finally:
                     await self._release_slot_reservation(browser_id)
@@ -2828,12 +2850,11 @@ class BrowserCaptchaService:
         
         browser_id = await self._select_browser_id(project_id)
         try:
-            browser = await self._get_or_create_browser(browser_id)
-            token, request_ref = await browser.get_token(
+            token, request_ref = await self._get_token_from_slot(
+                browser_id,
                 project_id,
-                self.website_key,
                 action,
-                token_proxy_url=token_proxy_url
+                token_proxy_url,
             )
         finally:
             await self._release_slot_reservation(browser_id)
