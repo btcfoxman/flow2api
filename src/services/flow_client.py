@@ -59,11 +59,11 @@ class FlowClient:
         # 不在 flow2api 本地对提交做批次整形或排队，避免把同批请求打成阶梯。
 
     def _captcha_aware_max_retries(self) -> int:
-        """Browser-backed captcha modes need one recovery attempt after a rejected token."""
+        """Browser-backed captcha modes need recovery attempts after runtime/token failures."""
         max_retries = config.flow_max_retries
         captcha_method = str(getattr(config, "captcha_method", "") or "").strip().lower()
         if captcha_method in {"browser", "personal", "remote_browser", "adspower"}:
-            return max(2, max_retries)
+            return max(3, max_retries)
         return max_retries
 
     def _generate_user_agent(self, account_id: str = None) -> str:

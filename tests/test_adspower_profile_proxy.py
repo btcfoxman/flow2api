@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 from src.services.browser_captcha import (
     BROWSER_FETCH_BOOTSTRAP_URL,
+    BrowserCaptchaService,
     TokenBrowser,
     _active_adspower_profile_payload,
     _adspower_profile_proxy_url,
@@ -61,6 +62,14 @@ class _FailingNewPageContext:
 
     async def new_page(self):
         raise RuntimeError("BrowserContext.new_page: Target page, context or browser has been closed")
+
+
+class _FakeServiceBrowser:
+    def __init__(self):
+        self.recycle_calls = []
+
+    async def recycle_browser(self, reason="unknown", rotate_profile=True):
+        self.recycle_calls.append((reason, rotate_profile))
 
 
 class AdsPowerProfileProxyTests(unittest.TestCase):
@@ -309,3 +318,44 @@ class BrowserFetchLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(recycle_reasons, [("browser_fetch_context_closed", False)])
         self.assertEqual(busy_seen, [True, True])
         self.assertFalse(browser.is_busy())
+
+    async def test_browser_fetch_recycles_on_terminal_context_closed(self):
+        browser = TokenBrowser(token_id=0, user_data_dir="tmp/unit-browser-fetch-terminal")
+        contexts = [_FailingNewPageContext(), _FailingNewPageContext()]
+        recycle_reasons = []
+
+        async def fake_get_or_create_shared_browser():
+            return None, None, contexts.pop(0)
+
+        async def fake_recycle_browser(reason="unknown", rotate_profile=True):
+            recycle_reasons.append((reason, rotate_profile))
+
+        browser._get_or_create_shared_browser = fake_get_or_create_shared_browser
+        browser.recycle_browser = fake_recycle_browser
+
+        with self.assertRaisesRegex(RuntimeError, "Target page, context or browser has been closed"):
+            await browser.fetch_json(
+                url="https://aisandbox-pa.googleapis.com/v1/video:submit",
+                json_data={"requests": []},
+                timeout=10,
+            )
+
+        self.assertEqual(
+            recycle_reasons,
+            [
+                ("browser_fetch_context_closed", False),
+                ("browser_fetch_context_closed", False),
+            ],
+        )
+        self.assertFalse(browser.is_busy())
+
+
+class BrowserCaptchaServiceRuntimeClosedTests(unittest.IsolatedAsyncioTestCase):
+    async def test_report_error_recycles_runtime_closed_without_profile_rotation(self):
+        service = BrowserCaptchaService(db=None)
+        fake_browser = _FakeServiceBrowser()
+        service._browsers[0] = fake_browser
+
+        await service.report_error(0, error_reason="browser runtime closed")
+
+        self.assertEqual(fake_browser.recycle_calls, [("browser runtime closed", False)])

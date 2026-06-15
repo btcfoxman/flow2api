@@ -2283,13 +2283,15 @@ class TokenBrowser:
                     return parsed
                 except Exception as exc:
                     last_error = exc
-                    if attempt == 0 and _is_browser_context_closed_error(exc):
+                    if _is_browser_context_closed_error(exc):
+                        retry_label = "retrying once" if attempt == 0 else "terminal attempt"
                         debug_logger.log_warning(
-                            f"[BrowserCaptcha] Token-{self.token_id} browser fetch context closed; recycling and retrying once: "
-                            f"{type(exc).__name__}: {str(exc)[:160]}"
+                            f"[BrowserCaptcha] Token-{self.token_id} browser fetch context closed; recycling "
+                            f"({retry_label}): {type(exc).__name__}: {str(exc)[:160]}"
                         )
                         await self.recycle_browser(reason="browser_fetch_context_closed", rotate_profile=False)
-                        continue
+                        if attempt == 0:
+                            continue
                     raise
                 finally:
                     if page:
@@ -2951,18 +2953,32 @@ class BrowserCaptchaService:
         )
 
     async def report_error(self, browser_ref: Optional[Union[int, str]] = None, error_reason: Optional[str] = None):
-        """Handle upstream errors; recycle the browser only for explicit reCAPTCHA evaluation failures."""
+        """Handle upstream errors and recycle unstable browser slots."""
         browser_id, _ = self._parse_browser_ref(browser_ref)
 
         async with self._browsers_lock:
             browser = self._browsers.get(browser_id) if browser_id is not None else None
             error_lower = (error_reason or "").lower()
+            runtime_closed = any(
+                marker in error_lower
+                for marker in (
+                    "browser runtime closed",
+                    "target page, context or browser has been closed",
+                    "browsercontext.new_page",
+                    "target closed",
+                    "browser has been closed",
+                    "context has been closed",
+                    "connection closed",
+                )
+            )
             has_recaptcha = "recaptcha" in error_lower
             should_recycle = has_recaptcha and (
                 "evaluation failed" in error_lower
                 or "verification failed" in error_lower or "验证失败" in (error_reason or "")
                 or "failed" in error_lower
             )
+            if runtime_closed:
+                should_recycle = True
             if should_recycle:
                 self._stats["api_403"] += 1
             if browser_id is not None:
@@ -2974,7 +2990,7 @@ class BrowserCaptchaService:
             try:
                 await browser.recycle_browser(
                     reason=error_reason or "recaptcha_evaluation_failed",
-                    rotate_profile=True,
+                    rotate_profile=not runtime_closed,
                 )
             except Exception as e:
                 debug_logger.log_warning(f"[BrowserCaptcha] browser {browser_id} recycle failed: {e}")
