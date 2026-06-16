@@ -1627,9 +1627,9 @@ class GenerationHandler:
     def _get_no_token_error_message(self, generation_type: str) -> str:
         """获取无可用Token时的详细错误信息"""
         if generation_type == "image":
-            return "没有可用的Token进行图片生成。所有Token都处于禁用、冷却、锁定或已过期状态。"
+            return "上游额度不足，暂无法生成图片。"
         else:
-            return "没有可用的Token进行视频生成。所有Token都处于禁用、冷却、配额耗尽或已过期状态。"
+            return "上游额度不足，暂无法生成视频。"
 
     async def _handle_image_generation(
         self,
