@@ -1,3 +1,4 @@
+import time
 import unittest
 from unittest.mock import patch
 
@@ -70,6 +71,7 @@ class _FakeServiceBrowser:
         self.request_ref = request_ref
         self.get_token_calls = []
         self.recycle_calls = []
+        self.finish_calls = []
 
     async def get_token(self, project_id, website_key, action, token_proxy_url=None):
         self.get_token_calls.append((project_id, website_key, action, token_proxy_url))
@@ -77,6 +79,9 @@ class _FakeServiceBrowser:
 
     async def recycle_browser(self, reason="unknown", rotate_profile=True):
         self.recycle_calls.append((reason, rotate_profile))
+
+    async def notify_generation_request_finished(self, request_ref=None):
+        self.finish_calls.append(request_ref)
 
 
 class AdsPowerProfileProxyTests(unittest.TestCase):
@@ -358,6 +363,71 @@ class BrowserFetchLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
 
 class BrowserCaptchaServiceRuntimeClosedTests(unittest.IsolatedAsyncioTestCase):
+    async def test_get_token_binds_successful_slot_until_request_finished(self):
+        service = BrowserCaptchaService(db=None)
+        service._check_available = lambda: None
+        fake_browser = _FakeServiceBrowser(token="recaptcha-token")
+        service._browsers[0] = fake_browser
+
+        token, browser_ref = await service.get_token("project-1", action="VIDEO_GENERATION")
+
+        self.assertEqual(token, "recaptcha-token")
+        self.assertIsInstance(browser_ref, str)
+        self.assertTrue(browser_ref.startswith("0:"))
+        request_ref = browser_ref.split(":", 1)[1]
+        self.assertIn(request_ref, service._bound_request_slots)
+        self.assertEqual(service._slot_reservations, {})
+        self.assertTrue(service._is_slot_busy_for_allocation(0))
+
+        await service.report_request_finished(browser_ref)
+
+        self.assertNotIn(request_ref, service._bound_request_slots)
+        self.assertFalse(service._is_slot_busy_for_allocation(0))
+        self.assertEqual(fake_browser.finish_calls, [request_ref])
+
+    async def test_get_token_skips_slot_bound_to_active_request(self):
+        service = BrowserCaptchaService(db=None)
+        service._check_available = lambda: None
+        service._browser_count = 2
+        fake_browser_0 = _FakeServiceBrowser(token="token-0")
+        fake_browser_1 = _FakeServiceBrowser(token="token-1")
+        service._browsers[0] = fake_browser_0
+        service._browsers[1] = fake_browser_1
+
+        token_0, browser_ref_0 = await service.get_token("project-1", action="VIDEO_GENERATION")
+        service._round_robin_index = 0
+        token_1, browser_ref_1 = await service.get_token("project-2", action="VIDEO_GENERATION")
+
+        self.assertEqual(token_0, "token-0")
+        self.assertEqual(token_1, "token-1")
+        self.assertTrue(str(browser_ref_0).startswith("0:"))
+        self.assertTrue(str(browser_ref_1).startswith("1:"))
+
+    async def test_select_browser_waits_instead_of_reusing_bound_slot(self):
+        service = BrowserCaptchaService(db=None)
+        service._browser_count = 1
+        service._bound_request_slots["active-ref"] = {
+            "browser_id": 0,
+            "started_at": time.time(),
+        }
+
+        sleep_calls = []
+
+        async def release_after_sleep(_delay):
+            sleep_calls.append(_delay)
+            service._bound_request_slots.clear()
+            return None
+
+        with patch(
+            "src.services.browser_captcha.asyncio.sleep",
+            new=release_after_sleep,
+        ):
+            browser_id = await service._select_browser_id("project-1")
+
+        self.assertEqual(browser_id, 0)
+        self.assertEqual(len(sleep_calls), 1)
+        self.assertEqual(service._slot_reservations, {0: 1})
+
     async def test_get_token_recycles_slot_when_token_missing(self):
         service = BrowserCaptchaService(db=None)
         service._check_available = lambda: None
