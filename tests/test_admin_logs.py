@@ -1,7 +1,13 @@
 import json
+from types import SimpleNamespace
 import unittest
+from unittest.mock import AsyncMock, patch
 
-from src.api.admin import _filter_superseded_async_video_submit_logs
+from src.api.admin import (
+    CaptchaScoreTestRequest,
+    _filter_superseded_async_video_submit_logs,
+    test_captcha_score as run_captcha_score_test,
+)
 
 
 class AdminLogsTests(unittest.TestCase):
@@ -42,6 +48,29 @@ class AdminLogsTests(unittest.TestCase):
         filtered = _filter_superseded_async_video_submit_logs(logs)
 
         self.assertEqual([log["id"] for log in filtered], [2])
+
+
+class AdminCaptchaScoreTests(unittest.IsolatedAsyncioTestCase):
+    async def test_score_test_uses_request_body_object(self):
+        fake_db = SimpleNamespace(
+            get_captcha_config=AsyncMock(
+                return_value=SimpleNamespace(
+                    captcha_method="unsupported",
+                    browser_proxy_enabled=False,
+                    browser_proxy_url="",
+                )
+            )
+        )
+
+        with patch("src.api.admin.db", fake_db):
+            result = await run_captcha_score_test(
+                CaptchaScoreTestRequest(action="VIDEO_GENERATION"),
+                _token="admin-session",
+            )
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["action"], "VIDEO_GENERATION")
+        self.assertIn("不支持", result["message"])
 
 
 if __name__ == "__main__":

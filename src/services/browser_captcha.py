@@ -130,6 +130,22 @@ def _adspower_request_timeout() -> int:
         return 15
 
 
+def _adspower_restart_after_token_failures() -> int:
+    value = _adspower_env("ADSPOWER_RESTART_AFTER_TOKEN_FAILURES", "3")
+    try:
+        return max(0, min(30, int(value)))
+    except Exception:
+        return 3
+
+
+def _adspower_restart_cooldown_seconds() -> int:
+    value = _adspower_env("ADSPOWER_RESTART_COOLDOWN_SECONDS", "300")
+    try:
+        return max(30, min(3600, int(value)))
+    except Exception:
+        return 300
+
+
 def _adspower_request_json(method: str, path: str, params: Optional[Dict[str, Any]] = None, body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     base_url = _adspower_api_base_url()
     url = f"{base_url}{path}"
@@ -826,6 +842,8 @@ class TokenBrowser:
         self._shared_launch_count = 0
         self._shared_reuse_count = 0
         self._consecutive_browser_failures = 0
+        self._consecutive_token_failures = 0
+        self._last_adspower_profile_restart_at = 0.0
         self._solve_inflight = 0
         self._browser_fetch_inflight = 0
         self._protected_temporary_page_ids = set()
@@ -1381,6 +1399,40 @@ class TokenBrowser:
         """Recycle the current shared browser."""
         async with self._shared_browser_lock:
             await self._recycle_browser_locked(reason=reason, rotate_profile=rotate_profile)
+
+    async def _maybe_restart_adspower_profile_after_token_failure(self, reason: str) -> bool:
+        if not _is_adspower_enabled():
+            return False
+
+        threshold = _adspower_restart_after_token_failures()
+        if threshold <= 0 or self._consecutive_token_failures < threshold:
+            return False
+
+        now = time.monotonic()
+        cooldown_seconds = _adspower_restart_cooldown_seconds()
+        if self._last_adspower_profile_restart_at and now - self._last_adspower_profile_restart_at < cooldown_seconds:
+            debug_logger.log_warning(
+                f"[BrowserCaptcha] Token-{self.token_id} AdsPower profile restart skipped by cooldown "
+                f"(failures={self._consecutive_token_failures}, cooldown={cooldown_seconds}s)"
+            )
+            return False
+
+        profile_id = _adspower_profile_id_for_slot(self.token_id)
+        if not profile_id:
+            return False
+
+        async with self._shared_browser_lock:
+            await self._recycle_browser_locked(reason=f"adspower_profile_restart:{reason}", rotate_profile=False)
+            stopped = await asyncio.to_thread(_stop_adspower_profile, profile_id)
+
+        self._last_adspower_profile_restart_at = time.monotonic()
+        self._consecutive_token_failures = 0
+        debug_logger.log_warning(
+            f"[BrowserCaptcha] Token-{self.token_id} AdsPower profile restarted after token failures "
+            f"(profile_id={profile_id}, stopped={stopped}, reason={reason})"
+        )
+        await asyncio.sleep(3 if stopped else 1)
+        return True
 
     async def _get_or_create_shared_browser(self, token_proxy_url: Optional[str] = None) -> tuple:
         """Get or create the shared browser for this slot."""
@@ -2332,6 +2384,7 @@ class TokenBrowser:
                         if token:
                             self._solve_count += 1
                             self._consecutive_browser_failures = 0
+                            self._consecutive_token_failures = 0
                             debug_logger.log_info(
                                 f"[BrowserCaptcha] Token-{self.token_id} token acquired ({(time.time()-start_ts)*1000:.0f}ms, launches={self._shared_launch_count}, reuse={self._shared_reuse_count})"
                             )
@@ -2339,20 +2392,28 @@ class TokenBrowser:
 
                         self._error_count += 1
                         self._consecutive_browser_failures += 1
+                        self._consecutive_token_failures += 1
                         debug_logger.log_warning(
                             f"[BrowserCaptcha] Token-{self.token_id} token attempt {attempt + 1}/{max_retries} failed"
                         )
-                        if self._consecutive_browser_failures >= 2:
+                        restarted = await self._maybe_restart_adspower_profile_after_token_failure(
+                            reason=f"captcha_empty_token_{attempt + 1}"
+                        )
+                        if not restarted and self._consecutive_browser_failures >= 2:
                             await self.recycle_browser(reason=f"captcha_failed_{attempt + 1}", rotate_profile=False)
                     except Exception as e:
                         self._error_count += 1
                         self._consecutive_browser_failures += 1
+                        self._consecutive_token_failures += 1
                         error_message = f"{type(e).__name__}: {str(e)}"
                         debug_logger.log_error(
                             f"[BrowserCaptcha] Token-{self.token_id} browser error: {error_message[:200]}"
                         )
                         error_lower = error_message.lower()
-                        if any(keyword in error_lower for keyword in [
+                        restarted = await self._maybe_restart_adspower_profile_after_token_failure(
+                            reason=f"captcha_exception_{type(e).__name__}"
+                        )
+                        if not restarted and any(keyword in error_lower for keyword in [
                             "context or browser has been closed",
                             "target closed",
                             "browser has been closed",

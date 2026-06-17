@@ -362,6 +362,41 @@ class BrowserFetchLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(browser.is_busy())
 
 
+class TokenBrowserProfileRestartTests(unittest.IsolatedAsyncioTestCase):
+    async def test_restarts_adspower_profile_after_repeated_empty_tokens(self):
+        browser = TokenBrowser(token_id=0, user_data_dir="tmp/unit-adspower-restart")
+
+        async def fake_get_or_create_shared_browser(token_proxy_url=None):
+            return None, None, object()
+
+        async def fake_execute_captcha(context, project_id, website_key, action):
+            return None
+
+        async def fast_sleep(_delay):
+            return None
+
+        browser._get_or_create_shared_browser = fake_get_or_create_shared_browser
+        browser._execute_captcha = fake_execute_captcha
+
+        with patch("src.services.browser_captcha._is_adspower_enabled", return_value=True), patch(
+            "src.services.browser_captcha._adspower_profile_id_for_slot",
+            return_value="kwrxc3b",
+        ), patch("src.services.browser_captcha._stop_adspower_profile", return_value=True) as stop_profile, patch(
+            "src.services.browser_captcha.asyncio.sleep",
+            new=fast_sleep,
+        ):
+            token, request_ref = await browser.get_token(
+                project_id="project-1",
+                website_key="site-key",
+                action="VIDEO_GENERATION",
+            )
+
+        self.assertIsNone(token)
+        self.assertIsNone(request_ref)
+        stop_profile.assert_called_once_with("kwrxc3b")
+        self.assertEqual(browser._consecutive_token_failures, 0)
+
+
 class BrowserCaptchaServiceRuntimeClosedTests(unittest.IsolatedAsyncioTestCase):
     async def test_get_token_binds_successful_slot_until_request_finished(self):
         service = BrowserCaptchaService(db=None)

@@ -1939,7 +1939,7 @@ async def test_captcha_score(
     _token: str = Depends(verify_admin_token)
 ):
     """使用当前打码方式获取 token，并提交到 antcpt 校验分数。"""
-    req = request or CaptchaScoreTestRequest()
+    req = _request or CaptchaScoreTestRequest()
     website_url = (req.website_url or "https://antcpt.com/score_detector/").strip()
     website_key = (req.website_key or "6LcR_okUAAAAAPYrPe-HK_0RULO1aZM15ENyM-Mf").strip()
     action = (req.action or "homepage").strip()
