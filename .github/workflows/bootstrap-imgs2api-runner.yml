@@ -1,0 +1,89 @@
+name: Bootstrap Imgs2API Runner
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner_token:
+        description: GitHub runner registration token for btcfoxman/imgs2api
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  bootstrap:
+    name: Register imgs2api runner on 192.168.3.5
+    runs-on:
+      - self-hosted
+      - linux
+      - x64
+      - repo-flow2api
+    steps:
+      - name: Register runner
+        shell: bash
+        env:
+          RUNNER_TOKEN: ${{ inputs.runner_token }}
+          RUNNER_URL: https://github.com/btcfoxman/imgs2api
+          RUNNER_NAME: repo-imgs2api
+          RUNNER_LABELS: repo-imgs2api,linux,x64
+          RUNNER_ROOT: /home/btcfoxman/actions-runners
+        run: |
+          set -euo pipefail
+
+          if [ -z "${RUNNER_TOKEN}" ]; then
+            echo "IMGS2API_RUNNER_TOKEN secret is required"
+            exit 1
+          fi
+          echo "::add-mask::${RUNNER_TOKEN}"
+
+          source_dir=""
+          for candidate in "${RUNNER_ROOT}/repo-flow2api" "${RUNNER_ROOT}/repo-any-auto-register" "${RUNNER_ROOT}"/*; do
+            if [ -x "${candidate}/config.sh" ] && [ -x "${candidate}/svc.sh" ]; then
+              source_dir="${candidate}"
+              break
+            fi
+          done
+          if [ -z "${source_dir}" ]; then
+            echo "No existing actions runner installation found under ${RUNNER_ROOT}"
+            exit 1
+          fi
+
+          install_dir="${RUNNER_ROOT}/${RUNNER_NAME}"
+          mkdir -p "${install_dir}"
+          (
+            cd "${source_dir}"
+            tar \
+              --exclude='./_work' \
+              --exclude='./_diag' \
+              --exclude='./.runner' \
+              --exclude='./.credentials' \
+              --exclude='./.credentials_rsaparams' \
+              --exclude='./.service' \
+              --exclude='./.env' \
+              -cf - .
+          ) | (
+            cd "${install_dir}"
+            tar -xf -
+          )
+
+          cd "${install_dir}"
+          if [ -f .runner ]; then
+            sudo ./svc.sh stop || true
+            sudo ./svc.sh uninstall || true
+            ./config.sh remove --unattended --token "${RUNNER_TOKEN}" || true
+            rm -f .runner .credentials .credentials_rsaparams .service
+          fi
+
+          ./config.sh \
+            --url "${RUNNER_URL}" \
+            --token "${RUNNER_TOKEN}" \
+            --name "${RUNNER_NAME}" \
+            --labels "${RUNNER_LABELS}" \
+            --work _work \
+            --unattended \
+            --replace
+
+          sudo ./svc.sh install "$(id -un)"
+          sudo ./svc.sh start
+          sudo ./svc.sh status || true
