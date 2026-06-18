@@ -41,6 +41,13 @@ class FlowClientCaptchaRetriesTests(unittest.TestCase):
 
         self.assertIsNone(reason)
 
+    def test_browser_failed_to_fetch_error_is_retryable(self):
+        reason = FlowClient(None)._get_retry_reason(
+            "Flow browser API request failed: browser fetch failed: TypeError: Failed to fetch"
+        )
+
+        self.assertEqual(reason, "\u7f51\u7edc/TLS\u9519\u8bef")
+
 
 class FlowClientBrowserFetchTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
@@ -112,6 +119,46 @@ class FlowClientBrowserFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake_service.call["method"], "POST")
         self.assertEqual(fake_service.call["headers"]["authorization"], "Bearer access-token")
         self.assertEqual(fake_service.call["headers"]["content-type"], "text/plain;charset=UTF-8")
+
+    async def test_browser_fetch_transport_failure_falls_back_without_empty_fingerprint_proxy(self):
+        config.set_captcha_method("adspower")
+        client = FlowClient(None)
+        client._set_request_fingerprint({"browser_ref": 0, "proxy_url": None})
+
+        class FakeBrowserCaptchaService:
+            async def fetch_json(self, **kwargs):
+                raise RuntimeError("browser fetch failed: TypeError: Failed to fetch")
+
+        fake_service = FakeBrowserCaptchaService()
+        fallback_result = {"operations": [{"operation": {"name": "task-1"}}]}
+
+        with patch(
+            "src.services.browser_captcha.BrowserCaptchaService.get_instance",
+            AsyncMock(return_value=fake_service),
+        ), patch.object(
+            client,
+            "_make_request",
+            AsyncMock(return_value=fallback_result),
+        ) as make_request:
+            result = await client._make_video_api_request(
+                url="https://aisandbox-pa.googleapis.com/v1/video:batchAsyncGenerateVideoReferenceImages",
+                json_data={"requests": []},
+                at="access-token",
+                timeout=30,
+            )
+
+        self.assertEqual(result, fallback_result)
+        self.assertFalse(make_request.await_args.kwargs["respect_fingerprint_proxy"])
+        self.assertFalse(make_request.await_args.kwargs["allow_urllib_fallback"])
+
+    def test_browser_fetch_transport_error_allows_http_fallback(self):
+        client = FlowClient(None)
+
+        self.assertTrue(
+            client._should_fallback_browser_video_request(
+                "browser fetch failed: TypeError: Failed to fetch"
+            )
+        )
 
 
 if __name__ == "__main__":

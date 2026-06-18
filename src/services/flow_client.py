@@ -477,8 +477,10 @@ class FlowClient:
         ])
 
     def _is_retryable_network_error(self, error_str: str) -> bool:
-        """识别可重试的 TLS/连接类网络错误。"""
+        """Return whether the error is a retryable TLS/connection failure."""
         error_lower = (error_str or "").lower()
+        if self._is_browser_fetch_transport_error(error_lower):
+            return True
         return any(keyword in error_lower for keyword in [
             "curl: (35)",
             "curl: (52)",
@@ -501,6 +503,23 @@ class FlowClient:
             "network is unreachable",
             "remote host closed connection",
         ])
+
+    @staticmethod
+    def _is_browser_fetch_transport_error(error_message: str) -> bool:
+        """Return whether a browser fetch failed before receiving an HTTP response."""
+        error_lower = (error_message or "").lower()
+        return any(
+            keyword in error_lower
+            for keyword in [
+                "browser fetch failed",
+                "typeerror: failed to fetch",
+                "failed to fetch",
+                "networkerror when attempting to fetch resource",
+                "net::err_",
+                "fetcherror",
+                "typeerror: load failed",
+            ]
+        )
 
     def _get_control_plane_timeout(self) -> int:
         """控制轻量控制面请求的超时，避免认证/项目接口长时间挂起。"""
@@ -525,6 +544,7 @@ class FlowClient:
         fingerprint = self._request_fingerprint_ctx.get()
         browser_ref = fingerprint.get("browser_ref") if isinstance(fingerprint, dict) else None
         captcha_method = str(getattr(config, "captcha_method", "") or "").strip().lower()
+        respect_fingerprint_proxy = True
         if captcha_method in {"browser", "adspower"} and self._is_local_browser_ref(browser_ref):
             try:
                 from .browser_captcha import BrowserCaptchaService
@@ -549,8 +569,14 @@ class FlowClient:
                 error_msg = str(exc)
                 if not self._should_fallback_browser_video_request(error_msg):
                     raise Exception(f"Flow browser API request failed: {exc}") from exc
+                if (
+                    self._is_browser_fetch_transport_error(error_msg)
+                    and isinstance(fingerprint, dict)
+                    and not fingerprint.get("proxy_url")
+                ):
+                    respect_fingerprint_proxy = False
                 debug_logger.log_warning(
-                    f"[VIDEO SUBMIT FALLBACK] browser fetch rejected by upstream, retrying with HTTP client: {error_msg}"
+                    f"[VIDEO SUBMIT FALLBACK] browser fetch failed, retrying with HTTP client: {error_msg}"
                 )
 
         try:
@@ -568,6 +594,7 @@ class FlowClient:
                     timeout=timeout,
                     allow_urllib_fallback=False,
                     apply_default_client_headers=False,
+                    respect_fingerprint_proxy=respect_fingerprint_proxy,
                 ),
                 timeout=timeout + 5
             )
@@ -577,6 +604,8 @@ class FlowClient:
     def _should_fallback_browser_video_request(self, error_message: str) -> bool:
         """Return whether a browser-fetched video submit should retry via the HTTP client."""
         error_lower = (error_message or "").lower()
+        if self._is_browser_fetch_transport_error(error_lower):
+            return True
         return any(
             keyword in error_lower
             for keyword in [
