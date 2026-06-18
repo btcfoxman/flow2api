@@ -69,9 +69,6 @@ jobs:
       HTTP_PROXY: "http://127.0.0.1:10809"
       HTTPS_PROXY: "http://127.0.0.1:10809"
       NO_PROXY: "localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.local"
-      http_proxy: "http://127.0.0.1:10809"
-      https_proxy: "http://127.0.0.1:10809"
-      no_proxy: "localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.local"
     steps:
       - name: Login to GHCR
         shell: bash
@@ -80,6 +77,7 @@ jobs:
           GHCR_USERNAME: ${{ github.actor }}
         run: |
           set -euo pipefail
+          export http_proxy="$HTTP_PROXY" https_proxy="$HTTPS_PROXY" no_proxy="$NO_PROXY"
 
           for attempt in $(seq 1 5); do
             if echo "$GHCR_TOKEN" | docker login "$IMAGE_REGISTRY" -u "$GHCR_USERNAME" --password-stdin; then
@@ -95,6 +93,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          export http_proxy="$HTTP_PROXY" https_proxy="$HTTPS_PROXY" no_proxy="$NO_PROXY"
 
           cd "$DEPLOY_DIR"
           test -f docker-compose.yml
