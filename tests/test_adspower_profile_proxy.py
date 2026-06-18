@@ -228,6 +228,32 @@ class AdsPowerProfileProxyTests(unittest.TestCase):
             [("GET", "/api/v1/browser/active", {"user_id": "kwrxc3b"}, None)],
         )
 
+    def test_start_profile_keeps_open_daily_limit_error(self):
+        calls = []
+
+        def fake_request(method, path, params=None, body=None):
+            calls.append((method, path, params, body))
+            if path == "/api/v1/browser/active":
+                return {"code": 0, "data": {"status": "Inactive"}}
+            if path == "/api/v1/browser/start" and method == "GET" and params and params.get("user_id") == "kwrxc3b":
+                return {
+                    "code": -1,
+                    "msg": "Exceeding open daily limit, recovery after 1 hour",
+                }
+            raise RuntimeError("HTTP Error 404: Not Found")
+
+        browser = TokenBrowser(token_id=0, user_data_dir="tmp/unit-adspower")
+        with patch("src.services.browser_captcha._adspower_request_json", side_effect=fake_request), patch(
+            "src.services.browser_captcha._adspower_profile_id_for_slot",
+            return_value="kwrxc3b",
+        ), self.assertRaisesRegex(RuntimeError, "Exceeding open daily limit"):
+            browser._start_adspower_profile()
+
+        self.assertIn(
+            ("GET", "/api/v1/browser/start", {"user_id": "kwrxc3b", "headless": True}, None),
+            calls,
+        )
+
 
 class AdsPowerBlankPageCleanupTests(unittest.IsolatedAsyncioTestCase):
     async def test_keepalive_adopts_existing_blank_page_and_closes_extras(self):

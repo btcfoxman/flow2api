@@ -210,6 +210,18 @@ def _adspower_message(payload: Dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False)[:500]
 
 
+def _is_adspower_open_daily_limit_message(message: str) -> bool:
+    normalized = (message or "").strip().lower()
+    return any(
+        marker in normalized
+        for marker in (
+            "exceeding open daily limit",
+            "open daily limit",
+            "recovery after",
+        )
+    )
+
+
 def _extract_adspower_ws_endpoint(payload: Any) -> Optional[str]:
     if payload is None:
         return None
@@ -1357,11 +1369,14 @@ class TokenBrowser:
                 try:
                     payload = _adspower_request_json(method, path, params=params, body=body)
                 except Exception as exc:
-                    last_message = f"{type(exc).__name__}: {str(exc)[:200]}"
+                    if not last_message:
+                        last_message = f"{type(exc).__name__}: {str(exc)[:200]}"
                     continue
                 if _adspower_response_success(payload):
                     return payload
                 last_message = _adspower_message(payload)
+                if _is_adspower_open_daily_limit_message(last_message):
+                    raise RuntimeError(f"AdsPower start failed: {last_message}")
                 if "too many request per second" in last_message.lower():
                     break
 
