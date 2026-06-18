@@ -66,20 +66,23 @@ jobs:
     env:
       DEPLOY_DIR: /home/btcfoxman/docker/flow2api
       IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
-      HTTP_PROXY: http://127.0.0.1:10809
-      HTTPS_PROXY: http://127.0.0.1:10809
-      NO_PROXY: localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.local
-      http_proxy: http://127.0.0.1:10809
-      https_proxy: http://127.0.0.1:10809
-      no_proxy: localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.local
+      HTTP_PROXY: "http://127.0.0.1:10809"
+      HTTPS_PROXY: "http://127.0.0.1:10809"
+      NO_PROXY: "localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.local"
+      http_proxy: "http://127.0.0.1:10809"
+      https_proxy: "http://127.0.0.1:10809"
+      no_proxy: "localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.local"
     steps:
       - name: Login to GHCR
         shell: bash
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USERNAME: ${{ github.actor }}
         run: |
           set -euo pipefail
 
           for attempt in $(seq 1 5); do
-            if echo "${{ secrets.GITHUB_TOKEN }}" | docker login "$IMAGE_REGISTRY" -u "${{ github.actor }}" --password-stdin; then
+            if echo "$GHCR_TOKEN" | docker login "$IMAGE_REGISTRY" -u "$GHCR_USERNAME" --password-stdin; then
               exit 0
             fi
             sleep $((attempt * 5))
