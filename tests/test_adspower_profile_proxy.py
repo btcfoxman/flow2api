@@ -90,6 +90,18 @@ class _FakeServiceBrowser:
         self.finish_calls.append(request_ref)
 
 
+class _FakeWarmupBrowser:
+    def __init__(self, error=None):
+        self.error = error
+        self.warmup_calls = 0
+
+    async def _get_or_create_shared_browser(self):
+        self.warmup_calls += 1
+        if self.error:
+            raise self.error
+        return None, None, object()
+
+
 class AdsPowerProfileProxyTests(unittest.TestCase):
     def test_resolves_profile_proxy_from_v1_user_list(self):
         payload = {
@@ -432,6 +444,35 @@ class TokenBrowserProfileRestartTests(unittest.IsolatedAsyncioTestCase):
 
 
 class BrowserCaptchaServiceRuntimeClosedTests(unittest.IsolatedAsyncioTestCase):
+    async def test_warmup_browser_slots_returns_success_and_failure_results(self):
+        service = BrowserCaptchaService(db=None)
+        service._browser_count = 2
+        success_browser = _FakeWarmupBrowser()
+        failed_browser = _FakeWarmupBrowser(RuntimeError("start failed"))
+        service._browsers[0] = success_browser
+        service._browsers[1] = failed_browser
+
+        with patch("src.services.browser_captcha._is_adspower_enabled", return_value=True), patch(
+            "src.services.browser_captcha._adspower_profile_id_for_slot",
+            side_effect=lambda slot_id: f"profile-{slot_id}",
+        ):
+            results = await service.warmup_browser_slots()
+
+        self.assertEqual(success_browser.warmup_calls, 1)
+        self.assertEqual(failed_browser.warmup_calls, 1)
+        self.assertEqual(
+            results,
+            [
+                {"browser_id": 0, "profile_id": "profile-0", "success": True, "error": ""},
+                {
+                    "browser_id": 1,
+                    "profile_id": "profile-1",
+                    "success": False,
+                    "error": "RuntimeError: start failed",
+                },
+            ],
+        )
+
     async def test_get_token_binds_successful_slot_until_request_finished(self):
         service = BrowserCaptchaService(db=None)
         service._check_available = lambda: None

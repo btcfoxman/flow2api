@@ -2739,16 +2739,51 @@ class BrowserCaptchaService:
     
     async def _warmup_browser_slot(self, browser_id: int):
         browser = await self._get_or_create_browser(browser_id)
+        profile_id = _adspower_profile_id_for_slot(browser_id) if _is_adspower_enabled() else ""
         try:
             await browser._get_or_create_shared_browser()
-            debug_logger.log_info(f"[BrowserCaptcha] warmed browser slot {browser_id}")
+            debug_logger.log_info(
+                f"[BrowserCaptcha] warmed browser slot {browser_id}"
+                + (f" (profile_id={profile_id})" if profile_id else "")
+            )
+            return {
+                "browser_id": browser_id,
+                "profile_id": profile_id,
+                "success": True,
+                "error": "",
+            }
         except Exception as e:
-            debug_logger.log_warning(f"[BrowserCaptcha] warmup for slot {browser_id} failed: {e}")
+            error = f"{type(e).__name__}: {e}"
+            debug_logger.log_warning(
+                f"[BrowserCaptcha] warmup for slot {browser_id}"
+                + (f" (profile_id={profile_id})" if profile_id else "")
+                + f" failed: {error}"
+            )
+            return {
+                "browser_id": browser_id,
+                "profile_id": profile_id,
+                "success": False,
+                "error": error,
+            }
 
     async def warmup_browser_slots(self):
         tasks = [self._warmup_browser_slot(browser_id) for browser_id in range(self._browser_count)]
         if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            normalized_results = []
+            for browser_id, result in enumerate(results):
+                if isinstance(result, Exception):
+                    profile_id = _adspower_profile_id_for_slot(browser_id) if _is_adspower_enabled() else ""
+                    normalized_results.append({
+                        "browser_id": browser_id,
+                        "profile_id": profile_id,
+                        "success": False,
+                        "error": f"{type(result).__name__}: {result}",
+                    })
+                else:
+                    normalized_results.append(result)
+            return normalized_results
+        return []
 
     def _is_slot_busy_for_allocation(self, slot_id: int) -> bool:
         self._prune_bound_request_slots_locked()

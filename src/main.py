@@ -112,8 +112,21 @@ async def lifespan(app: FastAPI):
     elif captcha_config.captcha_method in {"browser", "adspower"}:
         from .services.browser_captcha import BrowserCaptchaService
         browser_service = await BrowserCaptchaService.get_instance(db)
-        await browser_service.warmup_browser_slots()
-        print("? Browser captcha service initialized (headed/adspower mode)")
+        warmup_results = await browser_service.warmup_browser_slots()
+        warmup_successes = [result for result in warmup_results if result and result.get("success")]
+        warmup_failures = [result for result in warmup_results if not result or not result.get("success")]
+        print(
+            "Browser captcha service initialized "
+            f"(mode={captcha_config.captcha_method}, warmed={len(warmup_successes)}/{len(warmup_results)})"
+        )
+        for result in warmup_failures:
+            if not result:
+                print("Browser captcha warmup failed: empty result")
+                continue
+            slot = result.get("browser_id")
+            profile_id = result.get("profile_id") or "-"
+            error = result.get("error") or "unknown error"
+            print(f"Browser captcha warmup failed: slot={slot}, profile_id={profile_id}, error={error}")
 
     # Initialize concurrency manager
     await concurrency_manager.initialize(tokens)
