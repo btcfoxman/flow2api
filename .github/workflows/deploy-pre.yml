@@ -66,13 +66,27 @@ jobs:
     env:
       DEPLOY_DIR: /home/btcfoxman/docker/flow2api
       IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
+      HTTP_PROXY: http://127.0.0.1:10809
+      HTTPS_PROXY: http://127.0.0.1:10809
+      NO_PROXY: localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.local
+      http_proxy: http://127.0.0.1:10809
+      https_proxy: http://127.0.0.1:10809
+      no_proxy: localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.local
     steps:
       - name: Login to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.IMAGE_REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for attempt in $(seq 1 5); do
+            if echo "${{ secrets.GITHUB_TOKEN }}" | docker login "$IMAGE_REGISTRY" -u "${{ github.actor }}" --password-stdin; then
+              exit 0
+            fi
+            sleep $((attempt * 5))
+          done
+
+          echo "GHCR login failed after retries" >&2
+          exit 1
 
       - name: Pull and restart service
         shell: bash
@@ -104,7 +118,16 @@ jobs:
           set_env_var IMAGE_TAG "$IMAGE_TAG"
 
           docker network inspect my-shared-net >/dev/null 2>&1 || docker network create my-shared-net
-          docker compose pull flow2api
+          for attempt in $(seq 1 5); do
+            if docker compose pull flow2api; then
+              break
+            fi
+            if [ "$attempt" = "5" ]; then
+              echo "docker compose pull flow2api failed after retries" >&2
+              exit 1
+            fi
+            sleep $((attempt * 8))
+          done
           docker compose up -d --remove-orphans flow2api
           docker image prune -f
 
