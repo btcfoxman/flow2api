@@ -160,6 +160,97 @@ class FlowClientBrowserFetchTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+    async def test_missing_recaptcha_token_retries_until_configured_max_attempts(self):
+        config.set_captcha_method("adspower")
+        config.set_flow_max_retries(4)
+        client = FlowClient(None)
+        client._acquire_video_launch_gate = AsyncMock(return_value=(True, 0, 0))
+        client._release_video_launch_gate = AsyncMock()
+        client._get_recaptcha_token = AsyncMock(
+            side_effect=[
+                (None, None),
+                (None, None),
+                ("recaptcha-token", "0:request-ref"),
+            ]
+        )
+        client._make_video_api_request = AsyncMock(
+            return_value={"operations": [{"operation": {"name": "task-1"}}]}
+        )
+        client._notify_browser_captcha_error = AsyncMock()
+        client._notify_browser_captcha_request_finished = AsyncMock()
+
+        result = await client.generate_video_text(
+            at="access-token",
+            project_id="project-1",
+            prompt="text only",
+            model_key="abra_t2v_10s",
+            aspect_ratio="VIDEO_ASPECT_RATIO_LANDSCAPE",
+            token_id=123,
+        )
+
+        self.assertEqual(result["operations"][0]["operation"]["name"], "task-1")
+        self.assertEqual(client._get_recaptcha_token.await_count, 3)
+        self.assertEqual(client._make_video_api_request.await_count, 1)
+        self.assertEqual(client._notify_browser_captcha_error.await_count, 2)
+
+    async def test_missing_recaptcha_token_fails_after_configured_max_attempts(self):
+        config.set_captcha_method("adspower")
+        config.set_flow_max_retries(4)
+        client = FlowClient(None)
+        client._acquire_video_launch_gate = AsyncMock(return_value=(True, 0, 0))
+        client._release_video_launch_gate = AsyncMock()
+        client._get_recaptcha_token = AsyncMock(return_value=(None, None))
+        client._notify_browser_captcha_error = AsyncMock()
+
+        with self.assertRaisesRegex(Exception, "Failed to obtain reCAPTCHA token"):
+            await client.generate_video_text(
+                at="access-token",
+                project_id="project-1",
+                prompt="text only",
+                model_key="abra_t2v_10s",
+                aspect_ratio="VIDEO_ASPECT_RATIO_LANDSCAPE",
+                token_id=123,
+            )
+
+        self.assertEqual(client._get_recaptcha_token.await_count, 4)
+        self.assertEqual(client._notify_browser_captcha_error.await_count, 4)
+
+    async def test_browser_fetch_failure_retries_video_submit_with_new_recaptcha_token(self):
+        config.set_captcha_method("adspower")
+        config.set_flow_max_retries(4)
+        client = FlowClient(None)
+        client._acquire_video_launch_gate = AsyncMock(return_value=(True, 0, 0))
+        client._release_video_launch_gate = AsyncMock()
+        client._get_recaptcha_token = AsyncMock(
+            side_effect=[
+                ("recaptcha-token-1", "0:request-ref-1"),
+                ("recaptcha-token-2", "0:request-ref-2"),
+            ]
+        )
+        client._make_video_api_request = AsyncMock(
+            side_effect=[
+                Exception("Flow browser API request failed: browser fetch failed: TypeError: Failed to fetch"),
+                {"operations": [{"operation": {"name": "task-2"}}]},
+            ]
+        )
+        client._notify_browser_captcha_error = AsyncMock()
+        client._notify_browser_captcha_request_finished = AsyncMock()
+
+        result = await client.generate_video_text(
+            at="access-token",
+            project_id="project-1",
+            prompt="text only",
+            model_key="abra_t2v_10s",
+            aspect_ratio="VIDEO_ASPECT_RATIO_LANDSCAPE",
+            token_id=123,
+        )
+
+        self.assertEqual(result["operations"][0]["operation"]["name"], "task-2")
+        self.assertEqual(client._get_recaptcha_token.await_count, 2)
+        self.assertEqual(client._make_video_api_request.await_count, 2)
+        self.assertEqual(client._notify_browser_captcha_error.await_count, 1)
+        self.assertEqual(client._notify_browser_captcha_request_finished.await_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

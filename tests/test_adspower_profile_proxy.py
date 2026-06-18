@@ -1,3 +1,4 @@
+import asyncio
 import time
 import unittest
 from unittest.mock import patch
@@ -70,6 +71,7 @@ class _FakeServiceBrowser:
         self.token = token
         self.request_ref = request_ref
         self.get_token_calls = []
+        self.fetch_json_calls = []
         self.recycle_calls = []
         self.finish_calls = []
 
@@ -79,6 +81,10 @@ class _FakeServiceBrowser:
 
     async def recycle_browser(self, reason="unknown", rotate_profile=True):
         self.recycle_calls.append((reason, rotate_profile))
+
+    async def fetch_json(self, **kwargs):
+        self.fetch_json_calls.append(kwargs)
+        return {"ok": True}
 
     async def notify_generation_request_finished(self, request_ref=None):
         self.finish_calls.append(request_ref)
@@ -300,6 +306,34 @@ class AdsPowerBlankPageCleanupTests(unittest.IsolatedAsyncioTestCase):
 
 
 class BrowserFetchLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_browser_fetch_waits_for_slot_semaphore(self):
+        browser = TokenBrowser(token_id=0, user_data_dir="tmp/unit-browser-fetch-semaphore")
+
+        async def fake_get_or_create_shared_browser():
+            return None, None, _FakeFetchContext()
+
+        async def fake_capture_page_fingerprint(page):
+            return None
+
+        browser._get_or_create_shared_browser = fake_get_or_create_shared_browser
+        browser._capture_page_fingerprint = fake_capture_page_fingerprint
+
+        await browser._semaphore.acquire()
+        task = asyncio.create_task(
+            browser.fetch_json(
+                url="https://aisandbox-pa.googleapis.com/v1/video:submit",
+                json_data={"requests": []},
+                timeout=10,
+            )
+        )
+        await asyncio.sleep(0)
+        self.assertFalse(task.done())
+
+        browser._semaphore.release()
+        result = await task
+
+        self.assertEqual(result, {"ok": True})
+
     async def test_browser_fetch_retries_once_when_context_was_closed(self):
         browser = TokenBrowser(token_id=0, user_data_dir="tmp/unit-browser-fetch")
         contexts = [_FailingNewPageContext(), _FakeFetchContext()]
@@ -363,7 +397,7 @@ class BrowserFetchLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
 
 class TokenBrowserProfileRestartTests(unittest.IsolatedAsyncioTestCase):
-    async def test_restarts_adspower_profile_after_repeated_empty_tokens(self):
+    async def test_recycles_adspower_cdp_without_stopping_profile_after_repeated_empty_tokens(self):
         browser = TokenBrowser(token_id=0, user_data_dir="tmp/unit-adspower-restart")
 
         async def fake_get_or_create_shared_browser(token_proxy_url=None):
@@ -393,7 +427,7 @@ class TokenBrowserProfileRestartTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(token)
         self.assertIsNone(request_ref)
-        stop_profile.assert_called_once_with("kwrxc3b")
+        stop_profile.assert_not_called()
         self.assertEqual(browser._consecutive_token_failures, 0)
 
 
@@ -488,3 +522,35 @@ class BrowserCaptchaServiceRuntimeClosedTests(unittest.IsolatedAsyncioTestCase):
         await service.report_error(0, error_reason="browser runtime closed")
 
         self.assertEqual(fake_browser.recycle_calls, [("browser runtime closed", False)])
+
+    async def test_fetch_json_requires_active_bound_request_ref(self):
+        service = BrowserCaptchaService(db=None)
+        fake_browser = _FakeServiceBrowser()
+        service._browsers[0] = fake_browser
+
+        with self.assertRaisesRegex(RuntimeError, "no longer bound"):
+            await service.fetch_json(
+                "0:missing-ref",
+                url="https://aisandbox-pa.googleapis.com/v1/video:submit",
+                json_data={"requests": []},
+            )
+
+        self.assertEqual(fake_browser.fetch_json_calls, [])
+
+    async def test_fetch_json_uses_bound_slot(self):
+        service = BrowserCaptchaService(db=None)
+        fake_browser = _FakeServiceBrowser()
+        service._browsers[0] = fake_browser
+        service._bound_request_slots["request-ref"] = {
+            "browser_id": 0,
+            "started_at": time.time(),
+        }
+
+        result = await service.fetch_json(
+            "0:request-ref",
+            url="https://aisandbox-pa.googleapis.com/v1/video:submit",
+            json_data={"requests": []},
+        )
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(len(fake_browser.fetch_json_calls), 1)
