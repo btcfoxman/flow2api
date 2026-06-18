@@ -113,6 +113,14 @@ class FlowClient:
         """清理请求链路绑定的浏览器指纹。"""
         self._set_request_fingerprint(None)
 
+    def _clear_request_browser_ref(self):
+        fingerprint = self._request_fingerprint_ctx.get()
+        if not isinstance(fingerprint, dict) or "browser_ref" not in fingerprint:
+            return
+        updated_fingerprint = dict(fingerprint)
+        updated_fingerprint.pop("browser_ref", None)
+        self._set_request_fingerprint(updated_fingerprint)
+
     @staticmethod
     def _is_local_browser_ref(browser_ref: Optional[Union[int, str]]) -> bool:
         if isinstance(browser_ref, int):
@@ -569,6 +577,8 @@ class FlowClient:
                 error_msg = str(exc)
                 if not self._should_fallback_browser_video_request(error_msg):
                     raise Exception(f"Flow browser API request failed: {exc}") from exc
+                if self._is_browser_ref_unbound_error(error_msg):
+                    self._clear_request_browser_ref()
                 if (
                     self._is_browser_fetch_transport_error(error_msg)
                     and isinstance(fingerprint, dict)
@@ -604,7 +614,7 @@ class FlowClient:
     def _should_fallback_browser_video_request(self, error_message: str) -> bool:
         """Return whether a browser-fetched video submit should retry via the HTTP client."""
         error_lower = (error_message or "").lower()
-        if self._is_browser_fetch_transport_error(error_lower):
+        if self._is_browser_fetch_transport_error(error_lower) or self._is_browser_ref_unbound_error(error_lower):
             return True
         return any(
             keyword in error_lower
@@ -613,6 +623,14 @@ class FlowClient:
                 "public_error_unusual_activity",
                 "too_much_traffic",
             ]
+        )
+
+    @staticmethod
+    def _is_browser_ref_unbound_error(error_message: str) -> bool:
+        error_lower = (error_message or "").lower()
+        return (
+            "browser_ref is no longer bound" in error_lower
+            or "no longer bound to an active generation request" in error_lower
         )
 
     @staticmethod

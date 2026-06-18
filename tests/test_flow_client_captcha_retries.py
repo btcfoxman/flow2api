@@ -151,12 +151,59 @@ class FlowClientBrowserFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(make_request.await_args.kwargs["respect_fingerprint_proxy"])
         self.assertFalse(make_request.await_args.kwargs["allow_urllib_fallback"])
 
+    async def test_stale_browser_ref_falls_back_and_clears_ref(self):
+        config.set_captcha_method("adspower")
+        client = FlowClient(None)
+        client._set_request_fingerprint({
+            "browser_ref": "0:released-ref",
+            "proxy_url": "socks5://xray:20005",
+            "user_agent": "Mozilla/5.0 test",
+        })
+
+        class FakeBrowserCaptchaService:
+            async def fetch_json(self, **kwargs):
+                raise RuntimeError(
+                    "browser_ref is no longer bound to an active generation request"
+                )
+
+        fallback_result = {"operations": [{"operation": {"name": "task-1"}}]}
+
+        with patch(
+            "src.services.browser_captcha.BrowserCaptchaService.get_instance",
+            AsyncMock(return_value=FakeBrowserCaptchaService()),
+        ), patch.object(
+            client,
+            "_make_request",
+            AsyncMock(return_value=fallback_result),
+        ) as make_request:
+            result = await client._make_video_api_request(
+                url="https://aisandbox-pa.googleapis.com/v1/video:batchCheckAsyncVideoGenerationStatus",
+                json_data={"operations": []},
+                at="access-token",
+                timeout=30,
+            )
+
+        self.assertEqual(result, fallback_result)
+        fingerprint = client.get_request_fingerprint()
+        self.assertNotIn("browser_ref", fingerprint)
+        self.assertEqual(fingerprint["proxy_url"], "socks5://xray:20005")
+        self.assertFalse(make_request.await_args.kwargs["allow_urllib_fallback"])
+
     def test_browser_fetch_transport_error_allows_http_fallback(self):
         client = FlowClient(None)
 
         self.assertTrue(
             client._should_fallback_browser_video_request(
                 "browser fetch failed: TypeError: Failed to fetch"
+            )
+        )
+
+    def test_stale_browser_ref_error_allows_http_fallback(self):
+        client = FlowClient(None)
+
+        self.assertTrue(
+            client._should_fallback_browser_video_request(
+                "browser_ref is no longer bound to an active generation request"
             )
         )
 
