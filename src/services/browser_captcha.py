@@ -142,6 +142,14 @@ def _adspower_request_min_interval_seconds() -> float:
         return 1.2
 
 
+def _adspower_warmup_retry_seconds() -> int:
+    value = _adspower_env("ADSPOWER_WARMUP_RETRY_SECONDS", "300")
+    try:
+        return max(30, min(3600, int(value)))
+    except Exception:
+        return 300
+
+
 def _adspower_restart_after_token_failures() -> int:
     value = _adspower_env("ADSPOWER_RESTART_AFTER_TOKEN_FAILURES", "3")
     try:
@@ -2631,10 +2639,61 @@ class BrowserCaptchaService:
         # ?????? _load_browser_count ???????
         self._token_semaphore = None
         self._idle_reaper_task: Optional[asyncio.Task] = None
+        self._warmup_retry_task: Optional[asyncio.Task] = None
     
     async def _ensure_idle_reaper(self):
         if self._idle_reaper_task is None or self._idle_reaper_task.done():
             self._idle_reaper_task = asyncio.create_task(self._idle_reaper_loop())
+
+    async def ensure_warmup_retry_loop(self):
+        if self._warmup_retry_task is None or self._warmup_retry_task.done():
+            self._warmup_retry_task = asyncio.create_task(self._warmup_retry_loop())
+
+    async def _warmup_retry_loop(self):
+        while True:
+            try:
+                await asyncio.sleep(_adspower_warmup_retry_seconds())
+                if not _is_adspower_enabled():
+                    continue
+
+                missing_browser_ids = []
+                async with self._browsers_lock:
+                    for browser_id in range(self._browser_count):
+                        browser = self._browsers.get(browser_id)
+                        if not browser or not browser.has_shared_browser():
+                            missing_browser_ids.append(browser_id)
+
+                if not missing_browser_ids:
+                    continue
+
+                results = await asyncio.gather(
+                    *(self._warmup_browser_slot(browser_id) for browser_id in missing_browser_ids),
+                    return_exceptions=True,
+                )
+                success_count = 0
+                failure_messages = []
+                for browser_id, result in zip(missing_browser_ids, results):
+                    if isinstance(result, Exception):
+                        failure_messages.append(f"slot={browser_id}: {type(result).__name__}: {result}")
+                    elif result and result.get("success"):
+                        success_count += 1
+                    else:
+                        failure_messages.append(
+                            f"slot={browser_id}: {(result or {}).get('error') or 'unknown error'}"
+                        )
+                if success_count:
+                    debug_logger.log_info(
+                        f"[BrowserCaptcha] AdsPower warmup retry opened {success_count}/{len(missing_browser_ids)} slot(s)"
+                    )
+                if failure_messages:
+                    debug_logger.log_warning(
+                        "[BrowserCaptcha] AdsPower warmup retry still failed: "
+                        + "; ".join(failure_messages[:5])
+                    )
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                debug_logger.log_warning(f"[BrowserCaptcha] AdsPower warmup retry loop error: {e}")
 
     async def _idle_reaper_loop(self):
         while True:

@@ -127,6 +127,9 @@ async def lifespan(app: FastAPI):
             profile_id = result.get("profile_id") or "-"
             error = result.get("error") or "unknown error"
             print(f"Browser captcha warmup failed: slot={slot}, profile_id={profile_id}, error={error}")
+        if captcha_config.captcha_method == "adspower" and warmup_failures:
+            await browser_service.ensure_warmup_retry_loop()
+            print("Browser captcha AdsPower warmup retry loop enabled")
 
     # Initialize concurrency manager
     await concurrency_manager.initialize(tokens)

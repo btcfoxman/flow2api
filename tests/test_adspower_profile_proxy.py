@@ -10,6 +10,7 @@ from src.services.browser_captcha import (
     _active_adspower_profile_payload,
     _adspower_profile_proxy_url,
     _adspower_request_min_interval_seconds,
+    _adspower_warmup_retry_seconds,
     _stop_adspower_profile,
 )
 
@@ -111,6 +112,14 @@ class AdsPowerProfileProxyTests(unittest.TestCase):
             self.assertEqual(_adspower_request_min_interval_seconds(), 1.2)
         with patch("src.services.browser_captcha._adspower_env", return_value="99999"):
             self.assertEqual(_adspower_request_min_interval_seconds(), 10.0)
+
+    def test_adspower_warmup_retry_seconds_is_configurable_and_bounded(self):
+        with patch("src.services.browser_captcha._adspower_env", return_value="120"):
+            self.assertEqual(_adspower_warmup_retry_seconds(), 120)
+        with patch("src.services.browser_captcha._adspower_env", return_value="invalid"):
+            self.assertEqual(_adspower_warmup_retry_seconds(), 300)
+        with patch("src.services.browser_captcha._adspower_env", return_value="5"):
+            self.assertEqual(_adspower_warmup_retry_seconds(), 30)
 
     def test_resolves_profile_proxy_from_v1_user_list(self):
         payload = {
