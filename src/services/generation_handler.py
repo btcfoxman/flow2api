@@ -3008,6 +3008,14 @@ class GenerationHandler:
         task = await self.db.get_task(task_id)
         if task is None:
             return None
+        if task.status == "processing" and task.operations:
+            upstream_task_id = _operation_task_id(task.operations)
+            if upstream_task_id and upstream_task_id != task.task_id:
+                upstream_task = await self.db.get_task(upstream_task_id)
+                if upstream_task is not None:
+                    payload = self._task_to_video_payload(upstream_task)
+                    payload["id"] = task.task_id
+                    return payload
         return self._task_to_video_payload(task)
 
     def _task_to_video_payload(self, task: Task) -> Dict[str, Any]:

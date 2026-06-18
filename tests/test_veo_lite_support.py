@@ -143,6 +143,44 @@ class VeoLiteGenerationHandlerTests(unittest.TestCase):
         self.assertEqual(payload["status"], "failed")
         self.assertEqual(payload["progress"], 100)
 
+    def test_deferred_local_video_task_queries_upstream_payload_with_local_id(self):
+        class FakeDb:
+            def __init__(self):
+                self.tasks = {
+                    "local-task": Task(
+                        task_id="local-task",
+                        token_id=1,
+                        model="abra_r2v_10s",
+                        prompt="hello",
+                        status="processing",
+                        progress=45,
+                        operations=[{"operation": {"name": "upstream-task"}}],
+                    ),
+                    "upstream-task": Task(
+                        task_id="upstream-task",
+                        token_id=1,
+                        model="abra_r2v_10s",
+                        prompt="hello",
+                        status="completed",
+                        progress=100,
+                        result_urls=["https://example.com/video.mp4"],
+                    ),
+                }
+
+            async def get_task(self, task_id):
+                return self.tasks.get(task_id)
+
+        async def run():
+            handler = GenerationHandler.__new__(GenerationHandler)
+            handler.db = FakeDb()
+            return await handler.get_video_task_payload("local-task")
+
+        payload = asyncio.run(run())
+
+        self.assertEqual(payload["id"], "local-task")
+        self.assertEqual(payload["status"], "completed")
+        self.assertEqual(payload["video_url"], "https://example.com/video.mp4")
+
     def test_async_video_result_log_records_final_failure(self):
         class FakeDb:
             def __init__(self):

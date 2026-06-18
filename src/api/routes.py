@@ -2,10 +2,13 @@
 
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
+import asyncio
 import base64
 import json
 import mimetypes
 import re
+import time
+import uuid
 from urllib.parse import unquote, urlparse
 
 from curl_cffi.requests import AsyncSession
@@ -20,8 +23,13 @@ from ..core.models import (
     ChatMessage,
     GeminiContent,
     GeminiGenerateContentRequest,
+    Task,
 )
-from ..services.generation_handler import MODEL_CONFIG, GenerationHandler
+from ..services.generation_handler import (
+    MODEL_CONFIG,
+    GenerationHandler,
+    _validate_reference_video_duration,
+)
 from ..services.browser_captcha_extension import ExtensionCaptchaService
 
 router = APIRouter()
@@ -887,6 +895,248 @@ async def _collect_async_video_task_result(
     return _parse_handler_result(result)
 
 
+def _video_model_response_name(model: str) -> str:
+    model_config = MODEL_CONFIG.get(model, {})
+    return str(model_config.get("model_key") or model)
+
+
+def _new_deferred_video_task_id() -> str:
+    return f"flow2api-submit-{uuid.uuid4().hex}"
+
+
+def _extract_error_message(payload: Dict[str, Any]) -> str:
+    error = payload.get("error")
+    if isinstance(error, dict):
+        message = error.get("message") or error.get("error") or error.get("detail")
+        if message:
+            return str(message)
+    if isinstance(error, str) and error.strip():
+        return error.strip()
+    message = payload.get("message") or payload.get("detail")
+    if message:
+        return str(message)
+    return "视频任务提交失败，请稍后重试"
+
+
+def _extract_upstream_video_task_id(payload: Dict[str, Any]) -> Optional[str]:
+    for key in ("id", "task_id"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _video_task_validation_error(
+    normalized: NormalizedGenerationRequest,
+) -> Optional[Dict[str, Any]]:
+    model_config = MODEL_CONFIG.get(normalized.model, {})
+    video_type = model_config.get("video_type")
+    min_images = int(model_config.get("min_images") or 0)
+    max_images = model_config.get("max_images")
+    max_images = int(max_images) if max_images is not None else None
+    image_count = len(normalized.images or [])
+    has_video_input = bool(normalized.video_media_id or normalized.video_bytes)
+    message: Optional[str] = None
+
+    if video_type == "i2v":
+        if image_count < min_images or (max_images is not None and image_count > max_images):
+            message = f"❌ 首尾帧模型需要 {min_images}-{max_images} 张图片,当前提供了 {image_count} 张"
+    elif video_type == "r2v":
+        if image_count < min_images or (max_images is not None and image_count > max_images):
+            message = f"❌ 多图视频模型需要 {min_images}-{max_images} 张参考图,当前提供了 {image_count} 张"
+    elif video_type == "v2v":
+        if not has_video_input:
+            message = "❌ 视频编辑模型需要提供参考视频"
+        elif image_count < min_images or (max_images is not None and image_count > max_images):
+            message = f"❌ 视频编辑模型需要 {min_images}-{max_images} 张参考图,当前提供了 {image_count} 张"
+        elif normalized.video_bytes:
+            try:
+                _validate_reference_video_duration(normalized.video_bytes)
+            except ValueError as exc:
+                message = f"❌ {exc}"
+    elif video_type == "extend" and not normalized.video_media_id:
+        message = "❌ 视频续写需要提供源视频的 mediaGenerationId，请在 image_url 中传入 extend://VIDEO_MEDIA_ID"
+
+    if not message:
+        return None
+    return {
+        "error": {
+            "message": message,
+            "type": "invalid_request_error",
+            "code": "generation_failed",
+            "status_code": 400,
+        }
+    }
+
+
+async def _create_deferred_async_video_task(
+    normalized: NormalizedGenerationRequest,
+    base_url_override: Optional[str] = None,
+) -> Dict[str, Any]:
+    handler = _ensure_generation_handler()
+    local_task_id = _new_deferred_video_task_id()
+    model_name = _video_model_response_name(normalized.model)
+    token = await handler.load_balancer.select_token(
+        for_video_generation=True,
+        model=normalized.model,
+        reserve=False,
+        enforce_concurrency_filter=False,
+        track_pending=False,
+    )
+    if token is None:
+        message = None
+        if hasattr(handler.load_balancer, "get_unavailable_reason"):
+            message = await handler.load_balancer.get_unavailable_reason(
+                for_video_generation=True,
+                model=normalized.model,
+            )
+        return {
+            "error": {
+                "message": message or "上游额度不足，暂无法生成视频。",
+                "type": "server_error",
+                "code": "generation_failed",
+                "status_code": 503,
+            }
+        }
+    if token.id is None:
+        return {
+            "error": {
+                "message": "上游账号状态异常，暂无法生成视频。",
+                "type": "server_error",
+                "code": "generation_failed",
+                "status_code": 503,
+            }
+        }
+
+    await handler.db.create_task(
+        Task(
+            task_id=local_task_id,
+            token_id=token.id,
+            model=model_name,
+            prompt=normalized.prompt,
+            status="processing",
+            progress=1,
+            watermark=normalized.watermark,
+        )
+    )
+    asyncio.create_task(
+        _run_deferred_async_video_task(
+            local_task_id=local_task_id,
+            normalized=normalized,
+            base_url_override=base_url_override,
+        )
+    )
+
+    return {
+        "id": local_task_id,
+        "object": "video",
+        "status": "processing",
+        "created_at": int(time.time()),
+        "model": model_name,
+        "progress": 1,
+    }
+
+
+async def _run_deferred_async_video_task(
+    *,
+    local_task_id: str,
+    normalized: NormalizedGenerationRequest,
+    base_url_override: Optional[str],
+) -> None:
+    handler = _ensure_generation_handler()
+    try:
+        result = await _collect_async_video_task_result(normalized, base_url_override)
+        if "error" in result:
+            await handler.db.update_task(
+                local_task_id,
+                status="failed",
+                progress=100,
+                error_message=_extract_error_message(result),
+                completed_at=time.time(),
+            )
+            return
+
+        upstream_task_id = _extract_upstream_video_task_id(result)
+        if not upstream_task_id:
+            await handler.db.update_task(
+                local_task_id,
+                status="failed",
+                progress=100,
+                error_message="视频任务提交失败：上游未返回 task_id",
+                completed_at=time.time(),
+            )
+            return
+
+        await _mirror_upstream_video_task(
+            local_task_id=local_task_id,
+            upstream_task_id=upstream_task_id,
+        )
+    except Exception as exc:
+        debug_logger.log_error(
+            f"[VIDEO DEFERRED] background submit failed task={local_task_id}: {exc}"
+        )
+        await handler.db.update_task(
+            local_task_id,
+            status="failed",
+            progress=100,
+            error_message=str(exc) or exc.__class__.__name__,
+            completed_at=time.time(),
+        )
+
+
+async def _mirror_upstream_video_task(
+    *,
+    local_task_id: str,
+    upstream_task_id: str,
+    timeout_seconds: float = 7200.0,
+    interval_seconds: float = 2.0,
+) -> None:
+    handler = _ensure_generation_handler()
+    deadline = time.monotonic() + max(60.0, timeout_seconds)
+    last_progress = 1
+
+    while time.monotonic() < deadline:
+        upstream_task = await handler.db.get_task(upstream_task_id)
+        if upstream_task is None:
+            await asyncio.sleep(interval_seconds)
+            continue
+
+        update_fields: Dict[str, Any] = {
+            "token_id": upstream_task.token_id,
+            "model": upstream_task.model,
+            "status": upstream_task.status,
+            "progress": max(int(upstream_task.progress or 0), last_progress),
+            "scene_id": upstream_task.scene_id,
+            "project_id": upstream_task.project_id,
+            "watermark": upstream_task.watermark,
+        }
+        if upstream_task.operations:
+            update_fields["operations"] = upstream_task.operations
+        if upstream_task.result_urls:
+            update_fields["result_urls"] = upstream_task.result_urls
+        if upstream_task.error_message:
+            update_fields["error_message"] = upstream_task.error_message
+        if upstream_task.status in {"completed", "failed"}:
+            update_fields["progress"] = 100
+            update_fields["completed_at"] = time.time()
+
+        last_progress = int(update_fields.get("progress") or last_progress)
+        await handler.db.update_task(local_task_id, **update_fields)
+
+        if upstream_task.status in {"completed", "failed"}:
+            return
+
+        await asyncio.sleep(interval_seconds)
+
+    await handler.db.update_task(
+        local_task_id,
+        status="failed",
+        progress=100,
+        error_message="视频任务提交后同步上游结果超时",
+        completed_at=time.time(),
+    )
+
+
 def _parse_handler_result(result: str) -> Dict[str, Any]:
     try:
         return json.loads(result)
@@ -1296,8 +1546,11 @@ async def create_video_task(
         normalized = await _normalize_video_create_payload(payload)
         if MODEL_CONFIG.get(normalized.model, {}).get("type") != "video":
             raise HTTPException(status_code=400, detail=f"Model is not a video model: {normalized.model}")
+        validation_error = _video_task_validation_error(normalized)
+        if validation_error:
+            return _build_openai_json_response(validation_error)
 
-        result = await _collect_async_video_task_result(
+        result = await _create_deferred_async_video_task(
             normalized,
             _get_request_base_url(raw_request),
         )
