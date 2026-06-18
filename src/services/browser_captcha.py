@@ -12,6 +12,7 @@ os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "0")
 
 import asyncio
 import time
+import threading
 import re
 import random
 import uuid
@@ -30,6 +31,9 @@ RECAPTCHA_RESOURCE_HOST_MARKERS = (
     "gstatic.cn",
     "recaptcha.net",
 )
+
+_ADSPOWER_API_REQUEST_LOCK = threading.Lock()
+_ADSPOWER_API_LAST_REQUEST_AT = 0.0
 
 
 def _is_recaptcha_resource_url(url: str) -> bool:
@@ -130,6 +134,14 @@ def _adspower_request_timeout() -> int:
         return 15
 
 
+def _adspower_request_min_interval_seconds() -> float:
+    value = _adspower_env("ADSPOWER_API_MIN_INTERVAL_MS", "1200")
+    try:
+        return max(0, min(10000, int(value))) / 1000
+    except Exception:
+        return 1.2
+
+
 def _adspower_restart_after_token_failures() -> int:
     value = _adspower_env("ADSPOWER_RESTART_AFTER_TOKEN_FAILURES", "3")
     try:
@@ -164,8 +176,16 @@ def _adspower_request_json(method: str, path: str, params: Optional[Dict[str, An
 
     request = urllib.request.Request(url, data=data, headers=headers, method=method.upper())
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    with opener.open(request, timeout=_adspower_request_timeout()) as response:
-        raw = response.read().decode("utf-8", errors="replace")
+    global _ADSPOWER_API_LAST_REQUEST_AT
+    with _ADSPOWER_API_REQUEST_LOCK:
+        interval = _adspower_request_min_interval_seconds()
+        if interval > 0:
+            wait_for = _ADSPOWER_API_LAST_REQUEST_AT + interval - time.monotonic()
+            if wait_for > 0:
+                time.sleep(wait_for)
+        _ADSPOWER_API_LAST_REQUEST_AT = time.monotonic()
+        with opener.open(request, timeout=_adspower_request_timeout()) as response:
+            raw = response.read().decode("utf-8", errors="replace")
     try:
         return json.loads(raw or "{}")
     except Exception:
