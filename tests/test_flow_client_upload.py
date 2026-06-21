@@ -1,4 +1,5 @@
 import unittest
+import base64
 from unittest.mock import AsyncMock, patch
 
 from src.services.flow_client import FlowClient
@@ -112,6 +113,43 @@ class FlowClientUploadImageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             request_calls[0]["json_data"]["clientContext"]["projectId"],
             "project-123",
+        )
+
+    async def test_project_scoped_upload_normalizes_image_after_invalid_argument(self):
+        client = FlowClient(proxy_manager=None)
+
+        request_calls = []
+        normalized_bytes = b"\xff\xd8\xffnormalized"
+
+        async def fake_make_request(**kwargs):
+            request_calls.append(kwargs)
+            if len(request_calls) == 1:
+                raise RuntimeError(
+                    "Flow API request failed: HTTP Error 400: Request contains an invalid argument."
+                )
+            return {
+                "media": {
+                    "name": "normalized-media-id",
+                }
+            }
+
+        client._make_request = AsyncMock(side_effect=fake_make_request)
+        client._convert_to_jpeg = lambda image_bytes: normalized_bytes  # type: ignore[method-assign]
+
+        media_id = await client.upload_image(
+            at="test-at",
+            image_bytes=JPEG_BYTES,
+            aspect_ratio="IMAGE_ASPECT_RATIO_LANDSCAPE",
+            project_id="project-123",
+        )
+
+        self.assertEqual(media_id, "normalized-media-id")
+        self.assertEqual(len(request_calls), 2)
+        self.assertTrue(request_calls[1]["url"].endswith("/flow/uploadImage"))
+        self.assertEqual(request_calls[1]["json_data"]["mimeType"], "image/jpeg")
+        self.assertEqual(
+            request_calls[1]["json_data"]["imageBytes"],
+            base64.b64encode(normalized_bytes).decode("utf-8"),
         )
 
     async def test_upload_without_project_id_keeps_legacy_fallback(self):

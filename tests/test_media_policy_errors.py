@@ -2,7 +2,9 @@ import unittest
 
 from src.core.media_errors import (
     is_media_policy_error,
+    is_project_image_upload_invalid_argument_error,
     media_generation_failure_response,
+    VIDEO_UPLOAD_INVALID_ARGUMENT_MESSAGE,
 )
 from src.services.flow_client import FlowClient
 from src.services.generation_handler import GenerationHandler
@@ -22,6 +24,30 @@ class MediaPolicyErrorTests(unittest.TestCase):
     def test_prominent_people_filter_is_policy_error(self):
         self.assertTrue(
             is_media_policy_error("PUBLIC_ERROR_PROMINENT_PEOPLE_FILTER_FAILED")
+        )
+
+    def test_generic_invalid_argument_is_not_policy_error(self):
+        self.assertFalse(
+            is_media_policy_error("HTTP Error 400: Request contains an invalid argument.")
+        )
+
+    def test_project_image_upload_invalid_argument_is_separate_error(self):
+        self.assertTrue(
+            is_project_image_upload_invalid_argument_error(
+                "Project-scoped image upload failed via /flow/uploadImage "
+                "(project_id=project-123, cause=Flow API request failed: "
+                "HTTP Error 400: Request contains an invalid argument.)"
+            )
+        )
+
+        handler = GenerationHandler.__new__(GenerationHandler)
+        self.assertEqual(
+            handler._normalize_error_message(
+                "Project-scoped image upload failed via /flow/uploadImage "
+                "(project_id=project-123, cause=Flow API request failed: "
+                "HTTP Error 400: Request contains an invalid argument.)"
+            ),
+            VIDEO_UPLOAD_INVALID_ARGUMENT_MESSAGE,
         )
 
     def test_flow_client_does_not_retry_media_policy_error(self):

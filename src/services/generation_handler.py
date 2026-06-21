@@ -13,7 +13,9 @@ from ..core.credits import (
 )
 from ..core.media_errors import (
     is_media_policy_error,
+    is_project_image_upload_invalid_argument_error,
     media_generation_failure_response,
+    VIDEO_UPLOAD_INVALID_ARGUMENT_MESSAGE,
 )
 from ..core.monitoring import record_generation_result
 from ..core.models import Task, RequestLog
@@ -1125,6 +1127,8 @@ class GenerationHandler:
 
     def _normalize_error_message(self, error_message: Any, max_length: int = 1000) -> str:
         """归一化错误文本，避免写入超长内容。"""
+        if is_project_image_upload_invalid_argument_error(error_message):
+            return VIDEO_UPLOAD_INVALID_ARGUMENT_MESSAGE
         text = str(error_message or "").strip() or "未知错误"
         if len(text) <= max_length:
             return text
@@ -1576,6 +1580,9 @@ class GenerationHandler:
                 await self._handle_quota_exhausted_error(token, raw_error_msg)
                 error_msg = quota_exhausted_message()
                 response_status_code = 503
+            elif generation_type == "video" and is_project_image_upload_invalid_argument_error(raw_error_msg):
+                error_msg = VIDEO_UPLOAD_INVALID_ARGUMENT_MESSAGE
+                response_status_code = 400
             elif generation_type in {"image", "video"} and is_media_policy_error(raw_error_msg):
                 error_msg, response_status_code = media_generation_failure_response(
                     generation_type,

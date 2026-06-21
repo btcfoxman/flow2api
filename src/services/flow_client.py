@@ -1013,17 +1013,49 @@ class FlowClient:
         if aspect_ratio.startswith("VIDEO_"):
             aspect_ratio = aspect_ratio.replace("VIDEO_", "IMAGE_")
 
-        # 自动检测图片 MIME 类型
-        mime_type = self._detect_image_mime_type(image_bytes)
-        image_size = len(image_bytes)
+        upload_image_bytes = image_bytes
+        normalized_upload_attempted = False
 
-        # 编码为base64 (去掉前缀)
-        image_base64 = base64.b64encode(image_bytes).decode('utf-8')
+        def _build_upload_payload(current_image_bytes: bytes) -> tuple[str, int, str, Dict[str, Any], Dict[str, Any]]:
+            # 自动检测图片 MIME 类型
+            current_mime_type = self._detect_image_mime_type(current_image_bytes)
+            current_image_size = len(current_image_bytes)
+
+            # 编码为base64 (去掉前缀)
+            current_image_base64 = base64.b64encode(current_image_bytes).decode('utf-8')
+            current_ext = "png" if "png" in current_mime_type else "jpg"
+            current_upload_file_name = f"flow2api_upload_{int(time.time() * 1000)}.{current_ext}"
+
+            current_new_json_data = {
+                "clientContext": dict(new_client_context),
+                "fileName": current_upload_file_name,
+                "imageBytes": current_image_base64,
+                "isHidden": False,
+                "isUserUploaded": True,
+                "mimeType": current_mime_type
+            }
+            current_legacy_json_data = {
+                "imageInput": {
+                    "rawImageBytes": current_image_base64,
+                    "mimeType": current_mime_type,
+                    "isUserUploaded": True,
+                    "aspectRatio": aspect_ratio
+                },
+                "clientContext": {
+                    "sessionId": self._generate_session_id(),
+                    "tool": "ASSET_MANAGER"
+                }
+            }
+            return (
+                current_mime_type,
+                current_image_size,
+                current_image_base64,
+                current_new_json_data,
+                current_legacy_json_data,
+            )
 
         # 优先尝试新版上传接口: /v1/flow/uploadImage
         # 若失败则自动回退到旧接口,保证兼容
-        ext = "png" if "png" in mime_type else "jpg"
-        upload_file_name = f"flow2api_upload_{int(time.time() * 1000)}.{ext}"
         new_url = f"{self.api_base_url}/flow/uploadImage"
         normalized_project_id = str(project_id or "").strip()
         new_client_context = {
@@ -1032,29 +1064,9 @@ class FlowClient:
         if normalized_project_id:
             new_client_context["projectId"] = normalized_project_id
 
-        new_json_data = {
-            "clientContext": new_client_context,
-            "fileName": upload_file_name,
-            "imageBytes": image_base64,
-            "isHidden": False,
-            "isUserUploaded": True,
-            "mimeType": mime_type
-        }
-
         # 兼容回退：旧接口 :uploadUserImage
         legacy_url = f"{self.api_base_url}:uploadUserImage"
-        legacy_json_data = {
-            "imageInput": {
-                "rawImageBytes": image_base64,
-                "mimeType": mime_type,
-                "isUserUploaded": True,
-                "aspectRatio": aspect_ratio
-            },
-            "clientContext": {
-                "sessionId": self._generate_session_id(),
-                "tool": "ASSET_MANAGER"
-            }
-        }
+        mime_type, image_size, _, new_json_data, legacy_json_data = _build_upload_payload(upload_image_bytes)
         max_retries = self._captcha_aware_max_retries()
         last_error: Optional[Exception] = None
 
@@ -1104,6 +1116,30 @@ class FlowClient:
 
                 # 旧接口不携带 projectId，带项目上下文的上传一旦回退就可能把图片挂到错误项目。
                 if normalized_project_id:
+                    if (
+                        not normalized_upload_attempted
+                        and "request contains an invalid argument" in upload_error_summary.lower()
+                    ):
+                        normalized_upload_attempted = True
+                        try:
+                            normalized_image_bytes = self._convert_to_jpeg(upload_image_bytes)
+                        except Exception as convert_error:
+                            debug_logger.log_warning(
+                                f"[UPLOAD] Failed to normalize image after upload 400 "
+                                f"(project_id={normalized_project_id}, mime={mime_type}, "
+                                f"bytes={image_size}, cause={self._summarize_exception(convert_error)})"
+                            )
+                        else:
+                            upload_image_bytes = normalized_image_bytes
+                            mime_type, image_size, _, new_json_data, legacy_json_data = _build_upload_payload(upload_image_bytes)
+                            debug_logger.log_warning(
+                                f"[UPLOAD] /flow/uploadImage returned invalid argument; "
+                                f"retrying with normalized JPEG "
+                                f"(project_id={normalized_project_id}, bytes={image_size})"
+                            )
+                            await asyncio.sleep(0.2)
+                            continue
+
                     if retry_reason and retry_attempt < max_retries - 1:
                         debug_logger.log_warning(
                             f"[UPLOAD] Project-scoped upload 遇到{retry_reason}，准备重试新版接口 "

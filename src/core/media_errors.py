@@ -8,7 +8,6 @@ MEDIA_POLICY_ERROR_KEYWORDS = (
     "unsafe_generation",
     "public_error_prominent_people_filter_failed",
     "prominent_people_filter_failed",
-    "request contains an invalid ar",
 )
 
 IMAGE_POLICY_FAILURE_MESSAGE = (
@@ -29,12 +28,26 @@ MEDIA_POLICY_FAILURE_MESSAGE = (
     "\u6574\u63d0\u793a\u8bcd\u6216\u53c2\u8003\u7d20\u6750"
     "\u540e\u91cd\u8bd5"
 )
+VIDEO_UPLOAD_INVALID_ARGUMENT_MESSAGE = (
+    "\u53c2\u8003\u56fe\u4e0a\u4f20\u88ab\u4e0a\u6e38\u62d2"
+    "\u7edd\uff0c\u8bf7\u66f4\u6362\u6216\u91cd\u65b0\u538b"
+    "\u7f29\u53c2\u8003\u56fe\u540e\u91cd\u8bd5"
+)
 
 
 def is_media_policy_error(error_message: Any) -> bool:
     """Return True for upstream content-safety/policy rejections."""
     error_lower = str(error_message or "").strip().lower()
     return any(keyword in error_lower for keyword in MEDIA_POLICY_ERROR_KEYWORDS)
+
+
+def is_project_image_upload_invalid_argument_error(error_message: Any) -> bool:
+    """Return True for project-scoped reference-image upload 400s."""
+    error_lower = str(error_message or "").strip().lower()
+    return (
+        "project-scoped image upload failed via /flow/uploadimage" in error_lower
+        and "request contains an invalid argument" in error_lower
+    )
 
 
 def media_policy_failure_message(media_type: str) -> str:
