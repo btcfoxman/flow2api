@@ -614,15 +614,9 @@ class FlowClient:
     def _should_fallback_browser_video_request(self, error_message: str) -> bool:
         """Return whether a browser-fetched video submit should retry via the HTTP client."""
         error_lower = (error_message or "").lower()
-        if self._is_browser_fetch_transport_error(error_lower) or self._is_browser_ref_unbound_error(error_lower):
-            return True
-        return any(
-            keyword in error_lower
-            for keyword in [
-                "recaptcha evaluation failed",
-                "public_error_unusual_activity",
-                "too_much_traffic",
-            ]
+        return (
+            self._is_browser_fetch_transport_error(error_lower)
+            or self._is_browser_ref_unbound_error(error_lower)
         )
 
     @staticmethod

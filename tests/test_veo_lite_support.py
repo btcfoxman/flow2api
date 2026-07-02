@@ -386,7 +386,7 @@ class VeoLiteFlowClientTests(unittest.IsolatedAsyncioTestCase):
         self.client._get_recaptcha_token = AsyncMock(return_value=("recaptcha-token", "browser-1"))
         self.client._notify_browser_captcha_request_finished = AsyncMock()
 
-    async def test_video_api_request_falls_back_when_browser_submit_hits_recaptcha_traffic_error(self):
+    async def test_video_api_request_does_not_fallback_when_browser_submit_hits_recaptcha_traffic_error(self):
         original_method = config.captcha_method
         config.set_captcha_method("adspower")
         self.client._set_request_fingerprint({
@@ -403,38 +403,28 @@ class VeoLiteFlowClientTests(unittest.IsolatedAsyncioTestCase):
                     "PUBLIC_ERROR_UNUSUAL_ACTIVITY_TOO_MUCH_TRAFFIC: reCAPTCHA evaluation failed"
                 )
 
-        async def fake_make_request(method, url, json_data, use_at, at_token, **kwargs):
-            captured["http_request"] = {
-                "method": method,
-                "url": url,
-                "json_data": json_data,
-                "use_at": use_at,
-                "at_token": at_token,
-                "kwargs": kwargs,
-            }
-            return {"operations": [{"operation": {"name": "task-fallback"}}]}
-
-        self.client._make_request = AsyncMock(side_effect=fake_make_request)
+        self.client._make_request = AsyncMock()
         try:
             with patch(
                 "src.services.browser_captcha.BrowserCaptchaService.get_instance",
                 AsyncMock(return_value=FakeBrowserCaptchaService()),
             ):
-                result = await self.client._make_video_api_request(
-                    url="https://aisandbox-pa.googleapis.com/v1/video:batchAsyncGenerateVideoEditVideo",
-                    json_data={"requests": [{"videoModelKey": "abra_edit"}]},
-                    at="at-token",
-                    timeout=10,
-                )
+                with self.assertRaisesRegex(
+                    Exception,
+                    "Flow browser API request failed: PUBLIC_ERROR_UNUSUAL_ACTIVITY_TOO_MUCH_TRAFFIC",
+                ):
+                    await self.client._make_video_api_request(
+                        url="https://aisandbox-pa.googleapis.com/v1/video:batchAsyncGenerateVideoEditVideo",
+                        json_data={"requests": [{"videoModelKey": "abra_edit"}]},
+                        at="at-token",
+                        timeout=10,
+                    )
         finally:
             config.set_captcha_method(original_method)
             self.client.clear_request_fingerprint()
 
         self.assertIn("browser_fetch", captured)
-        self.assertEqual(captured["http_request"]["method"], "POST")
-        self.assertTrue(captured["http_request"]["use_at"])
-        self.assertEqual(captured["http_request"]["at_token"], "at-token")
-        self.assertEqual(result["operations"][0]["operation"]["name"], "task-fallback")
+        self.client._make_request.assert_not_awaited()
 
     async def test_update_video_offset_uses_labs_trpc_payload(self):
         captured = {}

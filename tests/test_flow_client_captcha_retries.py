@@ -207,6 +207,20 @@ class FlowClientBrowserFetchTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+    def test_recaptcha_evaluation_error_does_not_allow_http_fallback(self):
+        client = FlowClient(None)
+
+        self.assertFalse(
+            client._should_fallback_browser_video_request(
+                "PUBLIC_ERROR_UNUSUAL_ACTIVITY: reCAPTCHA evaluation failed"
+            )
+        )
+        self.assertFalse(
+            client._should_fallback_browser_video_request(
+                "PUBLIC_ERROR_UNUSUAL_ACTIVITY_TOO_MUCH_TRAFFIC: reCAPTCHA evaluation failed"
+            )
+        )
+
     async def test_missing_recaptcha_token_retries_until_configured_max_attempts(self):
         config.set_captcha_method("adspower")
         config.set_flow_max_retries(4)
