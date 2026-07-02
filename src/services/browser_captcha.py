@@ -166,6 +166,14 @@ def _adspower_restart_cooldown_seconds() -> int:
         return 300
 
 
+def _adspower_recaptcha_failure_slot_cooldown_seconds() -> int:
+    value = _adspower_env("ADSPOWER_RECAPTCHA_FAILURE_SLOT_COOLDOWN_SECONDS", "180")
+    try:
+        return max(0, min(1800, int(value)))
+    except Exception:
+        return 180
+
+
 def _adspower_request_json(method: str, path: str, params: Optional[Dict[str, Any]] = None, body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     base_url = _adspower_api_base_url()
     url = f"{base_url}{path}"
@@ -2624,6 +2632,7 @@ class BrowserCaptchaService:
         self._slot_allocation_lock = asyncio.Lock()
         self._slot_reservations: Dict[int, int] = {}
         self._bound_request_slots: Dict[str, Dict[str, Any]] = {}
+        self._slot_cooldowns: Dict[int, float] = {}
         
         # ???????
         self._browser_count = 1  # ?? 1 ?????????
@@ -2892,6 +2901,24 @@ class BrowserCaptchaService:
         browser = self._browsers.get(slot_id)
         return bool(browser and getattr(browser, 'is_busy', lambda: False)())
 
+    def _is_slot_on_cooldown_locked(self, slot_id: int) -> bool:
+        until = self._slot_cooldowns.get(slot_id)
+        if not until:
+            return False
+        if until <= time.monotonic():
+            self._slot_cooldowns.pop(slot_id, None)
+            return False
+        return True
+
+    def _put_slot_on_cooldown_locked(self, slot_id: int, seconds: int, reason: str):
+        if seconds <= 0:
+            return
+        until = time.monotonic() + seconds
+        self._slot_cooldowns[slot_id] = until
+        debug_logger.log_warning(
+            f"[BrowserCaptcha] browser {slot_id} temporarily cooled down for {seconds}s, reason={reason}"
+        )
+
     def _has_warmed_browser_for_allocation(self, slot_id: int) -> bool:
         browser = self._browsers.get(slot_id)
         return bool(browser and getattr(browser, 'has_shared_browser', lambda: False)())
@@ -2979,10 +3006,15 @@ class BrowserCaptchaService:
                 async with self._browsers_lock:
                     warmed_idle_slot: Optional[int] = None
                     idle_slot: Optional[int] = None
+                    cooled_idle_slot: Optional[int] = None
 
                     for offset in range(self._browser_count):
                         slot_id = (self._round_robin_index + offset) % self._browser_count
                         if self._is_slot_busy_for_allocation(slot_id):
+                            continue
+                        if self._is_slot_on_cooldown_locked(slot_id):
+                            if cooled_idle_slot is None:
+                                cooled_idle_slot = slot_id
                             continue
 
                         if idle_slot is None:
@@ -2992,6 +3024,8 @@ class BrowserCaptchaService:
                             break
 
                     selected_slot = warmed_idle_slot if warmed_idle_slot is not None else idle_slot
+                    if selected_slot is None:
+                        selected_slot = cooled_idle_slot
                     if selected_slot is not None:
                         self._round_robin_index = (selected_slot + 1) % self._browser_count
                         self._reserve_slot_locked(selected_slot)
@@ -3288,6 +3322,15 @@ class BrowserCaptchaService:
             if browser_id is not None:
                 debug_logger.log_info(
                     f"[BrowserCaptcha] browser {browser_id} failure reported, reason={error_reason or 'unknown'}, recycle={should_recycle}"
+                )
+
+        if browser_id is not None and should_recycle and has_recaptcha and not runtime_closed:
+            cooldown_seconds = _adspower_recaptcha_failure_slot_cooldown_seconds()
+            async with self._slot_allocation_lock:
+                self._put_slot_on_cooldown_locked(
+                    browser_id,
+                    cooldown_seconds,
+                    error_reason or "recaptcha_evaluation_failed",
                 )
 
         if browser and should_recycle:

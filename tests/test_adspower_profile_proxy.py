@@ -608,6 +608,53 @@ class BrowserCaptchaServiceRuntimeClosedTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(fake_browser.recycle_calls, [("browser runtime closed", False)])
 
+    async def test_recaptcha_error_cools_slot_and_next_token_uses_other_slot(self):
+        service = BrowserCaptchaService(db=None)
+        service._check_available = lambda: None
+        service._browser_count = 2
+        fake_browser_0 = _FakeServiceBrowser(token="token-0")
+        fake_browser_1 = _FakeServiceBrowser(token="token-1")
+        service._browsers[0] = fake_browser_0
+        service._browsers[1] = fake_browser_1
+
+        await service.report_error(
+            "0:request-ref",
+            error_reason="PUBLIC_ERROR_UNUSUAL_ACTIVITY_TOO_MUCH_TRAFFIC: reCAPTCHA evaluation failed",
+        )
+        service._round_robin_index = 0
+
+        token, browser_ref = await service.get_token("project-1", action="VIDEO_GENERATION")
+
+        self.assertEqual(token, "token-1")
+        self.assertTrue(str(browser_ref).startswith("1:"))
+        self.assertIn(0, service._slot_cooldowns)
+        self.assertEqual(
+            fake_browser_0.recycle_calls,
+            [
+                (
+                    "PUBLIC_ERROR_UNUSUAL_ACTIVITY_TOO_MUCH_TRAFFIC: reCAPTCHA evaluation failed",
+                    True,
+                )
+            ],
+        )
+
+    async def test_single_cooled_slot_can_still_be_used_when_no_alternative_exists(self):
+        service = BrowserCaptchaService(db=None)
+        service._check_available = lambda: None
+        service._browser_count = 1
+        fake_browser = _FakeServiceBrowser(token="token-0")
+        service._browsers[0] = fake_browser
+
+        await service.report_error(
+            0,
+            error_reason="PUBLIC_ERROR_UNUSUAL_ACTIVITY: reCAPTCHA evaluation failed",
+        )
+
+        token, browser_ref = await service.get_token("project-1", action="VIDEO_GENERATION")
+
+        self.assertEqual(token, "token-0")
+        self.assertTrue(str(browser_ref).startswith("0:"))
+
     async def test_fetch_json_requires_active_bound_request_ref(self):
         service = BrowserCaptchaService(db=None)
         fake_browser = _FakeServiceBrowser()
