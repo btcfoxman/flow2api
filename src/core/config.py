@@ -460,6 +460,25 @@ class Config:
         self._config["captcha"]["captcha_method"] = method
 
     @property
+    def captcha_max_retries(self) -> int:
+        """Max attempts for captcha-backed generation submit retries."""
+        retries = self._config.get("captcha", {}).get("captcha_max_retries", 5)
+        try:
+            return max(1, min(20, int(retries)))
+        except Exception:
+            return 5
+
+    def set_captcha_max_retries(self, retries: int):
+        """Set max attempts for captcha-backed generation submit retries."""
+        if "captcha" not in self._config:
+            self._config["captcha"] = {}
+        try:
+            normalized = max(1, min(20, int(retries)))
+        except Exception:
+            normalized = 5
+        self._config["captcha"]["captcha_max_retries"] = normalized
+
+    @property
     def browser_launch_background(self) -> bool:
         """有头浏览器打码是否默认后台启动，避免抢占前台窗口。"""
         return self._config.get("captcha", {}).get("browser_launch_background", True)

@@ -9,22 +9,33 @@ class FlowClientCaptchaRetriesTests(unittest.TestCase):
     def setUp(self):
         self._original_method = config.captcha_method
         self._original_max_retries = config.flow_max_retries
+        self._original_captcha_max_retries = config.captcha_max_retries
 
     def tearDown(self):
         config.set_captcha_method(self._original_method)
         config.set_flow_max_retries(self._original_max_retries)
+        config.set_captcha_max_retries(self._original_captcha_max_retries)
 
-    def test_adspower_uses_recovery_retries_when_configured_as_one(self):
+    def test_adspower_uses_captcha_retry_budget(self):
         config.set_captcha_method("adspower")
         config.set_flow_max_retries(1)
+        config.set_captcha_max_retries(5)
 
-        self.assertEqual(FlowClient(None)._captcha_aware_max_retries(), 3)
+        self.assertEqual(FlowClient(None)._captcha_aware_max_retries(), 5)
 
-    def test_api_captcha_keeps_configured_retry_count(self):
+    def test_api_captcha_uses_captcha_retry_budget(self):
         config.set_captcha_method("yescaptcha")
         config.set_flow_max_retries(1)
+        config.set_captcha_max_retries(4)
 
-        self.assertEqual(FlowClient(None)._captcha_aware_max_retries(), 1)
+        self.assertEqual(FlowClient(None)._captcha_aware_max_retries(), 4)
+
+    def test_non_captcha_method_keeps_flow_retry_budget(self):
+        config.set_captcha_method("extension")
+        config.set_flow_max_retries(2)
+        config.set_captcha_max_retries(5)
+
+        self.assertEqual(FlowClient(None)._captcha_aware_max_retries(), 2)
 
     def test_browser_runtime_closed_error_is_retryable(self):
         reason = FlowClient(None)._get_retry_reason(
@@ -53,10 +64,12 @@ class FlowClientBrowserFetchTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self._original_method = config.captcha_method
         self._original_max_retries = config.flow_max_retries
+        self._original_captcha_max_retries = config.captcha_max_retries
 
     def tearDown(self):
         config.set_captcha_method(self._original_method)
         config.set_flow_max_retries(self._original_max_retries)
+        config.set_captcha_max_retries(self._original_captcha_max_retries)
 
     async def test_adspower_token_binds_browser_ref_to_fingerprint(self):
         config.set_captcha_method("adspower")
@@ -223,7 +236,7 @@ class FlowClientBrowserFetchTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_missing_recaptcha_token_retries_until_configured_max_attempts(self):
         config.set_captcha_method("adspower")
-        config.set_flow_max_retries(4)
+        config.set_captcha_max_retries(4)
         client = FlowClient(None)
         client._acquire_video_launch_gate = AsyncMock(return_value=(True, 0, 0))
         client._release_video_launch_gate = AsyncMock()
@@ -256,7 +269,7 @@ class FlowClientBrowserFetchTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_missing_recaptcha_token_fails_after_configured_max_attempts(self):
         config.set_captcha_method("adspower")
-        config.set_flow_max_retries(4)
+        config.set_captcha_max_retries(4)
         client = FlowClient(None)
         client._acquire_video_launch_gate = AsyncMock(return_value=(True, 0, 0))
         client._release_video_launch_gate = AsyncMock()
@@ -278,7 +291,7 @@ class FlowClientBrowserFetchTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_browser_fetch_failure_retries_video_submit_with_new_recaptcha_token(self):
         config.set_captcha_method("adspower")
-        config.set_flow_max_retries(4)
+        config.set_captcha_max_retries(4)
         client = FlowClient(None)
         client._acquire_video_launch_gate = AsyncMock(return_value=(True, 0, 0))
         client._release_video_launch_gate = AsyncMock()

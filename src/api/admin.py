@@ -1769,6 +1769,7 @@ async def update_captcha_config(
     from ..services.browser_captcha import parse_adspower_profile_ids, validate_browser_proxy_url
 
     captcha_method = request.get("captcha_method")
+    captcha_max_retries = request.get("captcha_max_retries", 5)
     yescaptcha_api_key = request.get("yescaptcha_api_key")
     yescaptcha_base_url = request.get("yescaptcha_base_url")
     yescaptcha_task_type = normalize_yescaptcha_task_type(request.get("yescaptcha_task_type"))
@@ -1818,6 +1819,10 @@ async def update_captcha_config(
         adspower_api_url = "http://127.0.0.1:50325"
 
     try:
+        captcha_max_retries = max(1, min(20, int(captcha_max_retries or 5)))
+    except Exception:
+        return {"success": False, "message": "打码重试次数必须是 1-20 的整数"}
+    try:
         remote_browser_timeout = max(5, int(remote_browser_timeout or 60))
     except Exception:
         return {"success": False, "message": "远程打码超时时间必须是整数秒"}
@@ -1848,6 +1853,7 @@ async def update_captcha_config(
 
     await db.update_captcha_config(
         captcha_method=captcha_method,
+        captcha_max_retries=captcha_max_retries,
         yescaptcha_api_key=yescaptcha_api_key,
         yescaptcha_base_url=yescaptcha_base_url,
         yescaptcha_task_type=yescaptcha_task_type,
@@ -1905,6 +1911,7 @@ async def get_captcha_config(token: str = Depends(verify_admin_token)):
     captcha_config = await db.get_captcha_config()
     return {
         "captcha_method": captcha_config.captcha_method,
+        "captcha_max_retries": captcha_config.captcha_max_retries,
         "yescaptcha_api_key": captcha_config.yescaptcha_api_key,
         "yescaptcha_base_url": captcha_config.yescaptcha_base_url,
         "yescaptcha_task_type": captcha_config.yescaptcha_task_type,

@@ -203,6 +203,7 @@ class CaptchaConfig(BaseModel):
 
     id: int = 1
     captcha_method: str = "adspower"  # yescaptcha/capmonster/ezcaptcha/capsolver/browser/personal/remote_browser/adspower
+    captcha_max_retries: int = 5
     yescaptcha_api_key: str = ""
     yescaptcha_base_url: str = "https://api.yescaptcha.com"
     yescaptcha_task_type: str = "RecaptchaV3TaskProxylessM1"

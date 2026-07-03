@@ -273,6 +273,7 @@ class Database:
         count = await cursor.fetchone()
         if count[0] == 0:
             captcha_method = "adspower"
+            captcha_max_retries = 5
             yescaptcha_api_key = ""
             yescaptcha_base_url = "https://api.yescaptcha.com"
             yescaptcha_task_type = DEFAULT_YESCAPTCHA_TASK_TYPE
@@ -294,6 +295,7 @@ class Database:
             if config_dict:
                 captcha_config = config_dict.get("captcha", {})
                 captcha_method = captcha_config.get("captcha_method", "adspower")
+                captcha_max_retries = captcha_config.get("captcha_max_retries", 5)
                 yescaptcha_api_key = captcha_config.get("yescaptcha_api_key", "")
                 yescaptcha_base_url = captcha_config.get("yescaptcha_base_url", "https://api.yescaptcha.com")
                 yescaptcha_task_type = normalize_yescaptcha_task_type(captcha_config.get("yescaptcha_task_type"))
@@ -311,6 +313,10 @@ class Database:
                 personal_max_resident_tabs = captcha_config.get("personal_max_resident_tabs", 5)
                 browser_personal_fresh_restart_every_n_solves = captcha_config.get("browser_personal_fresh_restart_every_n_solves", 10)
                 personal_idle_tab_ttl_seconds = captcha_config.get("personal_idle_tab_ttl_seconds", 600)
+            try:
+                captcha_max_retries = max(1, min(20, int(captcha_max_retries)))
+            except Exception:
+                captcha_max_retries = 5
             try:
                 remote_browser_timeout = max(5, int(remote_browser_timeout))
             except Exception:
@@ -338,7 +344,7 @@ class Database:
 
             await db.execute("""
                 INSERT INTO captcha_config (
-                    id, captcha_method, yescaptcha_api_key, yescaptcha_base_url,
+                    id, captcha_method, captcha_max_retries, yescaptcha_api_key, yescaptcha_base_url,
                     yescaptcha_task_type,
                     remote_browser_base_url, remote_browser_api_key, remote_browser_timeout,
                     adspower_api_url, adspower_api_key, adspower_api_use_auth,
@@ -347,9 +353,10 @@ class Database:
                     personal_max_resident_tabs, browser_personal_fresh_restart_every_n_solves,
                     personal_idle_tab_ttl_seconds
                 )
-                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 captcha_method,
+                captcha_max_retries,
                 yescaptcha_api_key,
                 yescaptcha_base_url,
                 yescaptcha_task_type,
@@ -468,6 +475,7 @@ class Database:
                     CREATE TABLE captcha_config (
                         id INTEGER PRIMARY KEY DEFAULT 1,
                         captcha_method TEXT DEFAULT 'adspower',
+                        captcha_max_retries INTEGER DEFAULT 5,
                         yescaptcha_api_key TEXT DEFAULT '',
                         yescaptcha_base_url TEXT DEFAULT 'https://api.yescaptcha.com',
                         yescaptcha_task_type TEXT DEFAULT 'RecaptchaV3TaskProxylessM1',
@@ -596,6 +604,7 @@ class Database:
             # Check and add missing columns to captcha_config table
             if await self._table_exists(db, "captcha_config"):
                 captcha_columns_to_add = [
+                    ("captcha_max_retries", "INTEGER DEFAULT 5"),
                     ("browser_proxy_enabled", "BOOLEAN DEFAULT 0"),
                     ("browser_proxy_url", "TEXT"),
                     ("yescaptcha_task_type", "TEXT DEFAULT 'RecaptchaV3TaskProxylessM1'"),
@@ -924,6 +933,7 @@ class Database:
                 CREATE TABLE IF NOT EXISTS captcha_config (
                     id INTEGER PRIMARY KEY DEFAULT 1,
                     captcha_method TEXT DEFAULT 'adspower',
+                    captcha_max_retries INTEGER DEFAULT 5,
                     yescaptcha_api_key TEXT DEFAULT '',
                     yescaptcha_base_url TEXT DEFAULT 'https://api.yescaptcha.com',
                     yescaptcha_task_type TEXT DEFAULT 'RecaptchaV3TaskProxylessM1',
@@ -2089,6 +2099,7 @@ class Database:
         captcha_config = await self.get_captcha_config()
         if captcha_config:
             config.set_captcha_method(captcha_config.captcha_method)
+            config.set_captcha_max_retries(captcha_config.captcha_max_retries)
             config.set_yescaptcha_api_key(captcha_config.yescaptcha_api_key)
             config.set_yescaptcha_base_url(captcha_config.yescaptcha_base_url)
             config.set_yescaptcha_task_type(captcha_config.yescaptcha_task_type)
@@ -2341,6 +2352,7 @@ class Database:
     async def update_captcha_config(
         self,
         captcha_method: str = None,
+        captcha_max_retries: int = None,
         yescaptcha_api_key: str = None,
         yescaptcha_base_url: str = None,
         yescaptcha_task_type: str = None,
@@ -2376,6 +2388,7 @@ class Database:
             if row:
                 current = dict(row)
                 new_method = captcha_method if captcha_method is not None else current.get("captcha_method", "adspower")
+                new_captcha_max_retries = captcha_max_retries if captcha_max_retries is not None else current.get("captcha_max_retries", 5)
                 new_yes_key = yescaptcha_api_key if yescaptcha_api_key is not None else current.get("yescaptcha_api_key", "")
                 new_yes_url = yescaptcha_base_url if yescaptcha_base_url is not None else current.get("yescaptcha_base_url", "https://api.yescaptcha.com")
                 new_yes_task_type = normalize_yescaptcha_task_type(
@@ -2407,6 +2420,7 @@ class Database:
                     else current.get("browser_personal_fresh_restart_every_n_solves", 10)
                 )
                 new_personal_idle_ttl = personal_idle_tab_ttl_seconds if personal_idle_tab_ttl_seconds is not None else current.get("personal_idle_tab_ttl_seconds", 600)
+                new_captcha_max_retries = max(1, min(20, int(new_captcha_max_retries)))
                 new_remote_timeout = max(5, int(new_remote_timeout)) if new_remote_timeout is not None else 60
                 new_browser_count = max(1, min(20, int(new_browser_count)))
                 new_personal_project_pool_size = max(1, min(50, int(new_personal_project_pool_size)))
@@ -2416,7 +2430,7 @@ class Database:
 
                 await db.execute("""
                     UPDATE captcha_config
-                    SET captcha_method = ?, yescaptcha_api_key = ?, yescaptcha_base_url = ?,
+                    SET captcha_method = ?, captcha_max_retries = ?, yescaptcha_api_key = ?, yescaptcha_base_url = ?,
                         yescaptcha_task_type = ?,
                         capmonster_api_key = ?, capmonster_base_url = ?,
                         ezcaptcha_api_key = ?, ezcaptcha_base_url = ?,
@@ -2431,7 +2445,7 @@ class Database:
                         personal_idle_tab_ttl_seconds = ?,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = 1
-                """, (new_method, new_yes_key, new_yes_url, new_yes_task_type,
+                """, (new_method, new_captcha_max_retries, new_yes_key, new_yes_url, new_yes_task_type,
                       new_cap_key, new_cap_url,
                       new_ez_key, new_ez_url, new_cs_key, new_cs_url,
                       (new_remote_base_url or "").strip(), (new_remote_api_key or "").strip(), new_remote_timeout,
@@ -2445,6 +2459,7 @@ class Database:
                       new_personal_max_tabs, new_personal_fresh_restart_every, new_personal_idle_ttl))
             else:
                 new_method = captcha_method if captcha_method is not None else "adspower"
+                new_captcha_max_retries = captcha_max_retries if captcha_max_retries is not None else 5
                 new_yes_key = yescaptcha_api_key if yescaptcha_api_key is not None else ""
                 new_yes_url = yescaptcha_base_url if yescaptcha_base_url is not None else "https://api.yescaptcha.com"
                 new_yes_task_type = normalize_yescaptcha_task_type(yescaptcha_task_type)
@@ -2474,6 +2489,7 @@ class Database:
                     else 10
                 )
                 new_personal_idle_ttl = personal_idle_tab_ttl_seconds if personal_idle_tab_ttl_seconds is not None else 600
+                new_captcha_max_retries = max(1, min(20, int(new_captcha_max_retries)))
                 new_remote_timeout = max(5, int(new_remote_timeout))
                 new_browser_count = max(1, min(20, int(new_browser_count)))
                 new_personal_project_pool_size = max(1, min(50, int(new_personal_project_pool_size)))
@@ -2482,7 +2498,7 @@ class Database:
                 new_personal_idle_ttl = max(60, int(new_personal_idle_ttl))
 
                 await db.execute("""
-                    INSERT INTO captcha_config (id, captcha_method, yescaptcha_api_key, yescaptcha_base_url,
+                    INSERT INTO captcha_config (id, captcha_method, captcha_max_retries, yescaptcha_api_key, yescaptcha_base_url,
                         yescaptcha_task_type,
                         capmonster_api_key, capmonster_base_url, ezcaptcha_api_key, ezcaptcha_base_url,
                         capsolver_api_key, capsolver_base_url,
@@ -2493,8 +2509,8 @@ class Database:
                         personal_project_pool_size,
                         personal_max_resident_tabs, browser_personal_fresh_restart_every_n_solves,
                         personal_idle_tab_ttl_seconds)
-                    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (new_method, new_yes_key, new_yes_url, new_yes_task_type,
+                    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (new_method, new_captcha_max_retries, new_yes_key, new_yes_url, new_yes_task_type,
                       new_cap_key, new_cap_url,
                       new_ez_key, new_ez_url, new_cs_key, new_cs_url,
                       (new_remote_base_url or "").strip(), (new_remote_api_key or "").strip(), new_remote_timeout,

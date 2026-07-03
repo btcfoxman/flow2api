@@ -12,12 +12,14 @@ class GenerationConfigMaxRetriesTests(unittest.IsolatedAsyncioTestCase):
         self._original_image_timeout = config.image_timeout
         self._original_video_timeout = config.video_timeout
         self._original_max_retries = config.flow_max_retries
+        self._original_captcha_max_retries = config.captcha_max_retries
         await self.db.init_db()
 
     async def asyncTearDown(self):
         config.set_image_timeout(self._original_image_timeout)
         config.set_video_timeout(self._original_video_timeout)
         config.set_flow_max_retries(self._original_max_retries)
+        config.set_captcha_max_retries(self._original_captcha_max_retries)
         self._temp_dir.cleanup()
 
     async def test_init_config_from_toml_persists_flow_max_retries(self):
@@ -59,6 +61,27 @@ class GenerationConfigMaxRetriesTests(unittest.IsolatedAsyncioTestCase):
         await self.db.reload_config_to_memory()
 
         self.assertEqual(config.flow_max_retries, 9)
+
+    async def test_init_config_from_toml_persists_captcha_max_retries(self):
+        await self.db.init_config_from_toml(
+            {
+                "captcha": {
+                    "captcha_method": "adspower",
+                    "captcha_max_retries": 6,
+                },
+            },
+            is_first_startup=True,
+        )
+
+        captcha_config = await self.db.get_captcha_config()
+
+        self.assertEqual(captcha_config.captcha_max_retries, 6)
+
+    async def test_reload_config_to_memory_syncs_captcha_max_retries(self):
+        await self.db.update_captcha_config(captcha_max_retries=7)
+        await self.db.reload_config_to_memory()
+
+        self.assertEqual(config.captcha_max_retries, 7)
 
 
 if __name__ == "__main__":
