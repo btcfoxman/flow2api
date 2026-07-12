@@ -45,6 +45,15 @@ async def lifespan(app: FastAPI):
         await db.check_and_migrate_db(config_dict)
         print("✓ Database migration check completed.")
 
+    generation_config = await db.get_generation_config()
+    stale_task_timeout = max(7200, int(generation_config.video_timeout or 1500) * 3)
+    failed_stale_tasks = await db.fail_stale_processing_tasks(stale_task_timeout)
+    if failed_stale_tasks:
+        print(f"Closed {failed_stale_tasks} stale processing task(s)")
+    failed_stale_image_logs = await db.fail_stale_processing_image_logs(stale_task_timeout)
+    if failed_stale_image_logs:
+        print(f"Closed {failed_stale_image_logs} stale processing image log(s)")
+
     backfilled_async_logs = await db.backfill_async_video_result_logs()
     if backfilled_async_logs:
         print(f"Backfilled {backfilled_async_logs} async video result log(s)")

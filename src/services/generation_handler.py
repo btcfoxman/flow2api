@@ -4,7 +4,7 @@ import base64
 import json
 import time
 from pathlib import Path
-from typing import Optional, AsyncGenerator, List, Dict, Any
+from typing import Optional, AsyncGenerator, List, Dict, Any, Set
 from ..core.logger import debug_logger
 from ..core.config import config
 from ..core.credits import (
@@ -1090,6 +1090,14 @@ class GenerationHandler:
             flow_client=flow_client,
         )
         self.watermark_processor = WatermarkProcessor()
+        self._background_tasks: Set[asyncio.Task] = set()
+
+    def _spawn_background_task(self, coro: Any) -> asyncio.Task:
+        """Keep detached generation work strongly referenced until completion."""
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        return task
 
     def _create_generation_result(self) -> Dict[str, Any]:
         """????????????????"""
@@ -1102,6 +1110,8 @@ class GenerationHandler:
             "generated_assets": None,
             "base_url": None,
             "async_task_id": None,
+            "submitted_video_task_id": None,
+            "video_continuation_started": False,
         }
 
     def _mark_generation_failed(
@@ -1289,6 +1299,11 @@ class GenerationHandler:
             "has_video": bool(video_media_id or video_bytes),
             "watermark": bool(watermark),
         }
+        request_log_state.update({
+            "started_at": start_time,
+            "operation": request_operation,
+            "request_payload": request_payload,
+        })
         debug_logger.log_info(f"[GENERATION] 开始生成 - 模型: {model}, 类型: {generation_type}, Prompt: {prompt[:50]}...")
 
         # 向用户展示开始信息
@@ -1562,17 +1577,30 @@ class GenerationHandler:
             perf_trace["total_ms"] = int(duration * 1000)
             perf_trace["error"] = error_msg
             prompt_for_log = prompt if len(prompt) <= 2000 else f"{prompt[:2000]}...(truncated)"
-            await self._log_request(
-                token.id if token else None,
-                request_operation if generation_type else "generate_unknown",
-                request_payload if 'request_payload' in locals() else {"model": model},
-                {"error": error_msg, "performance": perf_trace},
-                499,
-                duration,
-                log_id=request_log_state.get("id"),
-                status_text="failed",
-                progress=request_log_state.get("progress", 0),
-            )
+            if response_state.get("video_continuation_started"):
+                # The detached poller owns this request-log row and will replace the
+                # submitted state with the eventual upstream result.
+                finalize_task = None
+            else:
+                finalize_task = self._spawn_background_task(
+                    self._log_request(
+                        token.id if token else None,
+                        request_operation if generation_type else "generate_unknown",
+                        request_payload if 'request_payload' in locals() else {"model": model},
+                        {"error": error_msg, "performance": perf_trace},
+                        499,
+                        duration,
+                        log_id=request_log_state.get("id"),
+                        status_text="failed",
+                        progress=100,
+                    )
+                )
+            if finalize_task is not None:
+                try:
+                    await asyncio.shield(finalize_task)
+                except asyncio.CancelledError:
+                    # A repeated ASGI cancellation must not cancel the detached DB write.
+                    pass
             raise
         except Exception as e:
             raw_error_msg = str(e)
@@ -2293,6 +2321,7 @@ class GenerationHandler:
                 watermark=bool(watermark),
             )
             await self.db.create_task(task)
+            response_state["submitted_video_task_id"] = task_id
             await self._update_request_log_progress(
                 request_log_state,
                 token_id=token.id,
@@ -2320,7 +2349,7 @@ class GenerationHandler:
                     watermark=bool(watermark),
                 )
                 self._mark_generation_succeeded(generation_result)
-                asyncio.create_task(
+                self._spawn_background_task(
                     self._run_video_task_background(
                         token=token,
                         project_id=project_id,
@@ -2344,19 +2373,49 @@ class GenerationHandler:
 
             # 如果是 extend，传入源视频 media_id 用于后续拼接
             extend_source_id = video_media_id if video_type == "extend" else None
-            async for chunk in self._poll_video_result(
-                token,
-                project_id,
-                operations,
-                stream,
-                upsample_config,
-                generation_result,
-                response_state,
-                request_log_state,
-                extend_source_media_id=extend_source_id,
-                watermark=bool(watermark),
-            ):
-                yield chunk
+            try:
+                async for chunk in self._poll_video_result(
+                    token,
+                    project_id,
+                    operations,
+                    stream,
+                    upsample_config,
+                    generation_result,
+                    response_state,
+                    request_log_state,
+                    extend_source_media_id=extend_source_id,
+                    watermark=bool(watermark),
+                ):
+                    yield chunk
+            except asyncio.CancelledError:
+                # The upstream task already exists. A caller/reverse-proxy timeout must not
+                # abandon it in SQLite at 45%; detach polling from the cancelled request.
+                continuation_log_state = dict(request_log_state or {})
+                continuation_log_state.update({
+                    "async_result_log": True,
+                    "started_at": float(continuation_log_state.get("started_at") or time.time()),
+                    "operation": str(continuation_log_state.get("operation") or "generate_video"),
+                    "request_payload": dict(continuation_log_state.get("request_payload") or {}),
+                })
+                response_state["video_continuation_started"] = True
+                self._spawn_background_task(
+                    self._run_video_task_background(
+                        token=token,
+                        project_id=project_id,
+                        operations=operations,
+                        upsample_config=upsample_config,
+                        response_state=dict(response_state),
+                        request_log_state=continuation_log_state,
+                        extend_source_media_id=extend_source_id,
+                        watermark=bool(watermark),
+                        record_usage_on_success=True,
+                    )
+                )
+                debug_logger.log_warning(
+                    f"[VIDEO] client disconnected after submit; polling continues in background "
+                    f"task={_operation_task_id(operations)}"
+                )
+                raise
 
         finally:
             pass
@@ -2372,6 +2431,7 @@ class GenerationHandler:
         request_log_state: Optional[Dict[str, Any]],
         extend_source_media_id: Optional[str],
         watermark: bool,
+        record_usage_on_success: bool = False,
     ) -> None:
         generation_result = self._create_generation_result()
         try:
@@ -2388,6 +2448,9 @@ class GenerationHandler:
                 watermark=watermark,
             ):
                 pass
+            if generation_result.get("success") and record_usage_on_success:
+                await self.token_manager.record_usage(token.id, is_video=True)
+                await self.token_manager.record_success(token.id)
             if not generation_result.get("success"):
                 error_msg = generation_result.get("error_message") or "video task failed"
                 status_code = int(generation_result.get("status_code") or 500)

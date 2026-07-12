@@ -325,6 +325,37 @@ class FlowClientBrowserFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client._notify_browser_captcha_error.await_count, 1)
         self.assertEqual(client._notify_browser_captcha_request_finished.await_count, 2)
 
+    async def test_unusual_activity_stops_after_trying_two_profiles(self):
+        config.set_captcha_method("adspower")
+        config.set_captcha_max_retries(5)
+        client = FlowClient(None)
+        client._notify_browser_captcha_error = AsyncMock()
+
+        error = Exception(
+            "PUBLIC_ERROR_UNUSUAL_ACTIVITY: reCAPTCHA evaluation failed"
+        )
+        with patch("src.services.flow_client.asyncio.sleep", AsyncMock()):
+            should_retry_first = await client._handle_retryable_generation_error(
+                error=error,
+                retry_attempt=0,
+                max_retries=5,
+                browser_id="0:request-1",
+                project_id="project-1",
+                log_prefix="[VIDEO]",
+            )
+            should_retry_second = await client._handle_retryable_generation_error(
+                error=error,
+                retry_attempt=1,
+                max_retries=5,
+                browser_id="1:request-2",
+                project_id="project-1",
+                log_prefix="[VIDEO]",
+            )
+
+        self.assertTrue(should_retry_first)
+        self.assertFalse(should_retry_second)
+        self.assertEqual(client._notify_browser_captcha_error.await_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

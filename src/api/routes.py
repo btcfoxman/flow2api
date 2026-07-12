@@ -1,7 +1,7 @@
 """API routes for OpenAI-compatible and Gemini generateContent endpoints."""
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 import asyncio
 import base64
 import json
@@ -66,6 +66,17 @@ VIDEO_VIDEO_PAYLOAD_KEYS = [
 ]
 IMAGE_RESPONSE_TASKS: Dict[str, Dict[str, Any]] = {}
 IMAGE_RESPONSE_TASKS_LOCK = asyncio.Lock()
+ROUTE_BACKGROUND_TASKS: Set[asyncio.Task] = set()
+
+
+def _spawn_route_background_task(coro: Any) -> asyncio.Task:
+    """Keep fire-and-forget route work alive until it reaches a terminal state."""
+    task = asyncio.create_task(coro)
+    ROUTE_BACKGROUND_TASKS.add(task)
+    task.add_done_callback(ROUTE_BACKGROUND_TASKS.discard)
+    return task
+
+
 MEDIA_PROMPT_PREAMBLE_PATTERNS = (
     re.compile(r"^you are a function calling ai model\.?$", re.IGNORECASE),
     re.compile(
@@ -1021,7 +1032,7 @@ async def _create_deferred_async_video_task(
             watermark=normalized.watermark,
         )
     )
-    asyncio.create_task(
+    _spawn_route_background_task(
         _run_deferred_async_video_task(
             local_task_id=local_task_id,
             normalized=normalized,
@@ -1463,7 +1474,7 @@ async def _create_async_image_response_task(
     }
     async with IMAGE_RESPONSE_TASKS_LOCK:
         IMAGE_RESPONSE_TASKS[response_id] = task
-    asyncio.create_task(
+    _spawn_route_background_task(
         _run_async_image_response_task(
             response_id=response_id,
             normalized=normalized,

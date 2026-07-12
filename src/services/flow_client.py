@@ -3184,16 +3184,27 @@ class FlowClient:
         if not retry_reason:
             return False
 
-        is_terminal_attempt = retry_attempt >= max_retries - 1
+        effective_max_retries = max_retries
+        error_lower = error_str.lower()
+        if (
+            "public_error_unusual_activity" in error_lower
+            or "recaptcha evaluation failed" in error_lower
+        ):
+            # With a small AdsPower pool, one retry can move to the other healthy
+            # profile. More attempts only wait on/re-hit cooled profiles and amplify
+            # the upstream risk verdict.
+            effective_max_retries = min(max_retries, 2)
+
+        is_terminal_attempt = retry_attempt >= effective_max_retries - 1
 
         if is_terminal_attempt:
             debug_logger.log_warning(
-                f"{log_prefix}遇到{retry_reason}，已达到最大重试次数({max_retries})，本次请求失败并执行关闭回收。"
+                f"{log_prefix}遇到{retry_reason}，已达到最大重试次数({effective_max_retries})，本次请求失败并执行关闭回收。"
             )
             return False
 
         debug_logger.log_warning(
-            f"{log_prefix}遇到{retry_reason}，正在重新获取验证码重试 ({retry_attempt + 2}/{max_retries})..."
+            f"{log_prefix}遇到{retry_reason}，正在重新获取验证码重试 ({retry_attempt + 2}/{effective_max_retries})..."
         )
         await asyncio.sleep(1)
         return True

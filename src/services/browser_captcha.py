@@ -167,7 +167,7 @@ def _adspower_restart_cooldown_seconds() -> int:
 
 
 def _adspower_recaptcha_failure_slot_cooldown_seconds() -> int:
-    value = _adspower_env("ADSPOWER_RECAPTCHA_FAILURE_SLOT_COOLDOWN_SECONDS", "180")
+    value = _adspower_env("ADSPOWER_RECAPTCHA_FAILURE_SLOT_COOLDOWN_SECONDS", "900")
     try:
         return max(0, min(1800, int(value)))
     except Exception:
@@ -3006,15 +3006,12 @@ class BrowserCaptchaService:
                 async with self._browsers_lock:
                     warmed_idle_slot: Optional[int] = None
                     idle_slot: Optional[int] = None
-                    cooled_idle_slot: Optional[int] = None
 
                     for offset in range(self._browser_count):
                         slot_id = (self._round_robin_index + offset) % self._browser_count
                         if self._is_slot_busy_for_allocation(slot_id):
                             continue
                         if self._is_slot_on_cooldown_locked(slot_id):
-                            if cooled_idle_slot is None:
-                                cooled_idle_slot = slot_id
                             continue
 
                         if idle_slot is None:
@@ -3024,15 +3021,15 @@ class BrowserCaptchaService:
                             break
 
                     selected_slot = warmed_idle_slot if warmed_idle_slot is not None else idle_slot
-                    if selected_slot is None:
-                        selected_slot = cooled_idle_slot
                     if selected_slot is not None:
                         self._round_robin_index = (selected_slot + 1) % self._browser_count
                         self._reserve_slot_locked(selected_slot)
                         return selected_slot
 
             if time.monotonic() - wait_started_at >= wait_timeout:
-                raise RuntimeError(f"browser slots busy for {int(wait_timeout)}s")
+                raise RuntimeError(
+                    f"browser slots busy or cooling down for {int(wait_timeout)}s"
+                )
             await asyncio.sleep(0.2)
 
     async def _get_or_create_browser(self, browser_id: int) -> TokenBrowser:

@@ -1349,6 +1349,59 @@ class Database:
             await db.commit()
             return cursor.rowcount or 0
 
+    async def fail_stale_processing_tasks(
+        self,
+        stale_after_seconds: int = 7200,
+        error_message: str = "任务后台执行已中断且超过恢复时限，请重新提交",
+    ) -> int:
+        """Close orphaned processing rows so they cannot remain at 45% forever."""
+        safe_timeout = max(300, int(stale_after_seconds or 7200))
+        async with self._connect(write=True) as db:
+            cursor = await db.execute(
+                """
+                UPDATE tasks
+                SET status = 'failed',
+                    progress = 100,
+                    error_message = ?,
+                    completed_at = CURRENT_TIMESTAMP
+                WHERE status = 'processing'
+                  AND created_at <= datetime('now', ?)
+                """,
+                (error_message, f"-{safe_timeout} seconds"),
+            )
+            await db.commit()
+            return cursor.rowcount or 0
+
+    async def fail_stale_processing_image_logs(
+        self,
+        stale_after_seconds: int = 7200,
+        error_message: str = "图片生成请求已中断且超过恢复时限，请重新提交",
+    ) -> int:
+        """Close old image request rows that were cancelled before final logging."""
+        safe_timeout = max(300, int(stale_after_seconds or 7200))
+        response_body = json.dumps({"error": error_message}, ensure_ascii=False)
+        async with self._connect(write=True) as db:
+            cursor = await db.execute(
+                """
+                UPDATE request_logs
+                SET response_body = ?,
+                    status_code = 499,
+                    duration = MAX(
+                        COALESCE(duration, 0),
+                        (julianday('now') - julianday(created_at)) * 86400.0
+                    ),
+                    status_text = 'failed',
+                    progress = 100,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE operation = 'generate_image'
+                  AND status_code = 102
+                  AND created_at <= datetime('now', ?)
+                """,
+                (response_body, f"-{safe_timeout} seconds"),
+            )
+            await db.commit()
+            return cursor.rowcount or 0
+
     async def backfill_async_video_result_logs(self, limit: int = 500) -> int:
         """Backfill final request-log rows for async video tasks created by older builds."""
         async with self._connect(write=True) as db:

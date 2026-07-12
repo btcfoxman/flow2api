@@ -638,7 +638,7 @@ class BrowserCaptchaServiceRuntimeClosedTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    async def test_single_cooled_slot_can_still_be_used_when_no_alternative_exists(self):
+    async def test_single_cooled_slot_waits_until_cooldown_expires(self):
         service = BrowserCaptchaService(db=None)
         service._check_available = lambda: None
         service._browser_count = 1
@@ -650,10 +650,45 @@ class BrowserCaptchaServiceRuntimeClosedTests(unittest.IsolatedAsyncioTestCase):
             error_reason="PUBLIC_ERROR_UNUSUAL_ACTIVITY: reCAPTCHA evaluation failed",
         )
 
-        token, browser_ref = await service.get_token("project-1", action="VIDEO_GENERATION")
+        sleep_calls = []
+
+        async def expire_cooldown_after_sleep(delay):
+            sleep_calls.append(delay)
+            service._slot_cooldowns.clear()
+
+        with patch(
+            "src.services.browser_captcha.asyncio.sleep",
+            new=expire_cooldown_after_sleep,
+        ):
+            token, browser_ref = await service.get_token("project-1", action="VIDEO_GENERATION")
 
         self.assertEqual(token, "token-0")
         self.assertTrue(str(browser_ref).startswith("0:"))
+        self.assertEqual(len(sleep_calls), 1)
+
+    async def test_cooled_idle_slot_does_not_preempt_busy_healthy_slot(self):
+        service = BrowserCaptchaService(db=None)
+        service._browser_count = 2
+        service._slot_cooldowns[0] = time.monotonic() + 60
+        service._bound_request_slots["active-ref"] = {
+            "browser_id": 1,
+            "started_at": time.time(),
+        }
+
+        sleep_calls = []
+
+        async def release_healthy_slot_after_sleep(delay):
+            sleep_calls.append(delay)
+            service._bound_request_slots.clear()
+
+        with patch(
+            "src.services.browser_captcha.asyncio.sleep",
+            new=release_healthy_slot_after_sleep,
+        ):
+            browser_id = await service._select_browser_id("project-1")
+
+        self.assertEqual(browser_id, 1)
+        self.assertEqual(len(sleep_calls), 1)
 
     async def test_fetch_json_requires_active_bound_request_ref(self):
         service = BrowserCaptchaService(db=None)
