@@ -14,6 +14,7 @@ from urllib.parse import unquote, urlparse
 from curl_cffi.requests import AsyncSession
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import AliasChoices, BaseModel, Field
 
 from ..core.auth import AuthManager, verify_api_key_flexible
 from ..core.logger import debug_logger
@@ -124,6 +125,22 @@ class NormalizedGenerationRequest:
     video_file_name: Optional[str] = None
     aspect_ratio_override: Optional[str] = None
     watermark: bool = False
+
+
+class WatermarkRemovalRequest(BaseModel):
+    source_url: str = Field(
+        min_length=1,
+        max_length=4096,
+        validation_alias=AliasChoices("source_url", "video_url"),
+    )
+
+
+class WatermarkRemovalResponse(BaseModel):
+    id: str
+    object: str = "video.watermark_removal"
+    status: str = "completed"
+    source_url: str
+    video_url: str
 
 
 def set_generation_handler(handler: GenerationHandler):
@@ -1925,6 +1942,64 @@ async def create_video_task(
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post(
+    "/v1/videos/remove-watermark",
+    response_model=WatermarkRemovalResponse,
+    responses={
+        400: {"description": "Invalid or unsupported video URL"},
+        502: {"description": "Watermark processing failed"},
+        503: {"description": "Watermark service is not configured"},
+    },
+)
+async def remove_video_watermark(
+    request: WatermarkRemovalRequest,
+    raw_request: Request,
+    api_key: str = Depends(verify_api_key_flexible),
+):
+    """Remove a Flow video watermark and return the uploaded output URL."""
+    handler = _ensure_generation_handler()
+    try:
+        output_url = await handler.watermark_processor.remove_watermark(
+            url=request.source_url,
+            file_cache=handler.file_cache,
+            public_base_url=_get_request_base_url(raw_request),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        debug_logger.log_error(
+            error_message=f"Public watermark removal failed: {exc}",
+            status_code=0,
+            response_text="",
+        )
+        message = str(exc).lower()
+        if (
+            "s3 upload is disabled" in message
+            or "s3 upload config missing" in message
+            or "gwt-video not found" in message
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail="Watermark removal service is not configured",
+            ) from exc
+        raise HTTPException(status_code=502, detail="Watermark removal failed") from exc
+    except Exception as exc:
+        debug_logger.log_error(
+            error_message=f"Public watermark removal failed: {exc}",
+            status_code=0,
+            response_text="",
+        )
+        raise HTTPException(status_code=502, detail="Watermark removal failed") from exc
+
+    return {
+        "id": f"wmr_{uuid.uuid4().hex}",
+        "object": "video.watermark_removal",
+        "status": "completed",
+        "source_url": request.source_url,
+        "video_url": output_url,
+    }
 
 
 @router.get("/v1/videos/{task_id:path}")

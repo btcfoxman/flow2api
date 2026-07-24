@@ -550,3 +550,29 @@ curl -X POST "http://localhost:8000/v1/chat/completions" \
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=TheSmallHanCat/flow2api&type=date&legend=top-left)](https://www.star-history.com/#TheSmallHanCat/flow2api&type=date&legend=top-left)
+## 视频去水印接口
+
+`POST /v1/videos/remove-watermark` 使用与其他公开接口相同的 API Key 鉴权。接口同步下载 Flow 视频、调用 `gwt-video` 去除水印，并将结果上传到已配置的 S3 存储。
+
+```bash
+curl -X POST "http://localhost:4020/v1/videos/remove-watermark" \
+  -H "Authorization: Bearer <api_key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "source_url": "https://flow-content.google/path/to/video.mp4"
+  }'
+```
+
+成功响应：
+
+```json
+{
+  "id": "wmr_xxx",
+  "object": "video.watermark_removal",
+  "status": "completed",
+  "source_url": "https://flow-content.google/path/to/video.mp4",
+  "video_url": "https://cdn.example.com/flow2api/watermark/video.gwt.mp4"
+}
+```
+
+该接口只接受 `https://flow-content.google`、`https://aiid.edu.kg`、`aiid.edu.kg` 的 HTTPS 子域名，或管理端已配置的 Flow 内容代理域名。调用前必须正确配置 `gwt-video` 和 S3。

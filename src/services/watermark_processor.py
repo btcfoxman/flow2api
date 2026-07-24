@@ -3,6 +3,7 @@
 import asyncio
 import os
 from pathlib import Path
+from urllib.parse import urlparse
 
 from ..core.config import config
 from ..core.logger import debug_logger
@@ -11,6 +12,7 @@ from .s3_uploader import S3Uploader
 
 FLOW_GOOGLE_ORIGIN = "https://flow-content.google"
 FLOW_GOOGLE_PROXY_ORIGIN = "https://file-vercel-fl-go.aiid.edu.kg"
+AIID_ROOT_DOMAIN = "aiid.edu.kg"
 
 
 class WatermarkProcessor:
@@ -37,6 +39,54 @@ class WatermarkProcessor:
             return url
         proxy_origin = getattr(config, "flow_content_proxy_base", "") or FLOW_GOOGLE_PROXY_ORIGIN
         return url.replace(FLOW_GOOGLE_ORIGIN, proxy_origin.rstrip("/"))
+
+    def validate_source_url(self, url: str) -> str:
+        normalized = str(url or "").strip()
+        parsed = urlparse(normalized)
+        try:
+            port = parsed.port
+        except ValueError as exc:
+            raise ValueError("source_url must be a valid HTTPS URL") from exc
+        if (
+            parsed.scheme.lower() != "https"
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or port not in {None, 443}
+        ):
+            raise ValueError("source_url must be a valid HTTPS URL")
+
+        proxy_origin = getattr(config, "flow_content_proxy_base", "") or FLOW_GOOGLE_PROXY_ORIGIN
+        allowed_hosts = {
+            urlparse(FLOW_GOOGLE_ORIGIN).hostname,
+            urlparse(proxy_origin).hostname,
+        }
+        hostname = parsed.hostname.lower()
+        is_aiid_host = hostname == AIID_ROOT_DOMAIN or hostname.endswith(
+            f".{AIID_ROOT_DOMAIN}"
+        )
+        if (
+            hostname not in {str(host).lower() for host in allowed_hosts if host}
+            and not is_aiid_host
+        ):
+            raise ValueError(
+                "source_url host must be flow-content.google, aiid.edu.kg, "
+                "an aiid.edu.kg subdomain, or the configured Flow content proxy"
+            )
+        return normalized
+
+    async def remove_watermark(
+        self,
+        *,
+        url: str,
+        file_cache,
+        public_base_url: str,
+    ) -> str:
+        return await self._remove_video_watermark(
+            url=self.validate_source_url(url),
+            file_cache=file_cache,
+            public_base_url=public_base_url,
+        )
 
     async def apply_policy(
         self,
