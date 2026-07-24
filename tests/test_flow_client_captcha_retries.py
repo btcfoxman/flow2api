@@ -30,6 +30,13 @@ class FlowClientCaptchaRetriesTests(unittest.TestCase):
 
         self.assertEqual(FlowClient(None)._captcha_aware_max_retries(), 4)
 
+    def test_native_cdp_uses_captcha_retry_budget(self):
+        config.set_captcha_method("native_cdp")
+        config.set_flow_max_retries(1)
+        config.set_captcha_max_retries(6)
+
+        self.assertEqual(FlowClient(None)._captcha_aware_max_retries(), 6)
+
     def test_non_captcha_method_keeps_flow_retry_budget(self):
         config.set_captcha_method("extension")
         config.set_flow_max_retries(2)

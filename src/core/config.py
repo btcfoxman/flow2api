@@ -505,6 +505,19 @@ class Config:
         self._config["captcha"]["browser_count"] = max(1, min(20, int(value)))
 
     @property
+    def native_cdp_idle_ttl_seconds(self) -> int:
+        value = self._config.get("captcha", {}).get("native_cdp_idle_ttl_seconds", 600)
+        try:
+            return max(60, int(value))
+        except Exception:
+            return 600
+
+    def set_native_cdp_idle_ttl_seconds(self, value: int):
+        if "captcha" not in self._config:
+            self._config["captcha"] = {}
+        self._config["captcha"]["native_cdp_idle_ttl_seconds"] = max(60, int(value))
+
+    @property
     def browser_recaptcha_settle_seconds(self) -> float:
         """有头打码在 reload/clr 就绪后的额外等待秒数。"""
         value = self._config.get("captcha", {}).get("browser_recaptcha_settle_seconds", 3.0)

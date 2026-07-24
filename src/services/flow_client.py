@@ -71,6 +71,7 @@ class FlowClient:
             "personal",
             "remote_browser",
             "adspower",
+            "native_cdp",
         }:
             return config.captcha_max_retries
         return max_retries
@@ -3306,6 +3307,23 @@ class FlowClient:
                 )
             except Exception:
                 pass
+        elif config.captcha_method == "native_cdp":
+            try:
+                from .browser_captcha_native_cdp import BrowserCaptchaService
+                service = await BrowserCaptchaService.get_instance(self.db)
+                native_token_id = None
+                if isinstance(browser_id, str) and browser_id.startswith("native:"):
+                    raw_token_id = browser_id.partition(":")[2]
+                    if raw_token_id.isdigit():
+                        native_token_id = int(raw_token_id)
+                await service.report_flow_error(
+                    project_id=project_id,
+                    token_id=native_token_id,
+                    error_reason=error_reason or "",
+                    error_message=error_message or "",
+                )
+            except Exception:
+                pass
         elif config.captcha_method == "remote_browser" and browser_id:
             try:
                 session_id = quote(str(browser_id), safe="")
@@ -3652,6 +3670,30 @@ class FlowClient:
                 return None, None
             except Exception as e:
                 debug_logger.log_error(f"[reCAPTCHA Personal] 错误: {str(e)}")
+                self._set_request_fingerprint(None)
+                return None, None
+        elif captcha_method == "native_cdp":
+            try:
+                from .browser_captcha_native_cdp import BrowserCaptchaService
+
+                service = await BrowserCaptchaService.get_instance(self.db)
+                token, browser_id = await service.get_token(
+                    project_id,
+                    action,
+                    token_id=token_id,
+                )
+                fingerprint = service.get_fingerprint(token_id) if token else None
+                if token:
+                    fingerprint_payload = dict(fingerprint or {})
+                    fingerprint_payload["native_token_id"] = token_id
+                    self._set_request_fingerprint(fingerprint_payload)
+                else:
+                    self._set_request_fingerprint(None)
+                return token, browser_id
+            except Exception as e:
+                debug_logger.log_error(
+                    f"[reCAPTCHA NativeCDP] {type(e).__name__}: {str(e)}"
+                )
                 self._set_request_fingerprint(None)
                 return None, None
         # 有头浏览器打码 (playwright)

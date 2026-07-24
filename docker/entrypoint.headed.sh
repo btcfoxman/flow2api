@@ -6,6 +6,14 @@ XVFB_SCREEN_VALUE="${XVFB_SCREEN:-1440x900x24}"
 export DISPLAY="${DISPLAY_VALUE}"
 
 resolve_browser_path() {
+for candidate in chromium chromium-browser google-chrome google-chrome-stable; do
+    detected_path="$(command -v "${candidate}" 2>/dev/null || true)"
+    if [ -n "${detected_path}" ] && [ -x "${detected_path}" ]; then
+        printf '%s\n' "${detected_path}"
+        return 0
+    fi
+done
+
 python - <<'PY'
 from playwright.sync_api import sync_playwright
 

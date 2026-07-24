@@ -432,7 +432,7 @@
                     <div class="space-y-4 flex-1">
                         <div>
                             <label class="text-sm font-medium mb-2 block">打码方式</label>
-                            <select id="cfgCaptchaMethod" class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm" onchange="toggleCaptchaOptions()">
+                            <select id="cfgCaptchaMethod" class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm" onchange="toggleCaptchaOptionsWithNative()">
                                 <option value="yescaptcha">YesCaptcha打码</option>
                                 <option value="capmonster">CapMonster打码</option>
                                 <option value="ezcaptcha">EzCaptcha打码</option>
@@ -440,6 +440,7 @@
                                 <option value="browser">有头浏览器打码</option>
                                 <option value="adspower">无头AdsPower打码</option>
                                 <option value="personal">内置浏览器打码</option>
+                                <option value="native_cdp">原生 CDP 独立账号打码</option>
                                 <option value="remote_browser">远程有头打码</option>
                             </select>
                             <p class="text-xs text-muted-foreground mt-1">选择验证码获取方式</p>
@@ -663,6 +664,38 @@
                             </div>
                         </div>
 
+                        <!-- 原生 CDP 独立账号打码配置 -->
+                        <div id="nativeCdpOptions" class="hidden space-y-4">
+                            <div class="rounded-md bg-blue-50 dark:bg-blue-900/20 p-3 border border-blue-200 dark:border-blue-800">
+                                <p class="text-xs text-blue-800 dark:text-blue-200">
+                                    <strong>原生 CDP：</strong>每个 Token 使用独立持久 Profile，通过代理启动普通有头 Chromium，并直接连接 CDP；不使用 Playwright 或 nodriver。
+                                </p>
+                            </div>
+                            <div class="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label class="text-sm font-medium mb-2 block">最大驻留账号浏览器数</label>
+                                    <input id="cfgNativeCdpBrowserCount" type="number" min="1" max="20" class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm" value="3">
+                                    <p class="text-xs text-muted-foreground mt-1">超过上限时进入等待队列，并优先回收最久未使用的空闲浏览器。</p>
+                                </div>
+                                <div>
+                                    <label class="text-sm font-medium mb-2 block">浏览器空闲超时(秒)</label>
+                                    <input id="cfgNativeCdpIdleTTL" type="number" min="60" max="86400" class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm" value="600">
+                                    <p class="text-xs text-muted-foreground mt-1">仅关闭进程，账号 Profile、Cookie 和环境数据保持不变。</p>
+                                </div>
+                            </div>
+                            <div class="pt-3 border-t border-border">
+                                <label class="inline-flex items-center gap-2 cursor-pointer">
+                                    <input type="checkbox" id="cfgNativeCdpProxyEnabled" class="h-4 w-4 rounded border-input" onchange="document.getElementById('nativeCdpProxyUrlInput').classList.toggle('hidden',!this.checked)">
+                                    <span class="text-sm font-medium">启用全局回退代理</span>
+                                </label>
+                                <p class="text-xs text-muted-foreground mt-2">账号级打码代理优先；账号未配置时使用此代理。两者均为空时拒绝启动。</p>
+                            </div>
+                            <div id="nativeCdpProxyUrlInput" class="hidden">
+                                <label class="text-sm font-medium mb-2 block">全局回退代理地址</label>
+                                <input id="cfgNativeCdpProxyUrl" type="text" class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm" placeholder="http://user:pass@host:port">
+                            </div>
+                        </div>
+
                         <!-- 远程有头打码配置选项 -->
                         <div id="remoteBrowserOptions" class="hidden space-y-4">
                             <div class="rounded-md bg-blue-50 dark:bg-blue-900/20 p-3 border border-blue-200 dark:border-blue-800">
@@ -686,7 +719,7 @@
                         </div>
                     </div>
                     <div class="mt-4">
-                        <button onclick="saveCaptchaConfig()" class="inline-flex items-center justify-center rounded-md bg-primary text-primary-foreground hover:bg-primary/90 h-9 px-4">保存配置</button>
+                        <button onclick="saveCaptchaConfigWithNative()" class="inline-flex items-center justify-center rounded-md bg-primary text-primary-foreground hover:bg-primary/90 h-9 px-4">保存配置</button>
                     </div>
                 </div>
 
@@ -1049,6 +1082,9 @@
         togglePersonalProxyInput=()=>{const enabled=$('cfgPersonalProxyEnabled').checked;$('personalProxyUrlInput').classList.toggle('hidden',!enabled)},
         loadCaptchaConfig=async()=>{try{console.log('开始加载验证码配置...');const r=await apiRequest('/api/captcha/config');if(!r){console.error('API请求失败');return}const d=await r.json();console.log('验证码配置数据:',d);const freshRestart=d.browser_personal_fresh_restart_every_n_solves===undefined?10:d.browser_personal_fresh_restart_every_n_solves;$('cfgCaptchaMethod').value=d.captcha_method||'adspower';$('cfgCaptchaMaxRetries').value=d.captcha_max_retries||5;$('cfgYescaptchaApiKey').value=d.yescaptcha_api_key||'';$('cfgYescaptchaBaseUrl').value=d.yescaptcha_base_url||'https://api.yescaptcha.com';$('cfgYescaptchaTaskType').value=d.yescaptcha_task_type||'RecaptchaV3TaskProxylessM1';$('cfgCapmonsterApiKey').value=d.capmonster_api_key||'';$('cfgCapmonsterBaseUrl').value=d.capmonster_base_url||'https://api.capmonster.cloud';$('cfgEzcaptchaApiKey').value=d.ezcaptcha_api_key||'';$('cfgEzcaptchaBaseUrl').value=d.ezcaptcha_base_url||'https://api.ez-captcha.com';$('cfgCapsolverApiKey').value=d.capsolver_api_key||'';$('cfgCapsolverBaseUrl').value=d.capsolver_base_url||'https://api.capsolver.com';$('cfgRemoteBrowserBaseUrl').value=d.remote_browser_base_url||'';$('cfgRemoteBrowserApiKey').value=d.remote_browser_api_key||'';$('cfgRemoteBrowserTimeout').value=d.remote_browser_timeout||60;$('cfgAdspowerApiUrl').value=d.adspower_api_url||'http://127.0.0.1:50325';$('cfgAdspowerApiKey').value=d.adspower_api_key||'';$('cfgAdspowerApiUseAuth').checked=d.adspower_api_use_auth||false;$('cfgAdspowerProfileIds').value=d.adspower_profile_ids||'';$('cfgAdspowerLaunchArgs').value=d.adspower_launch_args||'';$('cfgAdspowerHeadless').checked=d.adspower_headless===undefined?true:!!d.adspower_headless;$('cfgAdspowerBrowserCount').value=d.browser_count||1;$('cfgBrowserProxyEnabled').checked=d.browser_proxy_enabled||false;$('cfgBrowserProxyUrl').value=d.browser_proxy_url||'';$('cfgPersonalProxyEnabled').checked=d.browser_proxy_enabled||false;$('cfgPersonalProxyUrl').value=d.browser_proxy_url||'';$('cfgBrowserCount').value=d.browser_count||1;$('cfgPersonalBrowserCount').value=d.browser_count||1;$('cfgPersonalProjectPoolSize').value=d.personal_project_pool_size||4;$('cfgPersonalMaxTabs').value=d.personal_max_resident_tabs||5;$('cfgPersonalFreshRestartEveryNSolves').value=freshRestart;$('cfgPersonalIdleTTL').value=d.personal_idle_tab_ttl_seconds||600;toggleCaptchaOptions();toggleBrowserProxyInput();togglePersonalProxyInput();console.log('验证码配置加载成功')}catch(e){console.error('加载验证码配置失败:',e);showToast('加载验证码配置失败: '+e.message,'error')}},
         saveCaptchaConfig=async()=>{const method=$('cfgCaptchaMethod').value,captchaMaxRetries=Math.max(1,Math.min(20,parseInt($('cfgCaptchaMaxRetries').value)||5)),yesApiKey=$('cfgYescaptchaApiKey').value.trim(),yesBaseUrl=$('cfgYescaptchaBaseUrl').value.trim(),yesTaskType=$('cfgYescaptchaTaskType').value,capApiKey=$('cfgCapmonsterApiKey').value.trim(),capBaseUrl=$('cfgCapmonsterBaseUrl').value.trim(),ezApiKey=$('cfgEzcaptchaApiKey').value.trim(),ezBaseUrl=$('cfgEzcaptchaBaseUrl').value.trim(),solverApiKey=$('cfgCapsolverApiKey').value.trim(),solverBaseUrl=$('cfgCapsolverBaseUrl').value.trim(),remoteBaseUrl=$('cfgRemoteBrowserBaseUrl').value.trim(),remoteApiKey=$('cfgRemoteBrowserApiKey').value.trim(),remoteTimeout=parseInt($('cfgRemoteBrowserTimeout').value)||60,adspowerApiUrl=$('cfgAdspowerApiUrl').value.trim(),adspowerApiKey=$('cfgAdspowerApiKey').value.trim(),adspowerApiUseAuth=$('cfgAdspowerApiUseAuth').checked,adspowerProfileIds=$('cfgAdspowerProfileIds').value.trim(),adspowerLaunchArgs=$('cfgAdspowerLaunchArgs').value.trim(),adspowerHeadless=$('cfgAdspowerHeadless').checked,adspowerBrowserCount=parseInt($('cfgAdspowerBrowserCount').value)||1,browserProxyEnabled=$('cfgBrowserProxyEnabled').checked,browserProxyUrl=$('cfgBrowserProxyUrl').value.trim(),personalProxyEnabled=$('cfgPersonalProxyEnabled').checked,personalProxyUrl=$('cfgPersonalProxyUrl').value.trim(),browserCount=parseInt($('cfgBrowserCount').value)||1,personalBrowserCount=parseInt($('cfgPersonalBrowserCount').value)||1,personalProjectPoolSize=parseInt($('cfgPersonalProjectPoolSize').value)||4,personalMaxTabs=parseInt($('cfgPersonalMaxTabs').value)||5,personalFreshRestartEveryNSolves=Math.max(0,parseInt($('cfgPersonalFreshRestartEveryNSolves').value)||0),personalIdleTTL=parseInt($('cfgPersonalIdleTTL').value)||600;const finalProxyEnabled=method==='personal'?personalProxyEnabled:(method==='adspower'?false:browserProxyEnabled);const finalProxyUrl=method==='personal'?personalProxyUrl:(method==='adspower'?'':browserProxyUrl);const finalBrowserCount=method==='personal'?personalBrowserCount:(method==='adspower'?adspowerBrowserCount:browserCount);console.log('保存验证码配置:',{method,captchaMaxRetries,yesApiKey,yesBaseUrl,yesTaskType,capApiKey,capBaseUrl,ezApiKey,ezBaseUrl,solverApiKey,solverBaseUrl,remoteBaseUrl,remoteApiKey,remoteTimeout,adspowerApiUrl,adspowerApiKey,adspowerApiUseAuth,adspowerProfileIds,adspowerLaunchArgs,adspowerHeadless,adspowerBrowserCount,browserProxyEnabled,browserProxyUrl,personalProxyEnabled,personalProxyUrl,finalProxyEnabled,finalProxyUrl,browserCount,personalBrowserCount,finalBrowserCount,personalProjectPoolSize,personalMaxTabs,personalFreshRestartEveryNSolves,personalIdleTTL});try{const r=await apiRequest('/api/captcha/config',{method:'POST',body:JSON.stringify({captcha_method:method,captcha_max_retries:captchaMaxRetries,yescaptcha_api_key:yesApiKey,yescaptcha_base_url:yesBaseUrl,yescaptcha_task_type:yesTaskType,capmonster_api_key:capApiKey,capmonster_base_url:capBaseUrl,ezcaptcha_api_key:ezApiKey,ezcaptcha_base_url:ezBaseUrl,capsolver_api_key:solverApiKey,capsolver_base_url:solverBaseUrl,remote_browser_base_url:remoteBaseUrl,remote_browser_api_key:remoteApiKey,remote_browser_timeout:remoteTimeout,adspower_api_url:adspowerApiUrl,adspower_api_key:adspowerApiKey,adspower_api_use_auth:adspowerApiUseAuth,adspower_profile_ids:adspowerProfileIds,adspower_launch_args:adspowerLaunchArgs,adspower_headless:adspowerHeadless,browser_proxy_enabled:finalProxyEnabled,browser_proxy_url:finalProxyUrl,browser_count:finalBrowserCount,personal_project_pool_size:personalProjectPoolSize,personal_max_resident_tabs:personalMaxTabs,browser_personal_fresh_restart_every_n_solves:personalFreshRestartEveryNSolves,personal_idle_tab_ttl_seconds:personalIdleTTL})});if(!r){console.error('保存请求失败');return}const d=await r.json();console.log('保存结果:',d);if(d.success){showToast('验证码配置保存成功','success');await new Promise(r=>setTimeout(r,200));await loadCaptchaConfig()}else{console.error('保存失败:',d);showToast(d.message||'保存失败','error')}}catch(e){console.error('保存失败:',e);showToast('保存失败: '+e.message,'error')}},
+        toggleCaptchaOptionsWithNative=()=>{toggleCaptchaOptions();$('nativeCdpOptions').classList.toggle('hidden',$('cfgCaptchaMethod').value!=='native_cdp')},
+        loadCaptchaConfigWithNative=async()=>{await loadCaptchaConfig();try{const r=await apiRequest('/api/captcha/config');if(!r)return;const d=await r.json();$('cfgNativeCdpBrowserCount').value=d.browser_count||3;$('cfgNativeCdpIdleTTL').value=d.native_cdp_idle_ttl_seconds||600;$('cfgNativeCdpProxyEnabled').checked=!!d.browser_proxy_enabled;$('cfgNativeCdpProxyUrl').value=d.browser_proxy_url||'';$('nativeCdpProxyUrlInput').classList.toggle('hidden',!d.browser_proxy_enabled);toggleCaptchaOptionsWithNative()}catch(e){console.error('加载 native_cdp 配置失败:',e)}},
+        saveCaptchaConfigWithNative=async()=>{if($('cfgCaptchaMethod').value==='native_cdp'){$('cfgBrowserCount').value=$('cfgNativeCdpBrowserCount').value;$('cfgBrowserProxyEnabled').checked=$('cfgNativeCdpProxyEnabled').checked;$('cfgBrowserProxyUrl').value=$('cfgNativeCdpProxyUrl').value;$('cfgPersonalIdleTTL').value=$('cfgNativeCdpIdleTTL').value}await saveCaptchaConfig();await loadCaptchaConfigWithNative()},
         loadPluginConfig=async()=>{try{const r=await apiRequest('/api/plugin/config');if(!r)return;const d=await r.json();if(d.success&&d.config){$('cfgPluginConnectionUrl').value=d.config.connection_url||'';$('cfgPluginConnectionToken').value=d.config.connection_token||'';$('cfgAutoEnableOnUpdate').checked=d.config.auto_enable_on_update||false}}catch(e){console.error('加载插件配置失败:',e);showToast('加载插件配置失败: '+e.message,'error')}},
         savePluginConfig=async()=>{const token=$('cfgPluginConnectionToken').value.trim();const autoEnable=$('cfgAutoEnableOnUpdate').checked;try{const r=await apiRequest('/api/plugin/config',{method:'POST',body:JSON.stringify({connection_token:token,auto_enable_on_update:autoEnable})});if(!r)return;const d=await r.json();if(d.success){showToast('插件配置保存成功','success');await loadPluginConfig()}else{showToast(d.message||'保存失败','error')}}catch(e){showToast('保存失败: '+e.message,'error')}},
         copyConnectionUrl=()=>{const url=$('cfgPluginConnectionUrl').value;if(!url){showToast('连接接口为空','error');return}navigator.clipboard.writeText(url).then(()=>showToast('连接接口已复制','success')).catch(()=>showToast('复制失败','error'))},
@@ -1071,7 +1107,7 @@
         closeLogDetailModal=()=>{window.activeLogDetailId=null;resetLogMediaCache();$('logDetailModal').classList.add('hidden')},
         showToast=(m,t='info')=>{const d=document.createElement('div'),bc={success:'bg-green-600',error:'bg-destructive',info:'bg-primary'};d.className=`fixed bottom-4 right-4 ${bc[t]||bc.info} text-white px-4 py-2.5 rounded-lg shadow-lg text-sm font-medium z-50 animate-slide-up`;d.textContent=m;document.body.appendChild(d);setTimeout(()=>{d.style.opacity='0';d.style.transition='opacity .3s';setTimeout(()=>d.parentNode&&document.body.removeChild(d),300)},2000)},
         logout=()=>{if(!confirm('确定要退出登录吗?'))return;localStorage.removeItem('adminToken');location.href='/login'},
-        switchTab=t=>{const cap=n=>n.charAt(0).toUpperCase()+n.slice(1);['tokens','settings','logs'].forEach(n=>{const active=n===t;$(`panel${cap(n)}`).classList.toggle('hidden',!active);$(`tab${cap(n)}`).classList.toggle('border-primary',active);$(`tab${cap(n)}`).classList.toggle('text-primary',active);$(`tab${cap(n)}`).classList.toggle('border-transparent',!active);$(`tab${cap(n)}`).classList.toggle('text-muted-foreground',!active)});if(t==='settings'){stopLogsAutoRefresh();loadAdminConfig();loadProxyConfig();loadCacheConfig();loadWatermarkConfig();loadGenerationTimeout();loadCallLogicConfig();loadCaptchaConfig();loadPluginConfig();loadATAutoRefreshConfig()}else if(t==='logs'){startLogsAutoRefresh();loadLogs()}else{stopLogsAutoRefresh()}};
+        switchTab=t=>{const cap=n=>n.charAt(0).toUpperCase()+n.slice(1);['tokens','settings','logs'].forEach(n=>{const active=n===t;$(`panel${cap(n)}`).classList.toggle('hidden',!active);$(`tab${cap(n)}`).classList.toggle('border-primary',active);$(`tab${cap(n)}`).classList.toggle('text-primary',active);$(`tab${cap(n)}`).classList.toggle('border-transparent',!active);$(`tab${cap(n)}`).classList.toggle('text-muted-foreground',!active)});if(t==='settings'){stopLogsAutoRefresh();loadAdminConfig();loadProxyConfig();loadCacheConfig();loadWatermarkConfig();loadGenerationTimeout();loadCallLogicConfig();loadCaptchaConfigWithNative();loadPluginConfig();loadATAutoRefreshConfig()}else if(t==='logs'){startLogsAutoRefresh();loadLogs()}else{stopLogsAutoRefresh()}};
 
         function escapeLogHtml(text){
             if(text===null||text===undefined) return '';

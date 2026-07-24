@@ -118,6 +118,22 @@ async def lifespan(app: FastAPI):
             # 没有任何可用 token 时，打开登录窗口供用户手动操作
             await browser_service.open_login_window()
             print("⚠ No active token found, opened login window for manual setup")
+    elif captcha_config.captcha_method == "native_cdp":
+        from .services.browser_captcha_native_cdp import BrowserCaptchaService
+
+        browser_service = await BrowserCaptchaService.get_instance(db)
+        warmup_results = await browser_service.warmup_active_tokens()
+        warmed = sum(1 for result in warmup_results if result.get("success"))
+        print(
+            "Native CDP captcha service initialized "
+            f"(warmed={warmed}/{len(warmup_results)}, browser_limit={config.browser_count})"
+        )
+        for result in warmup_results:
+            if not result.get("success"):
+                print(
+                    "Native CDP warmup failed: "
+                    f"token_id={result.get('token_id')}, error={result.get('error')}"
+                )
     elif captcha_config.captcha_method in {"browser", "adspower"}:
         from .services.browser_captcha import BrowserCaptchaService
         browser_service = await BrowserCaptchaService.get_instance(db)

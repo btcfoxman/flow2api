@@ -69,7 +69,7 @@ s3_force_path_style = true
 s3_acl = ""  # optional, e.g. public-read when your S3 provider supports ACLs
 
 [captcha]
-captcha_method = "adspower"  # 打码方式: extension/yescaptcha/browser/personal/remote_browser/adspower，默认无头 AdsPower 打码
+captcha_method = "adspower"  # 打码方式: extension/yescaptcha/browser/personal/remote_browser/adspower/native_cdp
 captcha_max_retries = 5  # 打码/reCAPTCHA 相关生成提交重试次数，独立于 flow.max_retries
 browser_recaptcha_settle_seconds = 3.0  # reload/clr 就绪后的额外稳态等待
 browser_count = 1  # browser 模式的有头浏览器实例数量
@@ -77,6 +77,7 @@ personal_project_pool_size = 4  # personal 模式下单个 Token 默认维护的
 personal_max_resident_tabs = 5  # personal 模式共享打码标签页上限，所有 Token/project 共用这组 tab
 browser_personal_fresh_restart_every_n_solves = 10  # personal 模式成功获取多少个码后清理并重启浏览器，0 表示禁用
 personal_idle_tab_ttl_seconds = 600  # personal 模式标签页空闲回收时间(秒)
+native_cdp_idle_ttl_seconds = 600  # native_cdp 模式账号浏览器空闲回收时间(秒)
 yescaptcha_api_key = ""  # YesCaptcha API密钥
 yescaptcha_base_url = "https://api.yescaptcha.com"
 yescaptcha_task_type = "RecaptchaV3TaskProxylessM1"  # 可选: RecaptchaV3TaskProxyless/RecaptchaV3TaskProxylessM1/RecaptchaV3TaskProxylessM1S7/RecaptchaV3TaskProxylessM1S9

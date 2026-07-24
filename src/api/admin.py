@@ -371,7 +371,7 @@ async def _resolve_score_test_verify_proxy(
     返回: (proxies, used, source, proxy_url)
     """
     # 浏览器打码模式优先使用 browser_proxy，确保与取 token 出口一致
-    if captcha_method in {"browser", "personal"} and browser_proxy_enabled and browser_proxy_url:
+    if captcha_method in {"browser", "personal", "native_cdp"} and browser_proxy_enabled and browser_proxy_url:
         proxy_map = _build_proxy_map(browser_proxy_url)
         if proxy_map:
             return proxy_map, True, "captcha_browser_proxy", browser_proxy_url
@@ -1798,6 +1798,12 @@ async def update_captcha_config(
         10,
     )
     personal_idle_tab_ttl_seconds = request.get("personal_idle_tab_ttl_seconds")
+    native_cdp_idle_ttl_seconds = request.get(
+        "native_cdp_idle_ttl_seconds",
+        request.get("personal_idle_tab_ttl_seconds", 600),
+    )
+    if captcha_method == "native_cdp":
+        personal_idle_tab_ttl_seconds = None
 
     # 验证浏览器代理URL格式
     if browser_proxy_enabled and browser_proxy_url:
@@ -1837,6 +1843,10 @@ async def update_captcha_config(
         )
     except Exception:
         return {"success": False, "message": "重置码数必须是整数，0 表示禁用"}
+    try:
+        native_cdp_idle_ttl_seconds = max(60, int(native_cdp_idle_ttl_seconds or 600))
+    except Exception:
+        return {"success": False, "message": "原生 CDP 空闲回收时间必须是整数秒"}
 
     if captcha_method == "remote_browser":
         if not (remote_browser_base_url or "").strip():
@@ -1878,7 +1888,8 @@ async def update_captcha_config(
         personal_project_pool_size=personal_project_pool_size,
         personal_max_resident_tabs=personal_max_resident_tabs,
         browser_personal_fresh_restart_every_n_solves=browser_personal_fresh_restart_every_n_solves,
-        personal_idle_tab_ttl_seconds=personal_idle_tab_ttl_seconds
+        personal_idle_tab_ttl_seconds=personal_idle_tab_ttl_seconds,
+        native_cdp_idle_ttl_seconds=native_cdp_idle_ttl_seconds
     )
 
     # 🔥 Hot reload: sync database config to memory
@@ -1901,6 +1912,14 @@ async def update_captcha_config(
             await service.reload_config()
         except Exception as e:
             print(f"[Admin] Personal 配置热更新失败: {e}")
+
+    if captcha_method == "native_cdp":
+        try:
+            from ..services.browser_captcha_native_cdp import BrowserCaptchaService
+            service = await BrowserCaptchaService.get_instance(db)
+            await service.reload_config()
+        except Exception as e:
+            print(f"[Admin] Native CDP 配置热更新失败: {e}")
 
     return {"success": True, "message": "验证码配置更新成功"}
 
@@ -1936,8 +1955,18 @@ async def get_captcha_config(token: str = Depends(verify_admin_token)):
         "personal_project_pool_size": captcha_config.personal_project_pool_size,
         "personal_max_resident_tabs": captcha_config.personal_max_resident_tabs,
         "browser_personal_fresh_restart_every_n_solves": captcha_config.browser_personal_fresh_restart_every_n_solves,
-        "personal_idle_tab_ttl_seconds": captcha_config.personal_idle_tab_ttl_seconds
+        "personal_idle_tab_ttl_seconds": captcha_config.personal_idle_tab_ttl_seconds,
+        "native_cdp_idle_ttl_seconds": captcha_config.native_cdp_idle_ttl_seconds
     }
+
+
+@router.get("/api/captcha/native-cdp/status")
+async def get_native_cdp_status(token: str = Depends(verify_admin_token)):
+    """Return a credential-free snapshot of native CDP workers."""
+    from ..services.browser_captcha_native_cdp import BrowserCaptchaService
+
+    service = await BrowserCaptchaService.get_instance(db)
+    return {"success": True, **service.get_status()}
 
 
 @router.post("/api/captcha/score-test")
@@ -1970,7 +1999,7 @@ async def test_captcha_score(
     verify_proxy_source = "none"
     verify_proxy_url = ""
     verify_impersonate = "chrome120"
-    page_verify_only = captcha_method in {"browser", "personal", "remote_browser", "adspower"}
+    page_verify_only = captcha_method in {"browser", "personal", "remote_browser", "adspower", "native_cdp"}
     verify_mode = "browser_page" if page_verify_only else "server_post"
 
     try:

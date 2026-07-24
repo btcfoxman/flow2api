@@ -189,6 +189,13 @@ class TokenManager:
                     await service.stop_resident_mode(project_id)
             except Exception as e:
                 debug_logger.log_warning(f"[DELETE_TOKEN] 清理 personal 浏览器状态失败: {e}")
+        elif config.captcha_method == "native_cdp":
+            try:
+                from .browser_captcha_native_cdp import BrowserCaptchaService
+                service = await BrowserCaptchaService.get_instance(self.db)
+                await service.remove_token(token_id)
+            except Exception as e:
+                debug_logger.log_warning(f"[DELETE_TOKEN] 清理 native_cdp 浏览器状态失败: {e}")
 
     async def enable_token(self, token_id: int):
         """Enable a token and reset error count"""

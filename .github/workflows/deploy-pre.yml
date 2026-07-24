@@ -44,7 +44,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ./Dockerfile
+          file: ./Dockerfile.headed
           push: true
           tags: |
             ${{ env.IMAGE_REF }}:${{ github.sha }}
@@ -119,9 +119,21 @@ jobs:
           set_env_var IMAGE_REPOSITORY "$IMAGE_REPOSITORY"
           set_env_var IMAGE_TAG "$IMAGE_TAG"
 
+          cat > docker-compose.pre-headed.yml <<'YAML'
+          services:
+            flow2api:
+              shm_size: "2gb"
+              environment:
+                DISPLAY: ":99"
+                ALLOW_DOCKER_HEADED_CAPTCHA: "true"
+                NATIVE_CDP_PROFILE_ROOT: "/app/tmp/native_cdp_profiles"
+          YAML
+
+          compose=(docker compose -f docker-compose.yml -f docker-compose.pre-headed.yml)
+
           docker network inspect my-shared-net >/dev/null 2>&1 || docker network create my-shared-net
           for attempt in $(seq 1 5); do
-            if docker compose pull flow2api; then
+            if "${compose[@]}" pull flow2api; then
               break
             fi
             if [ "$attempt" = "5" ]; then
@@ -130,18 +142,19 @@ jobs:
             fi
             sleep $((attempt * 8))
           done
-          docker compose up -d --remove-orphans flow2api
+          "${compose[@]}" up -d --remove-orphans flow2api
           docker image prune -f
 
       - name: Verify container status
         shell: bash
         run: |
           set -euo pipefail
+          cd "$DEPLOY_DIR"
 
           for i in $(seq 1 30); do
             status="$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' flow2api 2>/dev/null || true)"
             if [ "$status" = "healthy" ] || [ "$status" = "running" ]; then
-              published="$(docker compose port flow2api 4020 2>/dev/null | head -n1 || true)"
+              published="$(docker compose -f docker-compose.yml -f docker-compose.pre-headed.yml port flow2api 4020 2>/dev/null | head -n1 || true)"
               port="${published##*:}"
               port="${port:-4020}"
               if curl -fsS "http://127.0.0.1:${port}/login" >/dev/null; then

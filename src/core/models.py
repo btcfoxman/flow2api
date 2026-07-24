@@ -202,7 +202,7 @@ class CaptchaConfig(BaseModel):
     """Captcha configuration"""
 
     id: int = 1
-    captcha_method: str = "adspower"  # yescaptcha/capmonster/ezcaptcha/capsolver/browser/personal/remote_browser/adspower
+    captcha_method: str = "adspower"  # yescaptcha/capmonster/ezcaptcha/capsolver/browser/personal/remote_browser/adspower/native_cdp
     captcha_max_retries: int = 5
     yescaptcha_api_key: str = ""
     yescaptcha_base_url: str = "https://api.yescaptcha.com"
@@ -231,6 +231,7 @@ class CaptchaConfig(BaseModel):
     personal_max_resident_tabs: int = 5  # 内置浏览器单实例共享打码标签页数量上限
     browser_personal_fresh_restart_every_n_solves: int = 10  # 成功打码多少次后清理并重启浏览器，0表示禁用
     personal_idle_tab_ttl_seconds: int = 600  # 内置浏览器标签页空闲超时(秒)
+    native_cdp_idle_ttl_seconds: int = 600  # 原生 CDP 账号浏览器空闲超时(秒)
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 

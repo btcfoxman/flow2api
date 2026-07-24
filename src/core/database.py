@@ -291,6 +291,7 @@ class Database:
             personal_max_resident_tabs = 5
             browser_personal_fresh_restart_every_n_solves = 10
             personal_idle_tab_ttl_seconds = 600
+            native_cdp_idle_ttl_seconds = 600
 
             if config_dict:
                 captcha_config = config_dict.get("captcha", {})
@@ -313,6 +314,7 @@ class Database:
                 personal_max_resident_tabs = captcha_config.get("personal_max_resident_tabs", 5)
                 browser_personal_fresh_restart_every_n_solves = captcha_config.get("browser_personal_fresh_restart_every_n_solves", 10)
                 personal_idle_tab_ttl_seconds = captcha_config.get("personal_idle_tab_ttl_seconds", 600)
+                native_cdp_idle_ttl_seconds = captcha_config.get("native_cdp_idle_ttl_seconds", 600)
             try:
                 captcha_max_retries = max(1, min(20, int(captcha_max_retries)))
             except Exception:
@@ -341,6 +343,10 @@ class Database:
                 personal_idle_tab_ttl_seconds = max(60, int(personal_idle_tab_ttl_seconds))
             except Exception:
                 personal_idle_tab_ttl_seconds = 600
+            try:
+                native_cdp_idle_ttl_seconds = max(60, int(native_cdp_idle_ttl_seconds))
+            except Exception:
+                native_cdp_idle_ttl_seconds = 600
 
             await db.execute("""
                 INSERT INTO captcha_config (
@@ -351,9 +357,9 @@ class Database:
                     adspower_profile_ids, adspower_launch_args, adspower_headless,
                     browser_count, personal_project_pool_size,
                     personal_max_resident_tabs, browser_personal_fresh_restart_every_n_solves,
-                    personal_idle_tab_ttl_seconds
+                    personal_idle_tab_ttl_seconds, native_cdp_idle_ttl_seconds
                 )
-                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 captcha_method,
                 captcha_max_retries,
@@ -374,6 +380,7 @@ class Database:
                 personal_max_resident_tabs,
                 browser_personal_fresh_restart_every_n_solves,
                 personal_idle_tab_ttl_seconds,
+                native_cdp_idle_ttl_seconds,
             ))
 
         # Ensure plugin_config has a row
@@ -503,6 +510,7 @@ class Database:
                         personal_max_resident_tabs INTEGER DEFAULT 5,
                         browser_personal_fresh_restart_every_n_solves INTEGER DEFAULT 10,
                         personal_idle_tab_ttl_seconds INTEGER DEFAULT 600,
+                        native_cdp_idle_ttl_seconds INTEGER DEFAULT 600,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
@@ -624,6 +632,7 @@ class Database:
                     ("adspower_profile_ids", "TEXT DEFAULT ''"),
                     ("adspower_launch_args", "TEXT DEFAULT ''"),
                     ("adspower_headless", "BOOLEAN DEFAULT 1"),
+                    ("native_cdp_idle_ttl_seconds", "INTEGER DEFAULT 600"),
                 ]
 
                 for col_name, col_type in captcha_columns_to_add:
@@ -962,6 +971,7 @@ class Database:
                     personal_max_resident_tabs INTEGER DEFAULT 5,
                     browser_personal_fresh_restart_every_n_solves INTEGER DEFAULT 10,
                     personal_idle_tab_ttl_seconds INTEGER DEFAULT 600,
+                    native_cdp_idle_ttl_seconds INTEGER DEFAULT 600,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -2178,6 +2188,7 @@ class Database:
                 captcha_config.browser_personal_fresh_restart_every_n_solves
             )
             config.set_personal_idle_tab_ttl_seconds(captcha_config.personal_idle_tab_ttl_seconds)
+            config.set_native_cdp_idle_ttl_seconds(captcha_config.native_cdp_idle_ttl_seconds)
 
     # Cache config operations
     async def get_cache_config(self) -> CacheConfig:
@@ -2430,7 +2441,8 @@ class Database:
         personal_project_pool_size: int = None,
         personal_max_resident_tabs: int = None,
         browser_personal_fresh_restart_every_n_solves: int = None,
-        personal_idle_tab_ttl_seconds: int = None
+        personal_idle_tab_ttl_seconds: int = None,
+        native_cdp_idle_ttl_seconds: int = None
     ):
         """Update captcha configuration"""
         async with self._connect(write=True) as db:
@@ -2473,6 +2485,7 @@ class Database:
                     else current.get("browser_personal_fresh_restart_every_n_solves", 10)
                 )
                 new_personal_idle_ttl = personal_idle_tab_ttl_seconds if personal_idle_tab_ttl_seconds is not None else current.get("personal_idle_tab_ttl_seconds", 600)
+                new_native_cdp_idle_ttl = native_cdp_idle_ttl_seconds if native_cdp_idle_ttl_seconds is not None else current.get("native_cdp_idle_ttl_seconds", 600)
                 new_captcha_max_retries = max(1, min(20, int(new_captcha_max_retries)))
                 new_remote_timeout = max(5, int(new_remote_timeout)) if new_remote_timeout is not None else 60
                 new_browser_count = max(1, min(20, int(new_browser_count)))
@@ -2480,6 +2493,7 @@ class Database:
                 new_personal_max_tabs = max(1, min(50, int(new_personal_max_tabs)))  # 限制1-50
                 new_personal_fresh_restart_every = max(0, int(new_personal_fresh_restart_every))
                 new_personal_idle_ttl = max(60, int(new_personal_idle_ttl))  # 最少60秒
+                new_native_cdp_idle_ttl = max(60, int(new_native_cdp_idle_ttl))
 
                 await db.execute("""
                     UPDATE captcha_config
@@ -2496,6 +2510,7 @@ class Database:
                         personal_max_resident_tabs = ?,
                         browser_personal_fresh_restart_every_n_solves = ?,
                         personal_idle_tab_ttl_seconds = ?,
+                        native_cdp_idle_ttl_seconds = ?,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = 1
                 """, (new_method, new_captcha_max_retries, new_yes_key, new_yes_url, new_yes_task_type,
@@ -2509,7 +2524,8 @@ class Database:
                       new_adspower_launch_args or "",
                       bool(new_adspower_headless),
                       new_proxy_enabled, new_proxy_url, new_browser_count, new_personal_project_pool_size,
-                      new_personal_max_tabs, new_personal_fresh_restart_every, new_personal_idle_ttl))
+                      new_personal_max_tabs, new_personal_fresh_restart_every, new_personal_idle_ttl,
+                      new_native_cdp_idle_ttl))
             else:
                 new_method = captcha_method if captcha_method is not None else "adspower"
                 new_captcha_max_retries = captcha_max_retries if captcha_max_retries is not None else 5
@@ -2542,6 +2558,7 @@ class Database:
                     else 10
                 )
                 new_personal_idle_ttl = personal_idle_tab_ttl_seconds if personal_idle_tab_ttl_seconds is not None else 600
+                new_native_cdp_idle_ttl = native_cdp_idle_ttl_seconds if native_cdp_idle_ttl_seconds is not None else 600
                 new_captcha_max_retries = max(1, min(20, int(new_captcha_max_retries)))
                 new_remote_timeout = max(5, int(new_remote_timeout))
                 new_browser_count = max(1, min(20, int(new_browser_count)))
@@ -2549,6 +2566,7 @@ class Database:
                 new_personal_max_tabs = max(1, min(50, int(new_personal_max_tabs)))
                 new_personal_fresh_restart_every = max(0, int(new_personal_fresh_restart_every))
                 new_personal_idle_ttl = max(60, int(new_personal_idle_ttl))
+                new_native_cdp_idle_ttl = max(60, int(new_native_cdp_idle_ttl))
 
                 await db.execute("""
                     INSERT INTO captcha_config (id, captcha_method, captcha_max_retries, yescaptcha_api_key, yescaptcha_base_url,
@@ -2561,8 +2579,8 @@ class Database:
                         browser_proxy_enabled, browser_proxy_url, browser_count,
                         personal_project_pool_size,
                         personal_max_resident_tabs, browser_personal_fresh_restart_every_n_solves,
-                        personal_idle_tab_ttl_seconds)
-                    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        personal_idle_tab_ttl_seconds, native_cdp_idle_ttl_seconds)
+                    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (new_method, new_captcha_max_retries, new_yes_key, new_yes_url, new_yes_task_type,
                       new_cap_key, new_cap_url,
                       new_ez_key, new_ez_url, new_cs_key, new_cs_url,
@@ -2574,7 +2592,8 @@ class Database:
                       new_adspower_launch_args or "",
                       bool(new_adspower_headless),
                       new_proxy_enabled, new_proxy_url, new_browser_count, new_personal_project_pool_size,
-                      new_personal_max_tabs, new_personal_fresh_restart_every, new_personal_idle_ttl))
+                      new_personal_max_tabs, new_personal_fresh_restart_every, new_personal_idle_ttl,
+                      new_native_cdp_idle_ttl))
 
             await db.commit()
 

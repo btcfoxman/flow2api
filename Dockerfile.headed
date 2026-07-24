@@ -7,21 +7,24 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     ALLOW_DOCKER_HEADED_CAPTCHA=true \
     DISPLAY=:99 \
     PERSONAL_BROWSER_HEADLESS=0 \
-    PLAYWRIGHT_BROWSERS_PATH=0
+    NATIVE_CDP_PROFILE_ROOT=/app/tmp/native_cdp_profiles
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
+        chromium \
         fluxbox \
+        fonts-liberation \
+        fonts-noto-cjk \
+        procps \
         x11-utils \
         xauth \
         xvfb \
     && rm -rf /var/lib/apt/lists/*
 
-# 在镜像构建阶段预装 Playwright Chromium，供 personal/browser 模式复用
+# Playwright/nodriver 旧模式也复用系统 Chromium；native_cdp 仅使用 subprocess + CDP。
 COPY requirements.txt ./
 
-RUN pip install --no-cache-dir --root-user-action=ignore -r requirements.txt \
-    && python -m playwright install --with-deps chromium
+RUN pip install --no-cache-dir --root-user-action=ignore -r requirements.txt
 
 COPY . .
 COPY docker/entrypoint.headed.sh /usr/local/bin/entrypoint.headed.sh
