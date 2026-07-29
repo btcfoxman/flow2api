@@ -1158,6 +1158,35 @@ class GenerationHandler:
             )
         return True
 
+    async def _complete_video_task(
+        self,
+        *,
+        task_id: str,
+        token_id: int,
+        result_urls: List[str],
+    ) -> None:
+        """Persist a completed task and immediately refresh its account credits."""
+        await self.db.update_task(
+            task_id,
+            status="completed",
+            progress=100,
+            result_urls=result_urls,
+            completed_at=time.time(),
+        )
+
+        try:
+            credits = await self.token_manager.refresh_credits(token_id)
+            debug_logger.log_info(
+                f"[CREDITS] Refreshed token {token_id} after task {task_id} completed: {credits}"
+            )
+        except Exception as exc:
+            # A balance lookup failure must not turn an already completed generation
+            # into a failed task. The existing credits remain available for inspection.
+            debug_logger.log_warning(
+                f"[CREDITS] Failed to refresh token {token_id} after task "
+                f"{task_id} completed: {exc}"
+            )
+
     def _should_record_token_error(
         self,
         error_message: Any,
@@ -2801,12 +2830,10 @@ class GenerationHandler:
 
                     # 更新数据库
                     task_id = operation["operation"]["name"]
-                    await self.db.update_task(
-                        task_id,
-                        status="completed",
-                        progress=100,
+                    await self._complete_video_task(
+                        task_id=task_id,
+                        token_id=token.id,
                         result_urls=[local_url],
-                        completed_at=time.time()
                     )
 
                     # 存储URL用于日志记录
