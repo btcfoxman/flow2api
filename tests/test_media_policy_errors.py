@@ -1,9 +1,13 @@
 import unittest
 
 from src.core.media_errors import (
+    is_media_traffic_error,
     is_media_policy_error,
     is_project_image_upload_invalid_argument_error,
+    media_generation_failure_reason,
     media_generation_failure_response,
+    MEDIA_POLICY_REASON_PROMINENT_PEOPLE,
+    MEDIA_TRAFFIC_REASON,
     VIDEO_UPLOAD_INVALID_ARGUMENT_MESSAGE,
 )
 from src.services.flow_client import FlowClient
@@ -22,9 +26,35 @@ class MediaPolicyErrorTests(unittest.TestCase):
         self.assertNotIn("PUBLIC_ERROR_UNSAFE_GENERATION", message)
 
     def test_prominent_people_filter_is_policy_error(self):
-        self.assertTrue(
-            is_media_policy_error("PUBLIC_ERROR_PROMINENT_PEOPLE_FILTER_FAILED")
+        error = "PUBLIC_ERROR_PROMINENT_PEOPLE_FILTER_FAILED"
+
+        self.assertTrue(is_media_policy_error(error))
+        self.assertEqual(
+            media_generation_failure_reason(error),
+            MEDIA_POLICY_REASON_PROMINENT_PEOPLE,
         )
+        message, status_code = media_generation_failure_response("video", error)
+        self.assertEqual(status_code, 400)
+        self.assertIn("\u4eba\u7269/\u516c\u4f17\u4eba\u7269\u8fc7\u6ee4", message)
+        self.assertIn("\u4e25\u683c\u9501\u8138", message)
+        self.assertNotIn("PROMINENT_PEOPLE", message)
+
+    def test_unusual_activity_is_reported_as_traffic_control(self):
+        error = (
+            "PUBLIC_ERROR_UNUSUAL_ACTIVITY_TOO_MUCH_TRAFFIC: "
+            "reCAPTCHA evaluation failed"
+        )
+
+        self.assertFalse(is_media_policy_error(error))
+        self.assertTrue(is_media_traffic_error(error))
+        self.assertEqual(
+            media_generation_failure_reason(error),
+            MEDIA_TRAFFIC_REASON,
+        )
+        message, status_code = media_generation_failure_response("video", error)
+        self.assertEqual(status_code, 429)
+        self.assertIn("\u6d41\u91cf\u6216\u5f02\u5e38\u6d3b\u52a8\u98ce\u63a7", message)
+        self.assertIn("\u4e0d\u662f\u5185\u5bb9\u5b89\u5168\u62d2\u7edd", message)
 
     def test_generic_invalid_argument_is_not_policy_error(self):
         self.assertFalse(

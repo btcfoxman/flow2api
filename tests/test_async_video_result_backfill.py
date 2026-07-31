@@ -69,6 +69,8 @@ class AsyncVideoResultBackfillTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response_body["task_id"], "task-failed")
         self.assertNotIn("PUBLIC_ERROR_UNSAFE_GENERATION", response_body["error"])
         self.assertIn("内容安全策略", response_body["error"])
+        self.assertEqual(response_body["failure_reason"], "unsafe_generation")
+        self.assertIn("PUBLIC_ERROR_UNSAFE_GENERATION", response_body["upstream_error"])
 
     async def test_backfill_skips_sync_completed_logs(self):
         await self.db.create_task(

@@ -1321,6 +1321,12 @@
             const toggleLogId=String(log.id??'');
             const errorSummary=extractLogErrorSummary(log,responseBodyObj);
             const successSummary=extractLogSuccessSummary(log,responseBodyObj);
+            const failureReason=responseBodyObj&&typeof responseBodyObj==='object'?String(responseBodyObj.failure_reason||''):'';
+            const failureReasonLabels={
+                unsafe_generation:'一般内容安全过滤（不是请求限流）',
+                prominent_people_filter:'人物/公众人物过滤（不是请求限流）',
+                upstream_traffic_control:'上游流量或异常活动风控'
+            };
             let detailHtml='';
 
             detailHtml+=`<div class="space-y-2"><h4 class="font-medium text-sm">请求数据</h4><pre class="rounded-md border border-border p-3 bg-muted/30 text-xs overflow-x-auto">${escapeLogHtml(requestPayloadText)}</pre></div>`;
@@ -1368,6 +1374,9 @@
             }else{
                 if(errorSummary){
                     detailHtml+=`<div class="space-y-2"><h4 class="font-medium text-sm text-red-600">错误原因</h4><div class="rounded-md border border-red-200 p-3 bg-red-50"><p class="text-sm text-red-700 break-all">${escapeLogHtml(errorSummary)}</p></div></div>`;
+                }
+                if(failureReason){
+                    detailHtml+=`<div class="space-y-2"><h4 class="font-medium text-sm">上游判定</h4><div class="rounded-md border border-border p-3 bg-muted/30"><p class="text-sm">${escapeLogHtml(failureReasonLabels[failureReason]||failureReason)}</p></div></div>`;
                 }
                 detailHtml+=`<div class="space-y-2"><h4 class="font-medium text-sm text-red-600">错误响应</h4><pre class="rounded-md border border-red-200 p-3 bg-red-50 text-xs overflow-x-auto">${escapeLogHtml(responsePayloadText)}</pre></div>`;
             }

@@ -7,7 +7,10 @@ from datetime import date, datetime, timezone
 from typing import Optional, List, Dict, Any
 from pathlib import Path
 from .config import DEFAULT_YESCAPTCHA_TASK_TYPE, normalize_yescaptcha_task_type
-from .media_errors import media_policy_failure_message, is_media_policy_error
+from .media_errors import (
+    media_generation_failure_reason,
+    media_generation_failure_response,
+)
 from .models import Token, TokenStats, Task, RequestLog, AdminConfig, ProxyConfig, GenerationConfig, CacheConfig, WatermarkConfig, Project, CaptchaConfig, PluginConfig, CallLogicConfig
 
 
@@ -1500,13 +1503,25 @@ class Database:
                     status_text = "completed"
                     progress = 100
                 else:
-                    error_message = self._readable_video_error_message(task.get("error_message"))
+                    upstream_error = str(task.get("error_message") or "").strip()
+                    error_message = self._readable_video_error_message(upstream_error)
                     response_body = {
                         "status": "failed",
                         "task_id": task_id,
                         "error": error_message,
                     }
-                    status_code = 400 if "内容安全策略" in error_message else 502
+                    failure_reason = media_generation_failure_reason(upstream_error)
+                    if failure_reason:
+                        response_body["failure_reason"] = failure_reason
+                        response_body["upstream_error"] = upstream_error
+                        status_code = media_generation_failure_response(
+                            "video",
+                            upstream_error,
+                        )[1]
+                    else:
+                        # Keep the historic status for task rows that were already
+                        # sanitized before raw upstream errors were persisted.
+                        status_code = 400 if "内容安全策略" in error_message else 502
                     status_text = "failed"
                     progress = max(int(task.get("progress") or 0), 100)
 
@@ -1582,8 +1597,8 @@ class Database:
         message = str(error_message or "").strip()
         if not message:
             return "视频生成失败，请重试"
-        if is_media_policy_error(message):
-            return media_policy_failure_message("video")
+        if media_generation_failure_reason(message):
+            return media_generation_failure_response("video", message)[0]
         return message
 
     @staticmethod

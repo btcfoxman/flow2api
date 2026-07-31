@@ -126,6 +126,47 @@ class VeoLiteGenerationHandlerTests(unittest.TestCase):
             "视频生成被上游内容安全策略拒绝，请调整提示词或参考图后重试",
         )
 
+    def test_async_video_task_payload_explains_prominent_people_filter(self):
+        handler = GenerationHandler.__new__(GenerationHandler)
+        task = Task(
+            task_id="task-people-filter",
+            token_id=1,
+            model="abra_r2v_10s",
+            prompt="hello",
+            status="failed",
+            progress=100,
+            error_message="PUBLIC_ERROR_PROMINENT_PEOPLE_FILTER_FAILED (code: 3)",
+        )
+
+        payload = handler._task_to_video_payload(task)
+
+        message = payload["error"]["message"]
+        self.assertIn("人物/公众人物过滤", message)
+        self.assertIn("严格锁脸", message)
+        self.assertNotIn("PROMINENT_PEOPLE", message)
+
+    def test_async_video_task_payload_reports_traffic_control_separately(self):
+        handler = GenerationHandler.__new__(GenerationHandler)
+        task = Task(
+            task_id="task-traffic-control",
+            token_id=1,
+            model="abra_t2v_10s",
+            prompt="hello",
+            status="failed",
+            progress=100,
+            error_message=(
+                "PUBLIC_ERROR_UNUSUAL_ACTIVITY_TOO_MUCH_TRAFFIC "
+                "(code: RESOURCE_EXHAUSTED)"
+            ),
+        )
+
+        payload = handler._task_to_video_payload(task)
+
+        message = payload["error"]["message"]
+        self.assertIn("流量或异常活动风控", message)
+        self.assertIn("不是内容安全拒绝", message)
+        self.assertNotIn("UNUSUAL_ACTIVITY", message)
+
     def test_terminal_video_task_payload_reports_complete_progress(self):
         handler = GenerationHandler.__new__(GenerationHandler)
         task = Task(

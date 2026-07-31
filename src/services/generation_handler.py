@@ -14,6 +14,7 @@ from ..core.credits import (
 from ..core.media_errors import (
     is_media_policy_error,
     is_project_image_upload_invalid_argument_error,
+    media_generation_failure_reason,
     media_generation_failure_response,
     VIDEO_UPLOAD_INVALID_ARGUMENT_MESSAGE,
 )
@@ -981,10 +982,6 @@ VIDEO_REFERENCE_MAX_DURATION_SECONDS = 10.0
 VIDEO_REFERENCE_REJECT_DURATION_SECONDS = 11.0
 
 
-def _is_video_policy_error(error_message: Any) -> bool:
-    return is_media_policy_error(error_message)
-
-
 def _video_generation_failure_response(error_message: Any) -> tuple[str, int]:
     return media_generation_failure_response("video", error_message)
 
@@ -1640,7 +1637,10 @@ class GenerationHandler:
             elif generation_type == "video" and is_project_image_upload_invalid_argument_error(raw_error_msg):
                 error_msg = VIDEO_UPLOAD_INVALID_ARGUMENT_MESSAGE
                 response_status_code = 400
-            elif generation_type in {"image", "video"} and is_media_policy_error(raw_error_msg):
+            elif (
+                generation_type in {"image", "video"}
+                and media_generation_failure_reason(raw_error_msg)
+            ):
                 error_msg, response_status_code = media_generation_failure_response(
                     generation_type,
                     raw_error_msg,
@@ -2879,29 +2879,35 @@ class GenerationHandler:
                     error_code = error_info.get("code", "unknown")
                     error_message = error_info.get("message", "未知错误")
                     friendly_error, response_status_code = _video_generation_failure_response(error_message)
+                    failure_reason = media_generation_failure_reason(error_message)
                     
-                    # 更新数据库任务状态
+                    # Preserve the upstream reason in the internal task row. Public
+                    # task payloads sanitize it through _public_video_task_error_message.
                     await self._fail_video_task(
                         checked_operations,
-                        friendly_error if _is_video_policy_error(error_message) else f"{error_message} (code: {error_code})"
+                        f"{error_message} (code: {error_code})",
                     )
                     
-                    # 内容安全拒绝是上游策略结果，不应包装成 5xx 服务故障。
+                    # Task-level policy/traffic results are client/upstream control
+                    # outcomes and must not be wrapped as an internal 5xx failure.
                     self._mark_generation_failed(
                         generation_result,
                         friendly_error,
                         status_code=response_status_code,
                     )
+                    failure_response = {
+                        "status": "failed",
+                        "error": friendly_error,
+                        "task_id": _operation_task_id(checked_operations),
+                        "upstream_error": error_message,
+                        "upstream_code": error_code,
+                    }
+                    if failure_reason:
+                        failure_response["failure_reason"] = failure_reason
                     await self._finalize_async_video_result_log(
                         request_log_state,
                         token_id=token.id,
-                        response_data={
-                            "status": "failed",
-                            "error": friendly_error,
-                            "task_id": _operation_task_id(checked_operations),
-                            "upstream_error": error_message,
-                            "upstream_code": error_code,
-                        },
+                        response_data=failure_response,
                         status_code=response_status_code,
                         status_text="failed",
                         progress=100,
@@ -3150,7 +3156,7 @@ class GenerationHandler:
 
     def _public_video_task_error_message(self, error_message: Any) -> str:
         message = self._normalize_error_message(error_message)
-        if _is_video_policy_error(message):
+        if media_generation_failure_reason(message):
             return _video_generation_failure_response(message)[0]
         return message
 
