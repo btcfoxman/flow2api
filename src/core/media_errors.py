@@ -61,9 +61,17 @@ UPSTREAM_TRAFFIC_FAILURE_MESSAGE = (
     "\u4fee\u6539\u63d0\u793a\u8bcd\u6216\u53c2\u8003\u56fe"
 )
 VIDEO_UPLOAD_INVALID_ARGUMENT_MESSAGE = (
-    "\u53c2\u8003\u56fe\u4e0a\u4f20\u88ab\u4e0a\u6e38\u62d2"
-    "\u7edd\uff0c\u8bf7\u66f4\u6362\u6216\u91cd\u65b0\u538b"
-    "\u7f29\u53c2\u8003\u56fe\u540e\u91cd\u8bd5"
+    "\u53c2\u8003\u56fe\u4e0a\u4f20\u8bf7\u6c42\u88ab\u4e0a"
+    "\u6e38\u62d2\u7edd\uff0c\u8bf7\u66f4\u6362\u6216\u91cd"
+    "\u65b0\u538b\u7f29\u53c2\u8003\u56fe\u540e\u91cd\u8bd5"
+    "\uff1b\u5982\u4ecd\u5931\u8d25\uff0c\u8bf7\u91cd\u65b0"
+    "\u521b\u5efa\u8be5\u8d26\u53f7\u7684 Flow \u9879\u76ee"
+)
+VIDEO_UPLOAD_FAILURE_MESSAGE = (
+    "\u53c2\u8003\u56fe\u4e0a\u4f20\u5931\u8d25\uff0c\u8bf7"
+    "\u7a0d\u540e\u91cd\u8bd5\uff1b\u5982\u6301\u7eed\u5931"
+    "\u8d25\uff0c\u8bf7\u91cd\u65b0\u521b\u5efa\u8be5\u8d26"
+    "\u53f7\u7684 Flow \u9879\u76ee"
 )
 
 
@@ -111,6 +119,19 @@ def is_project_image_upload_invalid_argument_error(error_message: Any) -> bool:
         "project-scoped image upload failed via /flow/uploadimage" in error_lower
         and "request contains an invalid argument" in error_lower
     )
+
+
+def is_project_image_upload_error(error_message: Any) -> bool:
+    """Return True for any project-scoped reference-image upload failure."""
+    error_lower = str(error_message or "").strip().lower()
+    return "project-scoped image upload failed via /flow/uploadimage" in error_lower
+
+
+def project_image_upload_failure_response(error_message: Any) -> tuple[str, int]:
+    """Return a safe public response for project-scoped upload failures."""
+    if is_project_image_upload_invalid_argument_error(error_message):
+        return VIDEO_UPLOAD_INVALID_ARGUMENT_MESSAGE, 400
+    return VIDEO_UPLOAD_FAILURE_MESSAGE, 502
 
 
 def media_policy_failure_message(media_type: str, error_message: Any = None) -> str:

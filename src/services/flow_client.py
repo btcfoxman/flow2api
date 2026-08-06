@@ -974,16 +974,21 @@ class FlowClient:
             JPEG 格式的图片字节数据
         """
         from io import BytesIO
-        from PIL import Image
+        from PIL import Image, ImageOps
 
-        img = Image.open(BytesIO(image_bytes))
-        # 如果有透明通道，转换为 RGB
-        if img.mode in ('RGBA', 'LA', 'P'):
-            img = img.convert('RGB')
-        
-        output = BytesIO()
-        img.save(output, format='JPEG', quality=95)
-        return output.getvalue()
+        with Image.open(BytesIO(image_bytes)) as source:
+            img = ImageOps.exif_transpose(source)
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+
+            # This path is only used after upstream rejected the original image.
+            # Bound both dimensions and encoded size before retrying.
+            resampling = getattr(Image, "Resampling", Image)
+            img.thumbnail((4096, 4096), resampling.LANCZOS)
+
+            output = BytesIO()
+            img.save(output, format="JPEG", quality=90, optimize=True)
+            return output.getvalue()
 
     @staticmethod
     def _summarize_exception(error: Any, max_length: int = 600) -> str:
@@ -1063,6 +1068,7 @@ class FlowClient:
         new_url = f"{self.api_base_url}/flow/uploadImage"
         normalized_project_id = str(project_id or "").strip()
         new_client_context = {
+            "sessionId": self._generate_session_id(),
             "tool": "PINHOLE"
         }
         if normalized_project_id:
@@ -1092,15 +1098,10 @@ class FlowClient:
                 new_result = await self._make_request(
                     method="POST",
                     url=new_url,
-                    headers={
-                        "Content-Type": "text/plain;charset=UTF-8",
-                        "Referer": "https://labs.google/",
-                    },
                     json_data=new_json_data,
                     use_at=True,
                     at_token=at,
                     use_media_proxy=True,
-                    apply_default_client_headers=False,
                 )
                 media_id = (
                     self._extract_media_name(new_result.get("media"))

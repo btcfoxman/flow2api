@@ -3,11 +3,14 @@ import unittest
 from src.core.media_errors import (
     is_media_traffic_error,
     is_media_policy_error,
+    is_project_image_upload_error,
     is_project_image_upload_invalid_argument_error,
     media_generation_failure_reason,
     media_generation_failure_response,
+    project_image_upload_failure_response,
     MEDIA_POLICY_REASON_PROMINENT_PEOPLE,
     MEDIA_TRAFFIC_REASON,
+    VIDEO_UPLOAD_FAILURE_MESSAGE,
     VIDEO_UPLOAD_INVALID_ARGUMENT_MESSAGE,
 )
 from src.services.flow_client import FlowClient
@@ -79,6 +82,22 @@ class MediaPolicyErrorTests(unittest.TestCase):
             ),
             VIDEO_UPLOAD_INVALID_ARGUMENT_MESSAGE,
         )
+
+    def test_generic_project_image_upload_failure_is_safe_upstream_error(self):
+        error = (
+            "Project-scoped image upload failed via /flow/uploadImage "
+            "(project_id=project-123, cause=HTTP Error 500: upstream failed)"
+        )
+
+        self.assertTrue(is_project_image_upload_error(error))
+        self.assertFalse(is_project_image_upload_invalid_argument_error(error))
+        message, status_code = project_image_upload_failure_response(error)
+        self.assertEqual(status_code, 502)
+        self.assertEqual(message, VIDEO_UPLOAD_FAILURE_MESSAGE)
+        self.assertNotIn("project-123", message)
+
+        handler = GenerationHandler.__new__(GenerationHandler)
+        self.assertEqual(handler._normalize_error_message(error), message)
 
     def test_flow_client_does_not_retry_media_policy_error(self):
         reason = FlowClient(None)._get_retry_reason(

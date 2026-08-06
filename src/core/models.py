@@ -124,6 +124,7 @@ class AdminConfig(BaseModel):
     password: str
     api_key: str
     error_ban_threshold: int = 3  # Auto-disable token after N consecutive errors
+    minimum_generation_credits: int = 15
 
 
 class ProxyConfig(BaseModel):

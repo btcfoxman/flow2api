@@ -64,6 +64,26 @@ class Config:
         """Set admin username from database"""
         self._admin_username = username
 
+    @property
+    def minimum_generation_credits(self) -> int:
+        value = self._config.get("admin", {}).get(
+            "minimum_generation_credits",
+            15,
+        )
+        try:
+            return max(0, min(100000, int(value)))
+        except (TypeError, ValueError):
+            return 15
+
+    def set_minimum_generation_credits(self, value: int):
+        if "admin" not in self._config:
+            self._config["admin"] = {}
+        try:
+            normalized = max(0, min(100000, int(value)))
+        except (TypeError, ValueError):
+            normalized = 15
+        self._config["admin"]["minimum_generation_credits"] = normalized
+
     # Flow2API specific properties
     @property
     def flow_labs_base_url(self) -> str:

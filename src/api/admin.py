@@ -633,6 +633,7 @@ class UpdateDebugConfigRequest(BaseModel):
 
 class UpdateAdminConfigRequest(BaseModel):
     error_ban_threshold: int
+    minimum_generation_credits: Optional[int] = None
 
 
 class ST2ATRequest(BaseModel):
@@ -1457,6 +1458,7 @@ async def get_admin_config(token: str = Depends(verify_admin_token)):
         "admin_username": admin_config.username,
         "api_key": admin_config.api_key,
         "error_ban_threshold": admin_config.error_ban_threshold,
+        "minimum_generation_credits": admin_config.minimum_generation_credits,
         "debug_enabled": config.debug_enabled  # Return actual debug status
     }
 
@@ -1466,9 +1468,25 @@ async def update_admin_config(
     request: UpdateAdminConfigRequest,
     token: str = Depends(verify_admin_token)
 ):
-    """Update admin configuration (error_ban_threshold)"""
-    # Update error_ban_threshold in database
-    await db.update_admin_config(error_ban_threshold=request.error_ban_threshold)
+    """Update admin scheduling and error configuration."""
+    update_fields: Dict[str, Any] = {
+        "error_ban_threshold": request.error_ban_threshold,
+    }
+    if request.minimum_generation_credits is not None:
+        if not 0 <= request.minimum_generation_credits <= 100000:
+            raise HTTPException(
+                status_code=400,
+                detail="minimum_generation_credits must be between 0 and 100000",
+            )
+        update_fields["minimum_generation_credits"] = (
+            request.minimum_generation_credits
+        )
+
+    await db.update_admin_config(**update_fields)
+    if request.minimum_generation_credits is not None:
+        config.set_minimum_generation_credits(
+            request.minimum_generation_credits
+        )
 
     return {"success": True, "message": "配置更新成功"}
 

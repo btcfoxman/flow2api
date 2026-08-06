@@ -89,6 +89,7 @@ class Database:
             admin_password = "admin"
             api_key = "han1234"
             error_ban_threshold = 3
+            minimum_generation_credits = 15
 
             if config_dict:
                 global_config = config_dict.get("global", {})
@@ -98,11 +99,24 @@ class Database:
 
                 admin_config = config_dict.get("admin", {})
                 error_ban_threshold = admin_config.get("error_ban_threshold", 3)
+                minimum_generation_credits = admin_config.get(
+                    "minimum_generation_credits",
+                    15,
+                )
 
             await db.execute("""
-                INSERT INTO admin_config (id, username, password, api_key, error_ban_threshold)
-                VALUES (1, ?, ?, ?, ?)
-            """, (admin_username, admin_password, api_key, error_ban_threshold))
+                INSERT INTO admin_config (
+                    id, username, password, api_key, error_ban_threshold,
+                    minimum_generation_credits
+                )
+                VALUES (1, ?, ?, ?, ?, ?)
+            """, (
+                admin_username,
+                admin_password,
+                api_key,
+                error_ban_threshold,
+                minimum_generation_credits,
+            ))
 
         # Ensure proxy_config has a row
         cursor = await db.execute("SELECT COUNT(*) FROM proxy_config")
@@ -582,6 +596,15 @@ class Database:
                         print("  ✓ Added column 'error_ban_threshold' to admin_config table")
                     except Exception as e:
                         print(f"  ✗ Failed to add column 'error_ban_threshold': {e}")
+                if not await self._column_exists(db, "admin_config", "minimum_generation_credits"):
+                    try:
+                        await db.execute(
+                            "ALTER TABLE admin_config ADD COLUMN "
+                            "minimum_generation_credits INTEGER DEFAULT 15"
+                        )
+                        print("  Added column 'minimum_generation_credits' to admin_config table")
+                    except Exception as e:
+                        print(f"  Failed to add column 'minimum_generation_credits': {e}")
 
             # Check and add missing columns to proxy_config table
             if await self._table_exists(db, "proxy_config"):
@@ -856,6 +879,7 @@ class Database:
                     password TEXT DEFAULT 'admin',
                     api_key TEXT DEFAULT 'han1234',
                     error_ban_threshold INTEGER DEFAULT 3,
+                    minimum_generation_credits INTEGER DEFAULT 15,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
@@ -2129,6 +2153,9 @@ class Database:
             config.set_admin_username_from_db(admin_config.username)
             config.set_admin_password_from_db(admin_config.password)
             config.api_key = admin_config.api_key
+            config.set_minimum_generation_credits(
+                admin_config.minimum_generation_credits
+            )
 
         # Reload cache config
         cache_config = await self.get_cache_config()

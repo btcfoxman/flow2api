@@ -1,6 +1,9 @@
 import unittest
 import base64
+from io import BytesIO
 from unittest.mock import AsyncMock, patch
+
+from PIL import Image
 
 from src.services.flow_client import FlowClient
 
@@ -38,13 +41,9 @@ class FlowClientUploadImageTests(unittest.IsolatedAsyncioTestCase):
             request_calls[0]["json_data"]["clientContext"]["projectId"],
             "project-123",
         )
-        self.assertNotIn("sessionId", request_calls[0]["json_data"]["clientContext"])
-        self.assertEqual(
-            request_calls[0]["headers"]["Content-Type"],
-            "text/plain;charset=UTF-8",
-        )
-        self.assertEqual(request_calls[0]["headers"]["Referer"], "https://labs.google/")
-        self.assertFalse(request_calls[0]["apply_default_client_headers"])
+        self.assertTrue(request_calls[0]["json_data"]["clientContext"]["sessionId"])
+        self.assertNotIn("headers", request_calls[0])
+        self.assertNotIn("apply_default_client_headers", request_calls[0])
 
     async def test_project_scoped_upload_accepts_media_list_response(self):
         client = FlowClient(proxy_manager=None)
@@ -151,6 +150,19 @@ class FlowClientUploadImageTests(unittest.IsolatedAsyncioTestCase):
             request_calls[1]["json_data"]["imageBytes"],
             base64.b64encode(normalized_bytes).decode("utf-8"),
         )
+        self.assertTrue(request_calls[1]["json_data"]["clientContext"]["sessionId"])
+
+    async def test_rejected_image_normalization_bounds_dimensions_and_uses_rgb_jpeg(self):
+        client = FlowClient(proxy_manager=None)
+        source = BytesIO()
+        Image.new("RGBA", (5000, 100), (255, 0, 0, 128)).save(source, format="PNG")
+
+        normalized = client._convert_to_jpeg(source.getvalue())
+
+        with Image.open(BytesIO(normalized)) as image:
+            self.assertEqual(image.format, "JPEG")
+            self.assertEqual(image.mode, "RGB")
+            self.assertLessEqual(max(image.size), 4096)
 
     async def test_upload_without_project_id_keeps_legacy_fallback(self):
         client = FlowClient(proxy_manager=None)

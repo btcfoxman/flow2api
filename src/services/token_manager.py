@@ -5,7 +5,7 @@ from typing import Optional, List
 from ..core.database import Database
 from ..core.config import config
 from ..core.credits import (
-    MIN_GENERATION_CREDITS,
+    get_minimum_generation_credits,
     has_minimum_generation_credits,
 )
 from ..core.models import Token, Project
@@ -803,10 +803,11 @@ class TokenManager:
             await self.db.update_token(token_id, credits=0)
             stored_credits = 0
 
-        if not has_minimum_generation_credits(stored_credits):
+        minimum_credits = get_minimum_generation_credits()
+        if not has_minimum_generation_credits(stored_credits, minimum_credits):
             debug_logger.log_warning(
                 f"[QUOTA] Token {token_id} credits={stored_credits} below minimum "
-                f"{MIN_GENERATION_CREDITS}; it will be excluded from generation scheduling"
+                f"{minimum_credits}; it will be excluded from generation scheduling"
             )
         else:
             debug_logger.log_warning(

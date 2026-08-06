@@ -5,7 +5,7 @@ from typing import Optional, Dict
 from ..core.models import Token
 from ..core.config import config
 from ..core.credits import (
-    MIN_GENERATION_CREDITS,
+    get_minimum_generation_credits,
     has_minimum_generation_credits,
 )
 from ..core.account_tiers import (
@@ -184,10 +184,11 @@ class LoadBalancer:
         available_tokens = []
         filtered_reasons = {}
         required_tier = get_required_paygate_tier_for_model(model)
+        minimum_credits = get_minimum_generation_credits()
 
         for token in active_tokens:
-            if not has_minimum_generation_credits(token.credits):
-                filtered_reasons[token.id] = f"credits below {MIN_GENERATION_CREDITS}"
+            if not has_minimum_generation_credits(token.credits, minimum_credits):
+                filtered_reasons[token.id] = f"credits below {minimum_credits}"
                 continue
 
             normalized_tier = normalize_user_paygate_tier(token.user_paygate_tier)
@@ -354,14 +355,15 @@ class LoadBalancer:
                 continue
             capability_tokens.append(token)
 
+        minimum_credits = get_minimum_generation_credits()
         funded_tokens = [
             token for token in capability_tokens
-            if has_minimum_generation_credits(token.credits)
+            if has_minimum_generation_credits(token.credits, minimum_credits)
         ]
         if capability_tokens and not funded_tokens:
             return (
                 f"\u5f53\u524d\u7b26\u5408\u6761\u4ef6\u7684\u8d26\u53f7"
-                f"\u989d\u5ea6\u5747\u4f4e\u4e8e {MIN_GENERATION_CREDITS}"
+                f"\u989d\u5ea6\u5747\u4f4e\u4e8e {minimum_credits}"
                 "\uff0c\u5df2\u505c\u6b62\u8c03\u7528\u4f4e\u989d\u5ea6"
                 "\u8d26\u53f7\u3002\u8bf7\u5237\u65b0\u989d\u5ea6"
                 "\u6216\u8865\u5145\u53ef\u7528\u8d26\u53f7\u3002"
