@@ -1,5 +1,6 @@
-"""Shared media-generation error classification helpers."""
+"""Shared media-generation error classification and public-message helpers."""
 
+import re
 from typing import Any, Optional
 
 
@@ -14,65 +15,57 @@ MEDIA_POLICY_REASON_UNSAFE_GENERATION = "unsafe_generation"
 MEDIA_POLICY_REASON_PROMINENT_PEOPLE = "prominent_people_filter"
 MEDIA_TRAFFIC_REASON = "upstream_traffic_control"
 
-IMAGE_POLICY_FAILURE_MESSAGE = (
-    "\u56fe\u7247\u751f\u6210\u88ab\u4e0a\u6e38\u5185\u5bb9"
-    "\u5b89\u5168\u7b56\u7565\u62d2\u7edd\uff0c\u8bf7\u8c03"
-    "\u6574\u63d0\u793a\u8bcd\u6216\u53c2\u8003\u56fe\u540e"
-    "\u91cd\u8bd5"
-)
-VIDEO_POLICY_FAILURE_MESSAGE = (
-    "\u89c6\u9891\u751f\u6210\u88ab\u4e0a\u6e38\u5185\u5bb9"
-    "\u5b89\u5168\u7b56\u7565\u62d2\u7edd\uff0c\u8bf7\u8c03"
-    "\u6574\u63d0\u793a\u8bcd\u6216\u53c2\u8003\u56fe\u540e"
-    "\u91cd\u8bd5"
-)
-MEDIA_POLICY_FAILURE_MESSAGE = (
-    "\u5a92\u4f53\u751f\u6210\u88ab\u4e0a\u6e38\u5185\u5bb9"
-    "\u5b89\u5168\u7b56\u7565\u62d2\u7edd\uff0c\u8bf7\u8c03"
-    "\u6574\u63d0\u793a\u8bcd\u6216\u53c2\u8003\u7d20\u6750"
-    "\u540e\u91cd\u8bd5"
-)
+IMAGE_POLICY_FAILURE_MESSAGE = "图片生成被内容安全策略拒绝，请调整提示词或参考图后重试"
+VIDEO_POLICY_FAILURE_MESSAGE = "视频生成被内容安全策略拒绝，请调整提示词或参考图后重试"
+MEDIA_POLICY_FAILURE_MESSAGE = "媒体生成被内容安全策略拒绝，请调整提示词或参考素材后重试"
 IMAGE_PROMINENT_PEOPLE_FAILURE_MESSAGE = (
-    "\u56fe\u7247\u751f\u6210\u89e6\u53d1\u4e0a\u6e38\u4eba"
-    "\u7269/\u516c\u4f17\u4eba\u7269\u8fc7\u6ee4\uff0c\u8bf7"
-    "\u66f4\u6362\u53c2\u8003\u56fe\uff0c\u6216\u79fb\u9664"
-    "\u4e25\u683c\u9501\u8138\u3001\u8eab\u4efd\u590d\u523b"
-    "\u7c7b\u63cf\u8ff0\u540e\u91cd\u8bd5"
+    "图片生成触发人物/公众人物过滤，请更换参考图，或移除严格锁脸、身份复刻类描述后重试"
 )
 VIDEO_PROMINENT_PEOPLE_FAILURE_MESSAGE = (
-    "\u89c6\u9891\u751f\u6210\u89e6\u53d1\u4e0a\u6e38\u4eba"
-    "\u7269/\u516c\u4f17\u4eba\u7269\u8fc7\u6ee4\uff0c\u8bf7"
-    "\u66f4\u6362\u53c2\u8003\u56fe\uff0c\u6216\u79fb\u9664"
-    "\u4e25\u683c\u9501\u8138\u3001\u8eab\u4efd\u590d\u523b"
-    "\u7c7b\u63cf\u8ff0\u540e\u91cd\u8bd5"
+    "视频生成触发人物/公众人物过滤，请更换参考图，或移除严格锁脸、身份复刻类描述后重试"
 )
 MEDIA_PROMINENT_PEOPLE_FAILURE_MESSAGE = (
-    "\u5a92\u4f53\u751f\u6210\u89e6\u53d1\u4e0a\u6e38\u4eba"
-    "\u7269/\u516c\u4f17\u4eba\u7269\u8fc7\u6ee4\uff0c\u8bf7"
-    "\u66f4\u6362\u53c2\u8003\u7d20\u6750\uff0c\u6216\u79fb"
-    "\u9664\u4e25\u683c\u9501\u8138\u3001\u8eab\u4efd\u590d"
-    "\u523b\u7c7b\u63cf\u8ff0\u540e\u91cd\u8bd5"
+    "媒体生成触发人物/公众人物过滤，请更换参考素材，或移除严格锁脸、身份复刻类描述后重试"
 )
 UPSTREAM_TRAFFIC_FAILURE_MESSAGE = (
-    "\u5a92\u4f53\u751f\u6210\u89e6\u53d1\u4e0a\u6e38\u6d41"
-    "\u91cf\u6216\u5f02\u5e38\u6d3b\u52a8\u98ce\u63a7\uff0c"
-    "\u8bf7\u7a0d\u540e\u91cd\u8bd5\uff1b\u8fd9\u4e0d\u662f"
-    "\u5185\u5bb9\u5b89\u5168\u62d2\u7edd\uff0c\u65e0\u9700"
-    "\u4fee\u6539\u63d0\u793a\u8bcd\u6216\u53c2\u8003\u56fe"
+    "媒体生成触发流量或异常活动风控，请稍后重试；"
+    "这不是内容安全拒绝，无需修改提示词或参考图"
 )
 VIDEO_UPLOAD_INVALID_ARGUMENT_MESSAGE = (
-    "\u53c2\u8003\u56fe\u4e0a\u4f20\u8bf7\u6c42\u88ab\u4e0a"
-    "\u6e38\u62d2\u7edd\uff0c\u8bf7\u66f4\u6362\u6216\u91cd"
-    "\u65b0\u538b\u7f29\u53c2\u8003\u56fe\u540e\u91cd\u8bd5"
-    "\uff1b\u5982\u4ecd\u5931\u8d25\uff0c\u8bf7\u91cd\u65b0"
-    "\u521b\u5efa\u8be5\u8d26\u53f7\u7684 Flow \u9879\u76ee"
+    "参考图上传请求被拒绝，请更换或重新压缩参考图后重试；"
+    "如仍失败，请重新创建该账号的生成项目"
 )
 VIDEO_UPLOAD_FAILURE_MESSAGE = (
-    "\u53c2\u8003\u56fe\u4e0a\u4f20\u5931\u8d25\uff0c\u8bf7"
-    "\u7a0d\u540e\u91cd\u8bd5\uff1b\u5982\u6301\u7eed\u5931"
-    "\u8d25\uff0c\u8bf7\u91cd\u65b0\u521b\u5efa\u8be5\u8d26"
-    "\u53f7\u7684 Flow \u9879\u76ee"
+    "参考图上传失败，请稍后重试；如持续失败，请重新创建该账号的生成项目"
 )
+
+
+_PUBLIC_UPSTREAM_PATTERNS = (
+    (
+        re.compile(
+            r"https?://[^\s\]\[(){}<>\"']*flow[^\s\]\[(){}<>\"']*",
+            re.IGNORECASE,
+        ),
+        "生成服务地址",
+    ),
+    (
+        re.compile(r"/flow/[a-z0-9._~!$&'()*+,;=:@%/-]*", re.IGNORECASE),
+        "生成服务接口",
+    ),
+    (re.compile(r"\bflow\s*2\s*api\b", re.IGNORECASE), "生成服务"),
+    (re.compile(r"\bflow(?:\s+browser)?\s+api\b", re.IGNORECASE), "生成服务"),
+    (re.compile(r"\bflow\b", re.IGNORECASE), "生成服务"),
+    (re.compile(r"\bupstream\b", re.IGNORECASE), "生成服务"),
+)
+
+
+def sanitize_public_error_message(error_message: Any) -> str:
+    """Remove provider names, endpoints, and upstream terminology from public errors."""
+    text = str(error_message or "").strip() or "生成服务暂时不可用，请稍后重试"
+    text = text.replace("上游", "生成服务")
+    for pattern, replacement in _PUBLIC_UPSTREAM_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return re.sub(r"(?:生成服务\s*){2,}", "生成服务", text).strip()
 
 
 def media_policy_reason(error_message: Any) -> Optional[str]:
@@ -169,7 +162,7 @@ def media_generation_failure_response(
         "video": "\u89c6\u9891",
     }.get(media_type, "\u5a92\u4f53")
     return (
-        f"{media_label}\u751f\u6210\u5931\u8d25: {text}\uff0c"
+        f"{media_label}\u751f\u6210\u5931\u8d25: {sanitize_public_error_message(text)}\uff0c"
         "\u8bf7\u91cd\u8bd5",
         502,
     )

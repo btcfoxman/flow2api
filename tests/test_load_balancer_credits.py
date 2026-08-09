@@ -89,6 +89,21 @@ class LoadBalancerCreditsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(selected.id, enough.id)
         self.assertEqual(token_manager.ensure_calls, [enough.id])
 
+    async def test_select_token_excludes_accounts_already_tried_by_request(self):
+        first = make_token(1, get_minimum_generation_credits())
+        second = make_token(2, get_minimum_generation_credits())
+        token_manager = FakeTokenManager([first, second])
+        balancer = LoadBalancer(token_manager)
+
+        selected = await balancer.select_token(
+            for_video_generation=True,
+            exclude_token_ids={first.id},
+        )
+
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected.id, second.id)
+        self.assertEqual(token_manager.ensure_calls, [second.id])
+
 
 if __name__ == "__main__":
     unittest.main()

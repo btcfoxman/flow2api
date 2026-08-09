@@ -18,6 +18,7 @@ from pydantic import AliasChoices, BaseModel, Field
 
 from ..core.auth import AuthManager, verify_api_key_flexible
 from ..core.logger import debug_logger
+from ..core.media_errors import sanitize_public_error_message
 from ..core.model_resolver import extract_generation_params, get_base_model_aliases, resolve_model_name
 from ..core.models import (
     ChatCompletionRequest,
@@ -939,12 +940,12 @@ def _extract_error_message(payload: Dict[str, Any]) -> str:
     if isinstance(error, dict):
         message = error.get("message") or error.get("error") or error.get("detail")
         if message:
-            return str(message)
+            return sanitize_public_error_message(message)
     if isinstance(error, str) and error.strip():
-        return error.strip()
+        return sanitize_public_error_message(error)
     message = payload.get("message") or payload.get("detail")
     if message:
-        return str(message)
+        return sanitize_public_error_message(message)
     return "视频任务提交失败，请稍后重试"
 
 
@@ -1022,7 +1023,7 @@ async def _create_deferred_async_video_task(
             )
         return {
             "error": {
-                "message": message or "上游额度不足，暂无法生成视频。",
+                "message": message or "当前没有额度充足的可用账号，暂无法生成视频。",
                 "type": "server_error",
                 "code": "generation_failed",
                 "status_code": 503,
@@ -1031,7 +1032,7 @@ async def _create_deferred_async_video_task(
     if token.id is None:
         return {
             "error": {
-                "message": "上游账号状态异常，暂无法生成视频。",
+                "message": "当前账号状态异常，暂无法生成视频。",
                 "type": "server_error",
                 "code": "generation_failed",
                 "status_code": 503,
@@ -1092,7 +1093,7 @@ async def _run_deferred_async_video_task(
                 local_task_id,
                 status="failed",
                 progress=100,
-                error_message="视频任务提交失败：上游未返回 task_id",
+                error_message="视频任务提交失败：生成服务未返回 task_id",
                 completed_at=time.time(),
             )
             return
@@ -1109,7 +1110,7 @@ async def _run_deferred_async_video_task(
             local_task_id,
             status="failed",
             progress=100,
-            error_message=str(exc) or exc.__class__.__name__,
+            error_message=sanitize_public_error_message(str(exc) or exc.__class__.__name__),
             completed_at=time.time(),
         )
 
@@ -1162,7 +1163,7 @@ async def _mirror_upstream_video_task(
         local_task_id,
         status="failed",
         progress=100,
-        error_message="视频任务提交后同步上游结果超时",
+        error_message="视频任务提交后同步结果超时",
         completed_at=time.time(),
     )
 
@@ -1187,7 +1188,18 @@ def _get_error_status_code(payload: Dict[str, Any]) -> int:
 
 
 def _build_openai_json_response(payload: Dict[str, Any]) -> JSONResponse:
-    return JSONResponse(content=payload, status_code=_get_error_status_code(payload))
+    public_payload = payload
+    error = payload.get("error")
+    if isinstance(error, dict):
+        public_payload = dict(payload)
+        public_error = dict(error)
+        if public_error.get("message"):
+            public_error["message"] = sanitize_public_error_message(public_error["message"])
+        public_payload["error"] = public_error
+    elif isinstance(error, str):
+        public_payload = dict(payload)
+        public_payload["error"] = sanitize_public_error_message(error)
+    return JSONResponse(content=public_payload, status_code=_get_error_status_code(public_payload))
 
 
 def _new_image_response_id() -> str:
@@ -1339,7 +1351,7 @@ def _build_responses_image_payload(task: Dict[str, Any]) -> Dict[str, Any]:
 
     if status == "failed":
         response_error = {
-            "message": str(error_message or "Image generation failed"),
+            "message": sanitize_public_error_message(error_message or "Image generation failed"),
             "type": "server_error",
             "code": "generation_failed",
         }
@@ -1466,7 +1478,7 @@ async def _run_async_image_response_task(
         await _update_image_response_task(
             response_id,
             status="failed",
-            error=str(exc) or exc.__class__.__name__,
+            error=sanitize_public_error_message(str(exc) or exc.__class__.__name__),
             completed_at=int(time.time()),
         )
 
@@ -1506,7 +1518,7 @@ def _build_gemini_error_payload(status_code: int, message: str) -> Dict[str, Any
     return {
         "error": {
             "code": status_code,
-            "message": message,
+            "message": sanitize_public_error_message(message),
             "status": GEMINI_STATUS_MAP.get(status_code, "UNKNOWN"),
         }
     }
@@ -1874,7 +1886,7 @@ async def create_chat_completion(
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail=sanitize_public_error_message(exc))
 
 
 @router.post("/v1/responses")
@@ -1896,7 +1908,7 @@ async def create_image_response(
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail=sanitize_public_error_message(exc))
 
 
 @router.get("/v1/responses/{response_id:path}")
@@ -1941,7 +1953,7 @@ async def create_video_task(
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail=sanitize_public_error_message(exc))
 
 
 @router.post(
@@ -1967,7 +1979,10 @@ async def remove_video_watermark(
             public_base_url=_get_request_base_url(raw_request),
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=400,
+            detail=sanitize_public_error_message(exc),
+        ) from exc
     except RuntimeError as exc:
         debug_logger.log_error(
             error_message=f"Public watermark removal failed: {exc}",

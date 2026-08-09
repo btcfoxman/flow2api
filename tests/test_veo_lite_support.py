@@ -123,7 +123,7 @@ class VeoLiteGenerationHandlerTests(unittest.TestCase):
         self.assertEqual(payload["status"], "failed")
         self.assertEqual(
             payload["error"]["message"],
-            "视频生成被上游内容安全策略拒绝，请调整提示词或参考图后重试",
+            "视频生成被内容安全策略拒绝，请调整提示词或参考图后重试",
         )
 
     def test_async_video_task_payload_explains_prominent_people_filter(self):

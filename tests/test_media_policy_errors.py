@@ -8,6 +8,7 @@ from src.core.media_errors import (
     media_generation_failure_reason,
     media_generation_failure_response,
     project_image_upload_failure_response,
+    sanitize_public_error_message,
     MEDIA_POLICY_REASON_PROMINENT_PEOPLE,
     MEDIA_TRAFFIC_REASON,
     VIDEO_UPLOAD_FAILURE_MESSAGE,
@@ -127,6 +128,24 @@ class MediaPolicyErrorTests(unittest.TestCase):
         self.assertTrue(
             handler._should_record_token_error("Token AT invalid or refresh failed", 503)
         )
+
+    def test_public_error_message_hides_provider_terms_and_endpoints(self):
+        message = sanitize_public_error_message(
+            "Flow API request failed via /flow/uploadImage: upstream unavailable"
+        )
+
+        self.assertNotIn("flow", message.lower())
+        self.assertNotIn("/flow/", message.lower())
+        self.assertNotIn("upstream", message.lower())
+        self.assertNotIn("上游", message)
+        self.assertIn("生成服务", message)
+
+        handler = GenerationHandler.__new__(GenerationHandler)
+        response = handler._create_error_response(
+            "生成失败: Flow browser API request failed",
+            status_code=502,
+        )
+        self.assertNotIn("flow", response.lower())
 
 
 if __name__ == "__main__":

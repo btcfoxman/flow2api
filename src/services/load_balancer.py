@@ -1,7 +1,7 @@
 """Load balancing module for Flow2API"""
 import asyncio
 import random
-from typing import Optional, Dict
+from typing import Collection, Optional, Dict
 from ..core.models import Token
 from ..core.config import config
 from ..core.credits import (
@@ -149,6 +149,7 @@ class LoadBalancer:
         reserve: bool = False,
         enforce_concurrency_filter: bool = True,
         track_pending: bool = False,
+        exclude_token_ids: Optional[Collection[int]] = None,
     ) -> Optional[Token]:
         """
         Select a token using load-aware balancing
@@ -165,6 +166,9 @@ class LoadBalancer:
             track_pending:
                 Whether to count the selected token as a queued request immediately.
                 This smooths burst distribution before the hard concurrency slot is acquired.
+            exclude_token_ids:
+                Token IDs already attempted by the current request. They remain excluded
+                even when their cached credits still look sufficient.
 
         Returns:
             Selected token or None if no available tokens
@@ -185,8 +189,16 @@ class LoadBalancer:
         filtered_reasons = {}
         required_tier = get_required_paygate_tier_for_model(model)
         minimum_credits = get_minimum_generation_credits()
+        excluded_ids = {
+            int(token_id)
+            for token_id in (exclude_token_ids or ())
+            if token_id is not None
+        }
 
         for token in active_tokens:
+            if token.id in excluded_ids:
+                filtered_reasons[token.id] = "excluded after a failed attempt in this request"
+                continue
             if not has_minimum_generation_credits(token.credits, minimum_credits):
                 filtered_reasons[token.id] = f"credits below {minimum_credits}"
                 continue

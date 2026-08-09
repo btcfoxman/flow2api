@@ -17,6 +17,7 @@ from ..core.media_errors import (
     media_generation_failure_reason,
     media_generation_failure_response,
     project_image_upload_failure_response,
+    sanitize_public_error_message,
 )
 from ..core.monitoring import record_generation_result
 from ..core.models import Task, RequestLog
@@ -29,6 +30,9 @@ from ..core.account_tiers import (
 )
 from .file_cache import FileCache
 from .watermark_processor import WatermarkProcessor
+
+
+MAX_QUOTA_ACCOUNT_SWITCHES = 2
 
 
 # Model configuration
@@ -1277,6 +1281,9 @@ class GenerationHandler:
         aspect_ratio_override: Optional[str] = None,
         async_video_task: bool = False,
         watermark: bool = False,
+        _quota_excluded_token_ids: Optional[Set[int]] = None,
+        _quota_switches_remaining: int = MAX_QUOTA_ACCOUNT_SWITCHES,
+        _suppress_start_event: bool = False,
     ) -> AsyncGenerator:
         """统一生成入口
 
@@ -1300,6 +1307,8 @@ class GenerationHandler:
         response_state = self._create_response_state()
         response_state["base_url"] = (base_url_override or "").strip().rstrip("/") or None
         request_log_state: Dict[str, Any] = {"id": None, "progress": 0}
+        quota_excluded_token_ids = set(_quota_excluded_token_ids or ())
+        quota_switches_remaining = max(0, int(_quota_switches_remaining or 0))
 
         # 防止并发链路复用到上一次请求的指纹上下文
         if hasattr(self.flow_client, "clear_request_fingerprint"):
@@ -1333,7 +1342,7 @@ class GenerationHandler:
         debug_logger.log_info(f"[GENERATION] 开始生成 - 模型: {model}, 类型: {generation_type}, Prompt: {prompt[:50]}...")
 
         # 向用户展示开始信息
-        if stream:
+        if stream and not _suppress_start_event:
             yield self._create_stream_chunk(
                 f"✨ {'视频' if generation_type == 'video' else '图片'}生成任务已启动\n",
                 role="assistant"
@@ -1360,6 +1369,7 @@ class GenerationHandler:
                 reserve=False,
                 enforce_concurrency_filter=False,
                 track_pending=True,
+                exclude_token_ids=quota_excluded_token_ids,
             )
         else:
             token = await self.load_balancer.select_token(
@@ -1368,6 +1378,7 @@ class GenerationHandler:
                 reserve=False,
                 enforce_concurrency_filter=False,
                 track_pending=True,
+                exclude_token_ids=quota_excluded_token_ids,
             )
         perf_trace["token_select_ms"] = int((time.time() - token_select_started_at) * 1000)
 
@@ -1632,6 +1643,67 @@ class GenerationHandler:
             raw_error_msg = str(e)
             if is_quota_exhausted_error(raw_error_msg):
                 await self._handle_quota_exhausted_error(token, raw_error_msg)
+                token_id = getattr(token, "id", None)
+                if token_id is not None:
+                    quota_excluded_token_ids.add(token_id)
+
+                if (
+                    quota_switches_remaining > 0
+                    and not response_state.get("submitted_video_task_id")
+                ):
+                    switch_number = MAX_QUOTA_ACCOUNT_SWITCHES - quota_switches_remaining + 1
+                    perf_trace["quota_account_switches"] = switch_number
+                    perf_trace["status"] = "switching_account"
+                    perf_trace["error"] = quota_exhausted_message()
+                    duration = time.time() - start_time
+                    perf_trace["total_ms"] = int(duration * 1000)
+                    debug_logger.log_warning(
+                        f"[QUOTA] Token {token_id} exhausted; switching account "
+                        f"({switch_number}/{MAX_QUOTA_ACCOUNT_SWITCHES}), "
+                        f"excluded={sorted(quota_excluded_token_ids)}"
+                    )
+                    await self._log_request(
+                        token_id,
+                        request_operation if generation_type else "generate_unknown",
+                        request_payload if 'request_payload' in locals() else {"model": model},
+                        {"error": quota_exhausted_message(), "performance": perf_trace},
+                        503,
+                        duration,
+                        log_id=request_log_state.get("id"),
+                        status_text="switching_account",
+                        progress=request_log_state.get("progress", 0),
+                    )
+                    if pending_token_state.get("active") and token and self.load_balancer:
+                        await self.load_balancer.release_pending(
+                            token.id,
+                            for_image_generation=(generation_type == "image"),
+                            for_video_generation=(generation_type == "video"),
+                        )
+                        pending_token_state["active"] = False
+                    if stream:
+                        yield self._create_stream_chunk(
+                            f"当前账号额度不足，正在切换其他账号重试"
+                            f"（{switch_number}/{MAX_QUOTA_ACCOUNT_SWITCHES}）...\n"
+                        )
+                    async for chunk in self.handle_generation(
+                        model=model,
+                        prompt=prompt,
+                        images=images,
+                        stream=stream,
+                        base_url_override=base_url_override,
+                        video_media_id=video_media_id,
+                        video_bytes=video_bytes,
+                        video_mime_type=video_mime_type,
+                        video_file_name=video_file_name,
+                        aspect_ratio_override=aspect_ratio_override,
+                        async_video_task=async_video_task,
+                        watermark=watermark,
+                        _quota_excluded_token_ids=quota_excluded_token_ids,
+                        _quota_switches_remaining=quota_switches_remaining - 1,
+                        _suppress_start_event=True,
+                    ):
+                        yield chunk
+                    return
                 error_msg = quota_exhausted_message()
                 response_status_code = 503
             elif generation_type == "video" and is_project_image_upload_error(raw_error_msg):
@@ -1692,9 +1764,9 @@ class GenerationHandler:
     def _get_no_token_error_message(self, generation_type: str) -> str:
         """获取无可用Token时的详细错误信息"""
         if generation_type == "image":
-            return "上游额度不足，暂无法生成图片。"
+            return "当前没有额度充足的可用账号，暂无法生成图片。"
         else:
-            return "上游额度不足，暂无法生成视频。"
+            return "当前没有额度充足的可用账号，暂无法生成视频。"
 
     async def _handle_image_generation(
         self,
@@ -3014,6 +3086,12 @@ class GenerationHandler:
         import json
         import time
 
+        if any(
+            marker in str(content).lower()
+            for marker in ("❌", "失败", "错误", "上游", "flow api", "/flow/")
+        ):
+            content = sanitize_public_error_message(content)
+
         chunk = {
             "id": f"chatcmpl-{int(time.time())}",
             "object": "chat.completion.chunk",
@@ -3104,7 +3182,7 @@ class GenerationHandler:
         if error_message:
             response["error"] = {
                 "code": "FAILED",
-                "message": error_message,
+                "message": sanitize_public_error_message(error_message),
             }
         return json.dumps(response, ensure_ascii=False)
 
@@ -3158,13 +3236,14 @@ class GenerationHandler:
     def _public_video_task_error_message(self, error_message: Any) -> str:
         message = self._normalize_error_message(error_message)
         if media_generation_failure_reason(message):
-            return _video_generation_failure_response(message)[0]
-        return message
+            message = _video_generation_failure_response(message)[0]
+        return sanitize_public_error_message(message)
 
     def _create_error_response(self, error_message: str, status_code: int = 500) -> str:
         """创建错误响应"""
         import json
 
+        error_message = sanitize_public_error_message(error_message)
         error = {
             "error": {
                 "message": error_message,

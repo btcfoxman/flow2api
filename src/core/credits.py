@@ -41,6 +41,10 @@ def is_quota_exhausted_error(error_message: Any) -> bool:
             "check quota",
             "quota reached",
             "quota_exceeded",
+            "insufficient credit",
+            "not enough credit",
+            "额度不足",
+            "积分不足",
         )
     )
 
