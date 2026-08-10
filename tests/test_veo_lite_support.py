@@ -917,6 +917,7 @@ class VeoLiteFlowClientTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_upload_video_uses_observed_start_and_chunk_protocol(self):
         captured = {"post": None, "puts": []}
+        self.client.ensure_flow_image_upload_acknowledgement = AsyncMock()
 
         class FakeResponse:
             def __init__(self, status_code, payload):
@@ -980,6 +981,7 @@ class VeoLiteFlowClientTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(media_id, "video-media-1")
+        self.client.ensure_flow_image_upload_acknowledgement.assert_not_awaited()
         self.assertTrue(captured["post"]["url"].endswith("/upload-video?action=start"))
         self.assertEqual(captured["post"]["headers"]["x-upload-content-length"], str(len(video_bytes)))
         self.assertEqual(captured["post"]["headers"]["x-upload-content-type"], "video/mp4")

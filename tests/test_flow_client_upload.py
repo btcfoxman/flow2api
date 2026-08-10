@@ -12,6 +12,86 @@ JPEG_BYTES = b"\xff\xd8\xff" + b"0" * 16
 
 
 class FlowClientUploadImageTests(unittest.IsolatedAsyncioTestCase):
+    async def test_upload_accepts_flow_media_terms_once_per_session(self):
+        client = FlowClient(proxy_manager=None)
+        request_calls = []
+
+        async def fake_make_request(**kwargs):
+            request_calls.append(kwargs)
+            url = kwargs["url"]
+            if "fetchUserAcknowledgement" in url:
+                return {
+                    "result": {
+                        "data": {
+                            "json": {
+                                "result": {"hasAcknowledgement": False},
+                            }
+                        }
+                    }
+                }
+            if url.endswith("/trpc/general.submitUserAcknowledgement"):
+                return {"result": {"data": {"json": {"result": {}}}}}
+            return {"media": {"name": f"media-{len(request_calls)}"}}
+
+        client._make_request = AsyncMock(side_effect=fake_make_request)
+
+        await client.upload_image(
+            at="test-at",
+            st="test-st",
+            image_bytes=JPEG_BYTES,
+            project_id="project-123",
+        )
+        await client.upload_image(
+            at="test-at",
+            st="test-st",
+            image_bytes=JPEG_BYTES,
+            project_id="project-123",
+        )
+
+        self.assertEqual(len(request_calls), 4)
+        fetch_call, submit_call, first_upload, second_upload = request_calls
+        self.assertEqual(fetch_call["method"], "GET")
+        self.assertIn("fetchUserAcknowledgement?input=", fetch_call["url"])
+        self.assertIn("FLOW_IMAGE_UPLOAD_TOS", fetch_call["url"])
+        self.assertEqual(fetch_call["st_token"], "test-st")
+        self.assertEqual(submit_call["method"], "POST")
+        self.assertEqual(
+            submit_call["json_data"],
+            {"json": {"acknowledgementVersion": "FLOW_IMAGE_UPLOAD_TOS"}},
+        )
+        self.assertEqual(submit_call["headers"]["Origin"], "https://labs.google")
+        self.assertTrue(first_upload["url"].endswith("/flow/uploadImage"))
+        self.assertTrue(second_upload["url"].endswith("/flow/uploadImage"))
+
+    async def test_upload_skips_submit_when_media_terms_are_already_accepted(self):
+        client = FlowClient(proxy_manager=None)
+        client._make_request = AsyncMock(side_effect=[
+            {
+                "result": {
+                    "data": {
+                        "json": {
+                            "result": {"hasAcknowledgement": True},
+                        }
+                    }
+                }
+            },
+            {"media": {"name": "existing-ack-media"}},
+        ])
+
+        media_id = await client.upload_image(
+            at="test-at",
+            st="test-st",
+            image_bytes=JPEG_BYTES,
+            project_id="project-123",
+        )
+
+        self.assertEqual(media_id, "existing-ack-media")
+        self.assertEqual(client._make_request.await_count, 2)
+        self.assertEqual(client._make_request.await_args_list[0].kwargs["method"], "GET")
+        self.assertTrue(
+            client._make_request.await_args_list[1].kwargs["url"].endswith("/flow/uploadImage")
+        )
+
     async def test_project_scoped_upload_uses_new_endpoint_with_project_id(self):
         client = FlowClient(proxy_manager=None)
 

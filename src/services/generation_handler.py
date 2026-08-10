@@ -1817,7 +1817,8 @@ class GenerationHandler:
                         token.at,
                         image_bytes,
                         model_config["aspect_ratio"],
-                        project_id=project_id
+                        project_id=project_id,
+                        st=token.st,
                     )
                     image_inputs.append({
                         "name": media_id,
@@ -2185,7 +2186,7 @@ class GenerationHandler:
                     if stream:
                         yield self._create_stream_chunk("上传首帧图片...\n")
                     start_media_id = await self.flow_client.upload_image(
-                        token.at, images[0], model_config["aspect_ratio"], project_id=project_id
+                        token.at, images[0], model_config["aspect_ratio"], project_id=project_id, st=token.st
                     )
                     debug_logger.log_info(f"[I2V] 仅上传首帧: {start_media_id}")
 
@@ -2194,10 +2195,10 @@ class GenerationHandler:
                     if stream:
                         yield self._create_stream_chunk("上传首帧和尾帧图片...\n")
                     start_media_id = await self.flow_client.upload_image(
-                        token.at, images[0], model_config["aspect_ratio"], project_id=project_id
+                        token.at, images[0], model_config["aspect_ratio"], project_id=project_id, st=token.st
                     )
                     end_media_id = await self.flow_client.upload_image(
-                        token.at, images[1], model_config["aspect_ratio"], project_id=project_id
+                        token.at, images[1], model_config["aspect_ratio"], project_id=project_id, st=token.st
                     )
                     debug_logger.log_info(f"[I2V] 上传首尾帧: {start_media_id}, {end_media_id}")
 
@@ -2208,7 +2209,7 @@ class GenerationHandler:
 
                 for img in images:
                     media_id = await self.flow_client.upload_image(
-                        token.at, img, model_config["aspect_ratio"], project_id=project_id
+                        token.at, img, model_config["aspect_ratio"], project_id=project_id, st=token.st
                     )
                     reference_images.append({
                         "imageUsageType": "IMAGE_USAGE_TYPE_ASSET",
@@ -2225,7 +2226,7 @@ class GenerationHandler:
 
                 for img in images or []:
                     media_id = await self.flow_client.upload_image(
-                        token.at, img, model_config["aspect_ratio"], project_id=project_id
+                        token.at, img, model_config["aspect_ratio"], project_id=project_id, st=token.st
                     )
                     reference_images.append({
                         "imageUsageType": "IMAGE_USAGE_TYPE_ASSET",

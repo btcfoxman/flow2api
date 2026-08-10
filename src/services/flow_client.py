@@ -2,6 +2,7 @@
 import asyncio
 import json
 import contextvars
+import hashlib
 import time
 import uuid
 import random
@@ -41,6 +42,8 @@ class FlowClient:
             default=None
         )
         self._remote_browser_prefill_last_sent: Dict[str, float] = {}
+        self._flow_image_upload_acknowledgement_lock = asyncio.Lock()
+        self._flow_image_upload_acknowledged_sessions: set[str] = set()
 
         # Default "real browser" headers (macOS Chrome Desktop) to reduce upstream 4xx/5xx instability.
         # These will be applied as defaults (won't override caller-provided headers).
@@ -882,6 +885,96 @@ class FlowClient:
             raise last_error
         raise RuntimeError("创建项目失败")
 
+    @staticmethod
+    def _has_flow_image_upload_acknowledgement(payload: Dict[str, Any]) -> bool:
+        try:
+            value = payload["result"]["data"]["json"]["result"]["hasAcknowledgement"]
+        except (KeyError, TypeError):
+            return False
+        return value is True
+
+    def _flow_image_upload_acknowledgement_cache_key(self, st: str) -> str:
+        cookie_header = self._build_labs_cookie_header(st)
+        return hashlib.sha256(cookie_header.encode("utf-8")).hexdigest()
+
+    async def ensure_flow_image_upload_acknowledgement(
+        self,
+        st: str,
+        project_id: Optional[str] = None,
+    ) -> None:
+        """Accept Flow's account-level image upload terms before uploading images."""
+        if not str(st or "").strip():
+            raise RuntimeError("session token is required for Flow image upload acknowledgement")
+
+        cache_key = self._flow_image_upload_acknowledgement_cache_key(st)
+        if cache_key in self._flow_image_upload_acknowledged_sessions:
+            return
+
+        async with self._flow_image_upload_acknowledgement_lock:
+            if cache_key in self._flow_image_upload_acknowledged_sessions:
+                return
+
+            acknowledgement_version = "FLOW_IMAGE_UPLOAD_TOS"
+            query_payload = {
+                "json": {
+                    "acknowledgementVersion": acknowledgement_version,
+                }
+            }
+            encoded_input = quote(
+                json.dumps(query_payload, ensure_ascii=False, separators=(",", ":")),
+                safe="",
+            )
+            normalized_project_id = str(project_id or "").strip()
+            referer = "https://labs.google/fx/zh/tools/flow"
+            if normalized_project_id:
+                referer = (
+                    "https://labs.google/fx/zh/tools/flow/project/"
+                    f"{quote(normalized_project_id, safe='')}"
+                )
+            common_headers = {
+                "Content-Type": "application/json",
+                "Referer": referer,
+                "sec-fetch-site": "same-origin",
+            }
+
+            acknowledgement = await self._make_request(
+                method="GET",
+                url=(
+                    f"{self.labs_base_url}/trpc/general.fetchUserAcknowledgement"
+                    f"?input={encoded_input}"
+                ),
+                headers=common_headers,
+                use_st=True,
+                st_token=st,
+                timeout=self._get_control_plane_timeout(),
+            )
+            if not self._has_flow_image_upload_acknowledgement(acknowledgement):
+                try:
+                    await self._make_request(
+                        method="POST",
+                        url=f"{self.labs_base_url}/trpc/general.submitUserAcknowledgement",
+                        headers={
+                            **common_headers,
+                            "Origin": "https://labs.google",
+                        },
+                        json_data=query_payload,
+                        use_st=True,
+                        st_token=st,
+                        timeout=self._get_control_plane_timeout(),
+                    )
+                except Exception as exc:
+                    # A concurrent service process may have accepted it after our GET.
+                    if "409" not in str(exc):
+                        raise RuntimeError(
+                            f"Flow image upload acknowledgement failed: {exc}"
+                        ) from exc
+
+            self._flow_image_upload_acknowledged_sessions.add(cache_key)
+            debug_logger.log_info(
+                f"[UPLOAD] Flow image upload acknowledgement is ready "
+                f"project_id={normalized_project_id or '-'}"
+            )
+
     async def delete_project(self, st: str, project_id: str):
         """删除项目
 
@@ -1003,7 +1096,8 @@ class FlowClient:
         at: str,
         image_bytes: bytes,
         aspect_ratio: str = "IMAGE_ASPECT_RATIO_LANDSCAPE",
-        project_id: Optional[str] = None
+        project_id: Optional[str] = None,
+        st: Optional[str] = None,
     ) -> str:
         """上传图片,返回mediaId
 
@@ -1012,10 +1106,14 @@ class FlowClient:
             image_bytes: 图片字节数据
             aspect_ratio: 图片或视频宽高比（会自动转换为图片格式）
             project_id: 项目ID（新上传接口可使用）
+            st: Labs 会话，用于在首次上传前确认素材条款
 
         Returns:
             mediaId
         """
+        if st:
+            await self.ensure_flow_image_upload_acknowledgement(st, project_id)
+
         # 转换视频aspect_ratio为图片aspect_ratio
         # VIDEO_ASPECT_RATIO_LANDSCAPE -> IMAGE_ASPECT_RATIO_LANDSCAPE
         # VIDEO_ASPECT_RATIO_PORTRAIT -> IMAGE_ASPECT_RATIO_PORTRAIT
