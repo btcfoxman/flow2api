@@ -13,7 +13,14 @@ QUOTA_ERROR = (
 
 
 class QuotaAccountSwitchingTests(unittest.IsolatedAsyncioTestCase):
-    def _make_handler(self, *, quota_token_ids, submitted_token_ids=()):
+    def _make_handler(
+        self,
+        *,
+        quota_token_ids,
+        submitted_token_ids=(),
+        result_quota_token_ids=(),
+        token_ids=range(1, 5),
+    ):
         handler = GenerationHandler.__new__(GenerationHandler)
         handler._background_tasks = set()
         handler.flow_client = SimpleNamespace(
@@ -26,7 +33,7 @@ class QuotaAccountSwitchingTests(unittest.IsolatedAsyncioTestCase):
                 email=f"user{token_id}@example.com",
                 user_paygate_tier="PAYGATE_TIER_ONE",
             )
-            for token_id in range(1, 5)
+            for token_id in token_ids
         ]
         selection_exclusions = []
 
@@ -66,6 +73,13 @@ class QuotaAccountSwitchingTests(unittest.IsolatedAsyncioTestCase):
             attempted_token_ids.append(token.id)
             if token.id in submitted_token_ids:
                 kwargs["response_state"]["submitted_video_task_id"] = f"task-{token.id}"
+            if token.id in result_quota_token_ids:
+                handler._mark_generation_failed(
+                    kwargs["generation_result"],
+                    QUOTA_ERROR,
+                    status_code=503,
+                )
+                return
             if token.id in quota_token_ids:
                 raise RuntimeError(QUOTA_ERROR)
             handler._mark_generation_succeeded(kwargs["generation_result"])
@@ -98,6 +112,15 @@ class QuotaAccountSwitchingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(exclusions, [set(), {1}, {1, 2}])
         self.assertEqual(handler.token_manager.mark_quota_exhausted.await_count, 2)
         self.assertEqual(handler.load_balancer.release_pending.await_count, 3)
+        self.assertEqual(handler._log_request.await_count, 1)
+        final_log = handler._log_request.await_args
+        self.assertEqual(final_log.kwargs["status_text"], "completed")
+        self.assertEqual(final_log.kwargs["progress"], 100)
+        self.assertEqual(
+            final_log.args[3]["performance"]["quota_account_switches"],
+            2,
+        )
+        self.assertEqual(final_log.args[3]["performance"]["status"], "success")
         payload = json.loads(chunks[-1])
         self.assertEqual(payload["choices"][0]["finish_reason"], "stop")
 
@@ -111,6 +134,15 @@ class QuotaAccountSwitchingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(attempted, [1, 2, 3])
         self.assertEqual(exclusions, [set(), {1}, {1, 2}])
         self.assertEqual(handler.token_manager.mark_quota_exhausted.await_count, 3)
+        self.assertEqual(handler._log_request.await_count, 1)
+        final_log = handler._log_request.await_args
+        self.assertEqual(final_log.kwargs["status_text"], "failed")
+        self.assertEqual(final_log.kwargs["progress"], 100)
+        self.assertEqual(final_log.args[3]["performance"]["status"], "failed")
+        self.assertEqual(
+            final_log.args[3]["performance"]["quota_account_switches"],
+            2,
+        )
         payload = json.loads(chunks[-1])
         message = payload["error"]["message"]
         self.assertEqual(payload["error"]["status_code"], 503)
@@ -130,6 +162,91 @@ class QuotaAccountSwitchingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(exclusions, [set()])
         payload = json.loads(chunks[-1])
         self.assertEqual(payload["error"]["status_code"], 503)
+
+    async def test_quota_failure_result_uses_the_same_switching_path(self):
+        handler, attempted, exclusions = self._make_handler(
+            quota_token_ids=set(),
+            result_quota_token_ids={1, 2},
+        )
+
+        chunks = await self._collect(handler)
+
+        self.assertEqual(attempted, [1, 2, 3])
+        self.assertEqual(exclusions, [set(), {1}, {1, 2}])
+        self.assertEqual(handler.token_manager.mark_quota_exhausted.await_count, 2)
+        self.assertEqual(handler._log_request.await_count, 1)
+        payload = json.loads(chunks[-1])
+        self.assertEqual(payload["choices"][0]["finish_reason"], "stop")
+
+    async def test_streaming_switches_reuse_the_initial_log_row(self):
+        handler, attempted, _ = self._make_handler(quota_token_ids={1, 2})
+
+        chunks = [
+            chunk
+            async for chunk in handler.handle_generation(
+                model="abra_t2v_10s",
+                prompt="hello",
+                stream=True,
+            )
+        ]
+
+        self.assertEqual(attempted, [1, 2, 3])
+        self.assertEqual(handler._log_request.await_count, 2)
+        start_log, final_log = handler._log_request.await_args_list
+        self.assertEqual(start_log.kwargs["status_text"], "started")
+        self.assertEqual(final_log.kwargs["log_id"], 1)
+        self.assertEqual(final_log.kwargs["status_text"], "completed")
+        self.assertEqual(final_log.kwargs["progress"], 100)
+        switching_updates = [
+            call
+            for call in handler._update_request_log_progress.await_args_list
+            if call.kwargs.get("status_text") == "switching_account"
+        ]
+        self.assertEqual(len(switching_updates), 2)
+        self.assertTrue(chunks)
+
+    async def test_no_alternate_account_finishes_the_log_instead_of_staying_at_zero(self):
+        handler, attempted, exclusions = self._make_handler(
+            quota_token_ids={1},
+            token_ids=[1],
+        )
+
+        chunks = await self._collect(handler)
+
+        self.assertEqual(attempted, [1])
+        self.assertEqual(exclusions, [set(), {1}])
+        self.assertEqual(handler._log_request.await_count, 1)
+        final_log = handler._log_request.await_args
+        self.assertEqual(final_log.kwargs["status_text"], "failed")
+        self.assertEqual(final_log.kwargs["progress"], 100)
+        performance = final_log.kwargs["response_data"]["performance"]
+        self.assertEqual(performance["status"], "failed")
+        self.assertEqual(performance["quota_account_switches"], 1)
+        payload = json.loads(chunks[-1])
+        self.assertEqual(payload["error"]["status_code"], 503)
+
+    async def test_retry_progress_does_not_move_the_shared_log_backwards(self):
+        handler = GenerationHandler.__new__(GenerationHandler)
+        handler.db = SimpleNamespace(update_request_log=AsyncMock())
+        state = {
+            "id": 7,
+            "progress": 28,
+            "last_progress": 28,
+            "last_status_text": "switching_account",
+        }
+
+        await handler._update_request_log_progress(
+            state,
+            token_id=2,
+            status_text="token_selected",
+            progress=8,
+        )
+
+        self.assertEqual(state["progress"], 28)
+        self.assertEqual(
+            handler.db.update_request_log.await_args.kwargs["progress"],
+            28,
+        )
 
 
 if __name__ == "__main__":

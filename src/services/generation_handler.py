@@ -1284,6 +1284,7 @@ class GenerationHandler:
         _quota_excluded_token_ids: Optional[Set[int]] = None,
         _quota_switches_remaining: int = MAX_QUOTA_ACCOUNT_SWITCHES,
         _suppress_start_event: bool = False,
+        _request_context: Optional[Dict[str, Any]] = None,
     ) -> AsyncGenerator:
         """统一生成入口
 
@@ -1293,20 +1294,32 @@ class GenerationHandler:
             images: 图片列表 (bytes格式)
             stream: 是否流式输出
         """
-        start_time = time.time()
+        request_context = _request_context if isinstance(_request_context, dict) else {}
+        start_time = float(request_context.setdefault("started_at", time.time()))
         token = None
         generation_type = None
         pending_token_state = {"active": False}
-        request_id = f"gen-{int(start_time * 1000)}-{id(asyncio.current_task())}"
-        perf_trace: Dict[str, Any] = {
-            "request_id": request_id,
-            "model": model,
-            "status": "processing",
-        }
+        request_id = str(
+            request_context.setdefault(
+                "request_id",
+                f"gen-{int(start_time * 1000)}-{id(asyncio.current_task())}",
+            )
+        )
+        perf_trace = request_context.get("performance")
+        if not isinstance(perf_trace, dict):
+            perf_trace = {
+                "request_id": request_id,
+                "model": model,
+                "status": "processing",
+            }
+            request_context["performance"] = perf_trace
         generation_result = self._create_generation_result()
         response_state = self._create_response_state()
         response_state["base_url"] = (base_url_override or "").strip().rstrip("/") or None
-        request_log_state: Dict[str, Any] = {"id": None, "progress": 0}
+        request_log_state = request_context.get("request_log_state")
+        if not isinstance(request_log_state, dict):
+            request_log_state = {"id": None, "progress": 0}
+            request_context["request_log_state"] = request_log_state
         quota_excluded_token_ids = set(_quota_excluded_token_ids or ())
         quota_switches_remaining = max(0, int(_quota_switches_remaining or 0))
 
@@ -1393,17 +1406,21 @@ class GenerationHandler:
             if not error_msg:
                 error_msg = self._get_no_token_error_message(generation_type)
             debug_logger.log_error(f"[GENERATION] {error_msg}")
-            record_generation_result(generation_type, "no_token", time.time() - start_time)
+            duration = time.time() - start_time
+            record_generation_result(generation_type, "no_token", duration)
+            perf_trace["status"] = "failed"
+            perf_trace["total_ms"] = int(duration * 1000)
+            perf_trace["error"] = error_msg
             await self._log_request(
-                token_id=None,
+                token_id=request_context.get("last_token_id"),
                 operation=request_operation,
                 request_data=request_payload,
                 response_data={"error": error_msg, "performance": perf_trace},
                 status_code=503,
-                duration=time.time() - start_time,
+                duration=duration,
                 log_id=request_log_state.get("id"),
                 status_text="failed",
-                progress=request_log_state.get("progress", 0),
+                progress=100,
             )
             if stream:
                 yield self._create_stream_chunk(f"❌ {error_msg}\n")
@@ -1411,6 +1428,7 @@ class GenerationHandler:
             return
 
         debug_logger.log_info(f"[GENERATION] 已选择Token: {token.id} ({token.email})")
+        request_context["last_token_id"] = token.id
         pending_token_state["active"] = True
         await self._update_request_log_progress(
             request_log_state,
@@ -1512,6 +1530,14 @@ class GenerationHandler:
             if not generation_result.get("success"):
                 error_msg = generation_result.get("error_message") or "生成未成功完成"
                 debug_logger.log_warning(f"[GENERATION] 生成未成功，不扣次数: {error_msg}")
+                if (
+                    is_quota_exhausted_error(error_msg)
+                    and quota_switches_remaining > 0
+                    and not response_state.get("submitted_video_task_id")
+                ):
+                    # Route quota failures returned through generation_result through
+                    # the same account-switching path as raised exceptions.
+                    raise RuntimeError(error_msg)
                 if await self._handle_quota_exhausted_error(token, error_msg):
                     error_msg = quota_exhausted_message()
                     response_status_code = 503
@@ -1538,7 +1564,7 @@ class GenerationHandler:
                     duration,
                     log_id=request_log_state.get("id"),
                     status_text="failed",
-                    progress=request_log_state.get("progress", 0),
+                    progress=100,
                 )
                 if not generation_result.get("error_emitted"):
                     if stream:
@@ -1662,16 +1688,15 @@ class GenerationHandler:
                         f"({switch_number}/{MAX_QUOTA_ACCOUNT_SWITCHES}), "
                         f"excluded={sorted(quota_excluded_token_ids)}"
                     )
-                    await self._log_request(
-                        token_id,
-                        request_operation if generation_type else "generate_unknown",
-                        request_payload if 'request_payload' in locals() else {"model": model},
-                        {"error": quota_exhausted_message(), "performance": perf_trace},
-                        503,
-                        duration,
-                        log_id=request_log_state.get("id"),
+                    await self._update_request_log_progress(
+                        request_log_state,
+                        token_id=token_id,
                         status_text="switching_account",
-                        progress=request_log_state.get("progress", 0),
+                        progress=max(1, int(request_log_state.get("progress") or 0)),
+                        response_extra={
+                            "quota_account_switches": switch_number,
+                            "request_id": request_id,
+                        },
                     )
                     if pending_token_state.get("active") and token and self.load_balancer:
                         await self.load_balancer.release_pending(
@@ -1701,6 +1726,7 @@ class GenerationHandler:
                         _quota_excluded_token_ids=quota_excluded_token_ids,
                         _quota_switches_remaining=quota_switches_remaining - 1,
                         _suppress_start_event=True,
+                        _request_context=request_context,
                     ):
                         yield chunk
                     return
@@ -1746,7 +1772,7 @@ class GenerationHandler:
                 duration,
                 log_id=request_log_state.get("id"),
                 status_text="failed",
-                progress=request_log_state.get("progress", 0),
+                progress=100,
             )
             if stream:
                 yield self._create_stream_chunk(f"❌ {error_msg}\n")
@@ -3291,7 +3317,14 @@ class GenerationHandler:
         if not log_id:
             return
 
-        safe_progress = max(0, min(100, int(progress)))
+        requested_progress = max(0, min(100, int(progress)))
+        current_progress = max(
+            0,
+            min(100, int(request_log_state.get("progress") or 0)),
+        )
+        # Account retries restart the internal pipeline, but one public request-log
+        # row must never move backwards (for example, 28% -> 8%).
+        safe_progress = max(current_progress, requested_progress)
         now = time.time()
         last_status_text = str(request_log_state.get("last_status_text") or "").strip()
         last_progress = int(request_log_state.get("last_progress") or 0)
