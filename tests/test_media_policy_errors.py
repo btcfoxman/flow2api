@@ -1,6 +1,7 @@
 import unittest
 
 from src.core.media_errors import (
+    is_media_invalid_argument_error,
     is_media_traffic_error,
     is_media_policy_error,
     is_project_image_upload_error,
@@ -10,6 +11,8 @@ from src.core.media_errors import (
     project_image_upload_failure_response,
     sanitize_public_error_message,
     MEDIA_POLICY_REASON_PROMINENT_PEOPLE,
+    MEDIA_INVALID_ARGUMENT_FAILURE_MESSAGE,
+    MEDIA_INVALID_ARGUMENT_REASON,
     MEDIA_TRAFFIC_REASON,
     VIDEO_UPLOAD_FAILURE_MESSAGE,
     VIDEO_UPLOAD_INVALID_ARGUMENT_MESSAGE,
@@ -61,9 +64,18 @@ class MediaPolicyErrorTests(unittest.TestCase):
         self.assertIn("\u4e0d\u662f\u5185\u5bb9\u5b89\u5168\u62d2\u7edd", message)
 
     def test_generic_invalid_argument_is_not_policy_error(self):
-        self.assertFalse(
-            is_media_policy_error("HTTP Error 400: Request contains an invalid argument.")
+        error = "HTTP Error 400: Request contains an invalid argument."
+
+        self.assertFalse(is_media_policy_error(error))
+        self.assertTrue(is_media_invalid_argument_error(error))
+        self.assertEqual(
+            media_generation_failure_reason(error),
+            MEDIA_INVALID_ARGUMENT_REASON,
         )
+
+        message, status_code = media_generation_failure_response("video", error)
+        self.assertEqual(status_code, 400)
+        self.assertEqual(message, MEDIA_INVALID_ARGUMENT_FAILURE_MESSAGE)
 
     def test_project_image_upload_invalid_argument_is_separate_error(self):
         self.assertTrue(
@@ -117,6 +129,13 @@ class MediaPolicyErrorTests(unittest.TestCase):
 
         self.assertFalse(
             handler._should_record_token_error("PUBLIC_ERROR_UNSAFE_GENERATION", 400)
+        )
+        self.assertFalse(
+            handler._should_record_token_error(
+                "Flow API request failed: HTTP Error 400: "
+                "Request contains an invalid argument.",
+                500,
+            )
         )
         self.assertFalse(
             handler._should_record_token_error(

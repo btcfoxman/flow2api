@@ -12,6 +12,7 @@ from ..core.credits import (
     quota_exhausted_message,
 )
 from ..core.media_errors import (
+    is_media_invalid_argument_error,
     is_media_policy_error,
     is_project_image_upload_error,
     media_generation_failure_reason,
@@ -1207,6 +1208,8 @@ class GenerationHandler:
         if is_quota_exhausted_error(text):
             return False
         if is_media_policy_error(text):
+            return False
+        if is_media_invalid_argument_error(text):
             return False
         if "project-scoped image upload failed via /flow/uploadimage" in lowered:
             return False

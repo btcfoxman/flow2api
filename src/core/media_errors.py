@@ -14,6 +14,12 @@ MEDIA_TRAFFIC_ERROR_KEYWORDS = (
 MEDIA_POLICY_REASON_UNSAFE_GENERATION = "unsafe_generation"
 MEDIA_POLICY_REASON_PROMINENT_PEOPLE = "prominent_people_filter"
 MEDIA_TRAFFIC_REASON = "upstream_traffic_control"
+MEDIA_INVALID_ARGUMENT_REASON = "invalid_argument"
+
+MEDIA_INVALID_ARGUMENT_FAILURE_MESSAGE = (
+    "\u63d0\u793a\u8bcd\u6216\u53c2\u8003\u7d20\u6750\u88ab\u62d2\u7edd\uff0c"
+    "\u8bf7\u8c03\u6574\u63d0\u793a\u8bcd\u6216\u53c2\u8003\u7d20\u6750\u540e\u91cd\u8bd5"
+)
 
 IMAGE_POLICY_FAILURE_MESSAGE = "图片生成被内容安全策略拒绝，请调整提示词或参考图后重试"
 VIDEO_POLICY_FAILURE_MESSAGE = "视频生成被内容安全策略拒绝，请调整提示词或参考图后重试"
@@ -95,6 +101,12 @@ def is_media_traffic_error(error_message: Any) -> bool:
     return any(keyword in error_lower for keyword in MEDIA_TRAFFIC_ERROR_KEYWORDS)
 
 
+def is_media_invalid_argument_error(error_message: Any) -> bool:
+    """Return True for a generic generation-submit invalid-argument rejection."""
+    error_lower = str(error_message or "").strip().lower()
+    return "request contains an invalid argument" in error_lower
+
+
 def media_generation_failure_reason(error_message: Any) -> Optional[str]:
     """Return a stable diagnostic reason without exposing the upstream message."""
     policy_reason = media_policy_reason(error_message)
@@ -102,6 +114,8 @@ def media_generation_failure_reason(error_message: Any) -> Optional[str]:
         return policy_reason
     if is_media_traffic_error(error_message):
         return MEDIA_TRAFFIC_REASON
+    if is_media_invalid_argument_error(error_message):
+        return MEDIA_INVALID_ARGUMENT_REASON
     return None
 
 
@@ -157,6 +171,8 @@ def media_generation_failure_response(
             UPSTREAM_TRAFFIC_FAILURE_MESSAGE.replace("\u5a92\u4f53", media_label, 1),
             429,
         )
+    if is_media_invalid_argument_error(text):
+        return MEDIA_INVALID_ARGUMENT_FAILURE_MESSAGE, 400
     media_label = {
         "image": "\u56fe\u7247",
         "video": "\u89c6\u9891",
