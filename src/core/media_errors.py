@@ -15,10 +15,14 @@ MEDIA_POLICY_REASON_UNSAFE_GENERATION = "unsafe_generation"
 MEDIA_POLICY_REASON_PROMINENT_PEOPLE = "prominent_people_filter"
 MEDIA_TRAFFIC_REASON = "upstream_traffic_control"
 MEDIA_INVALID_ARGUMENT_REASON = "invalid_argument"
+MEDIA_TRANSPORT_REASON = "transport_error"
 
 MEDIA_INVALID_ARGUMENT_FAILURE_MESSAGE = (
     "\u63d0\u793a\u8bcd\u6216\u53c2\u8003\u7d20\u6750\u88ab\u62d2\u7edd\uff0c"
     "\u8bf7\u8c03\u6574\u63d0\u793a\u8bcd\u6216\u53c2\u8003\u7d20\u6750\u540e\u91cd\u8bd5"
+)
+MEDIA_TRANSPORT_FAILURE_MESSAGE = (
+    "\u751f\u6210\u670d\u52a1\u7f51\u7edc\u8fde\u63a5\u5f02\u5e38\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5"
 )
 
 IMAGE_POLICY_FAILURE_MESSAGE = "图片生成被内容安全策略拒绝，请调整提示词或参考图后重试"
@@ -107,6 +111,16 @@ def is_media_invalid_argument_error(error_message: Any) -> bool:
     return "request contains an invalid argument" in error_lower
 
 
+def is_media_transport_error(error_message: Any) -> bool:
+    """Return True for a media request that failed in the HTTP transport layer."""
+    error_lower = str(error_message or "").strip().lower()
+    return (
+        "curl: (16)" in error_lower
+        or "curle_http2" in error_lower
+        or "error in the http2 framing layer" in error_lower
+    )
+
+
 def media_generation_failure_reason(error_message: Any) -> Optional[str]:
     """Return a stable diagnostic reason without exposing the upstream message."""
     policy_reason = media_policy_reason(error_message)
@@ -116,6 +130,8 @@ def media_generation_failure_reason(error_message: Any) -> Optional[str]:
         return MEDIA_TRAFFIC_REASON
     if is_media_invalid_argument_error(error_message):
         return MEDIA_INVALID_ARGUMENT_REASON
+    if is_media_transport_error(error_message):
+        return MEDIA_TRANSPORT_REASON
     return None
 
 
@@ -173,6 +189,8 @@ def media_generation_failure_response(
         )
     if is_media_invalid_argument_error(text):
         return MEDIA_INVALID_ARGUMENT_FAILURE_MESSAGE, 400
+    if is_media_transport_error(text):
+        return MEDIA_TRANSPORT_FAILURE_MESSAGE, 502
     media_label = {
         "image": "\u56fe\u7247",
         "video": "\u89c6\u9891",

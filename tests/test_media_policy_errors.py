@@ -2,6 +2,7 @@ import unittest
 
 from src.core.media_errors import (
     is_media_invalid_argument_error,
+    is_media_transport_error,
     is_media_traffic_error,
     is_media_policy_error,
     is_project_image_upload_error,
@@ -13,6 +14,8 @@ from src.core.media_errors import (
     MEDIA_POLICY_REASON_PROMINENT_PEOPLE,
     MEDIA_INVALID_ARGUMENT_FAILURE_MESSAGE,
     MEDIA_INVALID_ARGUMENT_REASON,
+    MEDIA_TRANSPORT_FAILURE_MESSAGE,
+    MEDIA_TRANSPORT_REASON,
     MEDIA_TRAFFIC_REASON,
     VIDEO_UPLOAD_FAILURE_MESSAGE,
     VIDEO_UPLOAD_INVALID_ARGUMENT_MESSAGE,
@@ -96,6 +99,23 @@ class MediaPolicyErrorTests(unittest.TestCase):
             VIDEO_UPLOAD_INVALID_ARGUMENT_MESSAGE,
         )
 
+    def test_curl_http2_transport_error_is_friendly(self):
+        error = (
+            "Flow API request failed: Failed to perform, curl: (16). "
+            "See https://curl.se/libcurl/c/libcurl-errors.html first for more details."
+        )
+
+        self.assertTrue(is_media_transport_error(error))
+        self.assertEqual(
+            media_generation_failure_reason(error),
+            MEDIA_TRANSPORT_REASON,
+        )
+        message, status_code = media_generation_failure_response("video", error)
+        self.assertEqual(status_code, 502)
+        self.assertEqual(message, MEDIA_TRANSPORT_FAILURE_MESSAGE)
+        self.assertNotIn("curl", message.lower())
+        self.assertNotIn("http", message.lower())
+
     def test_generic_project_image_upload_failure_is_safe_upstream_error(self):
         error = (
             "Project-scoped image upload failed via /flow/uploadImage "
@@ -135,6 +155,12 @@ class MediaPolicyErrorTests(unittest.TestCase):
                 "Flow API request failed: HTTP Error 400: "
                 "Request contains an invalid argument.",
                 500,
+            )
+        )
+        self.assertFalse(
+            handler._should_record_token_error(
+                "Flow API request failed: Failed to perform, curl: (16).",
+                502,
             )
         )
         self.assertFalse(

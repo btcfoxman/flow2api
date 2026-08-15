@@ -14,6 +14,7 @@ from ..core.credits import (
 from ..core.media_errors import (
     is_media_invalid_argument_error,
     is_media_policy_error,
+    is_media_transport_error,
     is_project_image_upload_error,
     media_generation_failure_reason,
     media_generation_failure_response,
@@ -1210,6 +1211,8 @@ class GenerationHandler:
         if is_media_policy_error(text):
             return False
         if is_media_invalid_argument_error(text):
+            return False
+        if is_media_transport_error(text):
             return False
         if "project-scoped image upload failed via /flow/uploadimage" in lowered:
             return False
