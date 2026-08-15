@@ -38,8 +38,7 @@ MEDIA_PROMINENT_PEOPLE_FAILURE_MESSAGE = (
     "媒体生成触发人物/公众人物过滤，请更换参考素材，或移除严格锁脸、身份复刻类描述后重试"
 )
 UPSTREAM_TRAFFIC_FAILURE_MESSAGE = (
-    "媒体生成触发流量或异常活动风控，请稍后重试；"
-    "这不是内容安全拒绝，无需修改提示词或参考图"
+    "媒体生成服务当前请求较多，请稍后重试"
 )
 VIDEO_UPLOAD_INVALID_ARGUMENT_MESSAGE = (
     "参考图上传请求被拒绝，请更换或重新压缩参考图后重试；"

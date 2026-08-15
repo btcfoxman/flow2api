@@ -163,8 +163,10 @@ class VeoLiteGenerationHandlerTests(unittest.TestCase):
         payload = handler._task_to_video_payload(task)
 
         message = payload["error"]["message"]
-        self.assertIn("流量或异常活动风控", message)
-        self.assertIn("不是内容安全拒绝", message)
+        self.assertEqual(message, "视频生成服务当前请求较多，请稍后重试")
+        self.assertNotIn("风控", message)
+        self.assertNotIn("异常活动", message)
+        self.assertNotIn("内容安全", message)
         self.assertNotIn("UNUSUAL_ACTIVITY", message)
 
     def test_terminal_video_task_payload_reports_complete_progress(self):

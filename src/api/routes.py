@@ -69,6 +69,10 @@ VIDEO_VIDEO_PAYLOAD_KEYS = [
 IMAGE_RESPONSE_TASKS: Dict[str, Dict[str, Any]] = {}
 IMAGE_RESPONSE_TASKS_LOCK = asyncio.Lock()
 ROUTE_BACKGROUND_TASKS: Set[asyncio.Task] = set()
+REMOTE_MEDIA_DOWNLOAD_MAX_ATTEMPTS = 3
+REMOTE_MEDIA_DOWNLOAD_RETRY_DELAYS = (0.5, 1.0)
+IMAGE_LOAD_FAILURE_MESSAGE = "参考图片下载失败，请确认素材链接有效且可公开访问，或稍后重试"
+VIDEO_LOAD_FAILURE_MESSAGE = "参考视频下载失败，请确认素材链接有效且可公开访问，或稍后重试"
 
 
 def _spawn_route_background_task(coro: Any) -> asyncio.Task:
@@ -230,6 +234,189 @@ def _guess_mime_type(uri: str, fallback: str) -> str:
     return guessed or fallback
 
 
+def _remote_media_source_label(url: str) -> str:
+    """Return a log-safe source label without paths, queries, or credentials."""
+    try:
+        return urlparse(url).hostname or "unknown"
+    except Exception:
+        return "unknown"
+
+
+def _build_remote_media_headers(url: str, media_type: str) -> Dict[str, str]:
+    if media_type == "video":
+        accept = "video/mp4,video/*,*/*;q=0.8"
+        accept_encoding = "identity;q=1, *;q=0"
+    else:
+        accept = "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
+        accept_encoding = "gzip, deflate, br"
+
+    headers = {
+        "Accept": accept,
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Accept-Encoding": accept_encoding,
+        "Connection": "keep-alive",
+    }
+
+    try:
+        parsed = urlparse(url)
+        hostname = (parsed.hostname or "").lower()
+        port = parsed.port
+    except (TypeError, ValueError):
+        return headers
+
+    google_media_hosts = {
+        "labs.google",
+        "google.com",
+        "googleapis.com",
+        "googleusercontent.com",
+    }
+    is_google_media_host = hostname in google_media_hosts or hostname.endswith(
+        (".labs.google", ".google.com", ".googleapis.com", ".googleusercontent.com")
+    )
+    if is_google_media_host:
+        headers["Referer"] = "https://labs.google/"
+    elif parsed.scheme in {"http", "https"} and hostname:
+        # Third-party material should not be sent with an unrelated Google referer.
+        origin_host = f"[{hostname}]" if ":" in hostname else hostname
+        default_port = 80 if parsed.scheme == "http" else 443
+        origin_port = f":{port}" if port and port != default_port else ""
+        headers["Referer"] = f"{parsed.scheme}://{origin_host}{origin_port}/"
+
+    return headers
+
+
+def _remote_media_payload_is_valid(response: Any, media_type: str) -> bool:
+    content = response.content or b""
+    if not content:
+        return False
+
+    content_type = (
+        str(response.headers.get("content-type", ""))
+        .split(";", 1)[0]
+        .strip()
+        .lower()
+    )
+    if content_type.startswith("text/") or content_type in {
+        "application/json",
+        "application/problem+json",
+        "application/xml",
+        "application/xhtml+xml",
+    }:
+        return False
+
+    if media_type == "image":
+        detected_type = _detect_image_mime_type(content, fallback="")
+        return bool(detected_type or content_type.startswith("image/"))
+
+    return True
+
+
+def _remote_media_status_is_retryable(status_code: int) -> bool:
+    return status_code in {408, 425, 429} or 500 <= status_code <= 599
+
+
+async def _resolve_remote_media_proxy_candidates(
+    file_cache: Any,
+    media_type: str,
+) -> List[tuple[str, Optional[str]]]:
+    """Resolve media proxy, request proxy, then direct without exposing addresses."""
+    candidates: List[tuple[str, Optional[str]]] = []
+    preferred_proxy = None
+    request_proxy = None
+
+    try:
+        if file_cache and hasattr(file_cache, "_resolve_download_proxy"):
+            preferred_proxy = await file_cache._resolve_download_proxy(media_type)
+    except Exception as exc:
+        debug_logger.log_warning(
+            f"[CONTEXT] Resolve {media_type} download proxy failed: {str(exc)}"
+        )
+
+    proxy_manager = getattr(file_cache, "proxy_manager", None) if file_cache else None
+    try:
+        if proxy_manager and hasattr(proxy_manager, "get_request_proxy_url"):
+            request_proxy = await proxy_manager.get_request_proxy_url()
+    except Exception as exc:
+        debug_logger.log_warning(
+            f"[CONTEXT] Resolve request proxy for {media_type} download failed: {str(exc)}"
+        )
+
+    if preferred_proxy:
+        preferred_label = (
+            "request_proxy" if preferred_proxy == request_proxy else "media_proxy"
+        )
+        candidates.append((preferred_label, preferred_proxy))
+    if request_proxy and request_proxy != preferred_proxy:
+        candidates.append(("request_proxy", request_proxy))
+    candidates.append(("direct", None))
+    return candidates
+
+
+async def _download_remote_media_data(
+    url: str,
+    media_type: str,
+    timeout: int,
+    file_cache: Any,
+) -> Optional[bytes]:
+    candidates = await _resolve_remote_media_proxy_candidates(file_cache, media_type)
+    attempt_candidates: List[tuple[str, Optional[str]]] = []
+    while len(attempt_candidates) < REMOTE_MEDIA_DOWNLOAD_MAX_ATTEMPTS:
+        attempt_candidates.extend(candidates)
+    attempt_candidates = attempt_candidates[:REMOTE_MEDIA_DOWNLOAD_MAX_ATTEMPTS]
+
+    source = _remote_media_source_label(url)
+    headers = _build_remote_media_headers(url, media_type)
+
+    for attempt_index, (route_label, proxy_url) in enumerate(attempt_candidates, start=1):
+        started_at = time.monotonic()
+        try:
+            async with AsyncSession() as session:
+                response = await session.get(
+                    url,
+                    timeout=timeout,
+                    proxy=proxy_url,
+                    headers=headers,
+                    allow_redirects=True,
+                    impersonate="chrome120",
+                    verify=False,
+                )
+
+            elapsed_ms = int((time.monotonic() - started_at) * 1000)
+            status_code = int(response.status_code)
+            if status_code == 200 and _remote_media_payload_is_valid(response, media_type):
+                debug_logger.log_info(
+                    f"[CONTEXT] {media_type} download succeeded: source={source}, "
+                    f"route={route_label}, attempt={attempt_index}, "
+                    f"bytes={len(response.content)}, elapsed_ms={elapsed_ms}"
+                )
+                return response.content
+
+            invalid_payload = status_code == 200
+            debug_logger.log_warning(
+                f"[CONTEXT] {media_type} download failed: source={source}, "
+                f"route={route_label}, attempt={attempt_index}, status={status_code}, "
+                f"invalid_payload={invalid_payload}, elapsed_ms={elapsed_ms}"
+            )
+            if not invalid_payload and not _remote_media_status_is_retryable(status_code):
+                return None
+        except Exception as exc:
+            elapsed_ms = int((time.monotonic() - started_at) * 1000)
+            debug_logger.log_warning(
+                f"[CONTEXT] {media_type} download exception: source={source}, "
+                f"route={route_label}, attempt={attempt_index}, "
+                f"error_type={type(exc).__name__}, elapsed_ms={elapsed_ms}"
+            )
+
+        if attempt_index < len(attempt_candidates):
+            delay_index = min(
+                attempt_index - 1,
+                len(REMOTE_MEDIA_DOWNLOAD_RETRY_DELAYS) - 1,
+            )
+            await asyncio.sleep(REMOTE_MEDIA_DOWNLOAD_RETRY_DELAYS[delay_index])
+
+    return None
+
+
 async def retrieve_image_data(url: str) -> Optional[bytes]:
     """Read image bytes from local /tmp cache or remote URL."""
     file_cache = getattr(generation_handler, "file_cache", None)
@@ -246,38 +433,7 @@ async def retrieve_image_data(url: str) -> Optional[bytes]:
     except Exception as exc:
         debug_logger.log_warning(f"[CONTEXT] 本地缓存读取失败: {str(exc)}")
 
-    proxy_url = None
-    try:
-        if file_cache and hasattr(file_cache, "_resolve_download_proxy"):
-            proxy_url = await file_cache._resolve_download_proxy("image")
-    except Exception as exc:
-        debug_logger.log_warning(f"[CONTEXT] 图片下载代理解析失败: {str(exc)}")
-
-    try:
-        async with AsyncSession() as session:
-            response = await session.get(
-                url,
-                timeout=60,
-                proxies={"http": proxy_url, "https": proxy_url} if proxy_url else None,
-                headers={
-                    "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-                    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-                    "Accept-Encoding": "gzip, deflate, br",
-                    "Connection": "keep-alive",
-                    "Referer": "https://labs.google/",
-                },
-                impersonate="chrome120",
-                verify=False,
-            )
-            if response.status_code == 200 and response.content:
-                return response.content
-            debug_logger.log_warning(
-                f"[CONTEXT] 图片下载失败，状态码: {response.status_code}"
-            )
-    except Exception as exc:
-        debug_logger.log_error(f"[CONTEXT] 图片下载异常: {str(exc)}")
-
-    return None
+    return await _download_remote_media_data(url, "image", 60, file_cache)
 
 
 async def retrieve_video_data(url: str) -> Optional[bytes]:
@@ -296,36 +452,7 @@ async def retrieve_video_data(url: str) -> Optional[bytes]:
     except Exception as exc:
         debug_logger.log_warning(f"[CONTEXT] local video cache read failed: {str(exc)}")
 
-    proxy_url = None
-    try:
-        if file_cache and hasattr(file_cache, "_resolve_download_proxy"):
-            proxy_url = await file_cache._resolve_download_proxy("video")
-    except Exception as exc:
-        debug_logger.log_warning(f"[CONTEXT] video download proxy resolve failed: {str(exc)}")
-
-    try:
-        async with AsyncSession() as session:
-            response = await session.get(
-                url,
-                timeout=120,
-                proxies={"http": proxy_url, "https": proxy_url} if proxy_url else None,
-                headers={
-                    "Accept": "video/mp4,video/*,*/*;q=0.8",
-                    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-                    "Accept-Encoding": "identity;q=1, *;q=0",
-                    "Connection": "keep-alive",
-                    "Referer": "https://labs.google/",
-                },
-                impersonate="chrome120",
-                verify=False,
-            )
-            if response.status_code == 200 and response.content:
-                return response.content
-            debug_logger.log_warning(f"[CONTEXT] video download failed, status={response.status_code}")
-    except Exception as exc:
-        debug_logger.log_error(f"[CONTEXT] video download exception: {str(exc)}")
-
-    return None
+    return await _download_remote_media_data(url, "video", 120, file_cache)
 
 
 async def _load_image_bytes_from_uri(uri: str) -> bytes:
@@ -340,9 +467,9 @@ async def _load_image_bytes_from_uri(uri: str) -> bytes:
         image_bytes = await retrieve_image_data(uri)
         if image_bytes:
             return image_bytes
-        raise HTTPException(status_code=400, detail=f"Failed to load image from {uri}")
+        raise HTTPException(status_code=400, detail=IMAGE_LOAD_FAILURE_MESSAGE)
 
-    raise HTTPException(status_code=400, detail=f"Unsupported image URI: {uri}")
+    raise HTTPException(status_code=400, detail="不支持的参考图片地址格式")
 
 
 async def _load_video_bytes_from_uri(uri: str) -> tuple[bytes, str, str]:
@@ -362,9 +489,9 @@ async def _load_video_bytes_from_uri(uri: str) -> tuple[bytes, str, str]:
             mime_type = _guess_mime_type(uri, "video/mp4")
             file_name = urlparse(uri).path.rsplit("/", 1)[-1] or "upload.mp4"
             return video_bytes, mime_type, file_name
-        raise HTTPException(status_code=400, detail=f"Failed to load video from {uri}")
+        raise HTTPException(status_code=400, detail=VIDEO_LOAD_FAILURE_MESSAGE)
 
-    raise HTTPException(status_code=400, detail=f"Unsupported video URI: {uri}")
+    raise HTTPException(status_code=400, detail="不支持的参考视频地址格式")
 
 
 def _decode_video_payload(value: str) -> tuple[bytes, str, str]:

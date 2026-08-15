@@ -63,8 +63,10 @@ class MediaPolicyErrorTests(unittest.TestCase):
         )
         message, status_code = media_generation_failure_response("video", error)
         self.assertEqual(status_code, 429)
-        self.assertIn("\u6d41\u91cf\u6216\u5f02\u5e38\u6d3b\u52a8\u98ce\u63a7", message)
-        self.assertIn("\u4e0d\u662f\u5185\u5bb9\u5b89\u5168\u62d2\u7edd", message)
+        self.assertEqual(message, "视频生成服务当前请求较多，请稍后重试")
+        self.assertNotIn("风控", message)
+        self.assertNotIn("异常活动", message)
+        self.assertNotIn("内容安全", message)
 
     def test_generic_invalid_argument_is_not_policy_error(self):
         error = "HTTP Error 400: Request contains an invalid argument."
