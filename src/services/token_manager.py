@@ -26,6 +26,9 @@ class TokenManager:
         self._refresh_locks: dict[int, asyncio.Lock] = {}
         self._project_locks: dict[int, asyncio.Lock] = {}
         self._refresh_futures: dict[int, asyncio.Task] = {}
+        self._credits_refresh_futures: dict[int, asyncio.Task] = {}
+        self._credits_refresh_round_lock = asyncio.Lock()
+        self._periodic_credits_refresh_task: Optional[asyncio.Task] = None
 
     async def _get_token_lock(
         self,
@@ -174,6 +177,16 @@ class TokenManager:
             refresh_task.cancel()
             try:
                 await refresh_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+
+        credits_refresh_task = self._credits_refresh_futures.pop(token_id, None)
+        if credits_refresh_task and not credits_refresh_task.done():
+            credits_refresh_task.cancel()
+            try:
+                await credits_refresh_task
             except asyncio.CancelledError:
                 pass
             except Exception:
@@ -757,20 +770,16 @@ class TokenManager:
 
     # ========== 余额刷新 ==========
 
-    async def refresh_credits(self, token_id: int) -> int:
-        """刷新Token余额
-
-        Returns:
-            credits
-        """
+    async def _refresh_credits_inner(self, token_id: int) -> tuple[bool, int]:
+        """Perform one balance refresh and preserve a success indicator."""
         token = await self.db.get_token(token_id)
         if not token:
-            return 0
+            return False, 0
 
         # 确保AT有效
         token = await self.ensure_valid_token(token)
         if not token:
-            return 0
+            return False, 0
 
         try:
             result = await self.flow_client.get_credits(token.at)
@@ -784,10 +793,174 @@ class TokenManager:
                 user_paygate_tier=user_paygate_tier,
             )
 
-            return credits
+            return True, credits
         except Exception as e:
             debug_logger.log_error(f"Failed to refresh credits for token {token_id}: {str(e)}")
-            return 0
+            return False, 0
+
+    async def _refresh_credits_with_status(self, token_id: int) -> tuple[bool, int]:
+        """Coalesce concurrent balance refreshes for the same token."""
+        existing_task = self._credits_refresh_futures.get(token_id)
+        if existing_task and not existing_task.done():
+            return await existing_task
+
+        task: asyncio.Task
+
+        async def runner() -> tuple[bool, int]:
+            try:
+                return await self._refresh_credits_inner(token_id)
+            finally:
+                current = self._credits_refresh_futures.get(token_id)
+                if current is task:
+                    self._credits_refresh_futures.pop(token_id, None)
+
+        task = asyncio.create_task(runner())
+        self._credits_refresh_futures[token_id] = task
+        return await task
+
+    async def refresh_credits(self, token_id: int) -> int:
+        """刷新Token余额并兼容原有仅返回余额的调用接口。"""
+        _, credits = await self._refresh_credits_with_status(token_id)
+        return credits
+
+    async def refresh_all_active_credits(
+        self,
+        concurrency: Optional[int] = None,
+    ) -> dict[str, int]:
+        """Refresh every active token balance with bounded concurrency."""
+        try:
+            refresh_concurrency = max(
+                1,
+                min(
+                    20,
+                    int(
+                        config.credits_refresh_concurrency
+                        if concurrency is None
+                        else concurrency
+                    ),
+                ),
+            )
+        except (TypeError, ValueError):
+            refresh_concurrency = 3
+
+        async with self._credits_refresh_round_lock:
+            tokens = [
+                token
+                for token in await self.get_active_tokens()
+                if token.id is not None
+            ]
+            semaphore = asyncio.Semaphore(refresh_concurrency)
+
+            async def refresh_one(token_id: int) -> bool:
+                async with semaphore:
+                    try:
+                        success, _ = await self._refresh_credits_with_status(token_id)
+                        return success
+                    except asyncio.CancelledError:
+                        current_task = asyncio.current_task()
+                        if current_task and current_task.cancelling():
+                            raise
+                        debug_logger.log_warning(
+                            f"[CREDITS] Refresh cancelled for removed token {token_id}"
+                        )
+                        return False
+                    except Exception as exc:
+                        debug_logger.log_error(
+                            f"[CREDITS] Periodic refresh failed for token {token_id}: "
+                            f"{type(exc).__name__}: {str(exc)}"
+                        )
+                        return False
+
+            results = await asyncio.gather(
+                *(refresh_one(int(token.id)) for token in tokens)
+            )
+            succeeded = sum(1 for result in results if result)
+            summary = {
+                "total": len(tokens),
+                "succeeded": succeeded,
+                "failed": len(tokens) - succeeded,
+            }
+            debug_logger.log_info(
+                "[CREDITS] Periodic active-token refresh completed: "
+                f"total={summary['total']}, succeeded={summary['succeeded']}, "
+                f"failed={summary['failed']}"
+            )
+            return summary
+
+    async def _run_periodic_credits_refresh(
+        self,
+        interval_seconds: float,
+        concurrency: int,
+    ) -> None:
+        while True:
+            try:
+                await self.refresh_all_active_credits(concurrency=concurrency)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                debug_logger.log_error(
+                    "[CREDITS] Periodic refresh round failed: "
+                    f"{type(exc).__name__}: {str(exc)}"
+                )
+            await asyncio.sleep(interval_seconds)
+
+    def start_periodic_credits_refresh(
+        self,
+        interval_seconds: Optional[float] = None,
+        concurrency: Optional[int] = None,
+    ) -> bool:
+        """Start the singleton periodic balance refresh task."""
+        if self._periodic_credits_refresh_task and not self._periodic_credits_refresh_task.done():
+            return True
+
+        configured_interval = (
+            config.credits_refresh_interval_seconds
+            if interval_seconds is None
+            else interval_seconds
+        )
+        try:
+            normalized_interval = float(configured_interval)
+        except (TypeError, ValueError):
+            normalized_interval = 900.0
+        if normalized_interval <= 0:
+            return False
+
+        try:
+            normalized_concurrency = max(
+                1,
+                min(
+                    20,
+                    int(
+                        config.credits_refresh_concurrency
+                        if concurrency is None
+                        else concurrency
+                    ),
+                ),
+            )
+        except (TypeError, ValueError):
+            normalized_concurrency = 3
+
+        self._periodic_credits_refresh_task = asyncio.create_task(
+            self._run_periodic_credits_refresh(
+                normalized_interval,
+                normalized_concurrency,
+            ),
+            name="periodic-token-credits-refresh",
+        )
+        return True
+
+    async def stop_periodic_credits_refresh(self) -> None:
+        """Stop and await the periodic balance refresh task."""
+        task = self._periodic_credits_refresh_task
+        self._periodic_credits_refresh_task = None
+        if not task or task.done():
+            return
+
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
     async def mark_quota_exhausted(self, token_id: int) -> int:
         """Refresh credits after upstream reports quota exhaustion.

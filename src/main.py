@@ -178,6 +178,7 @@ async def lifespan(app: FastAPI):
                 print(f"❌ Auto-unban task error: {e}")
 
     auto_unban_task_handle = asyncio.create_task(auto_unban_task())
+    credits_refresh_started = token_manager.start_periodic_credits_refresh()
 
     print(f"✓ Database initialized")
     print(f"✓ Total tokens: {len(tokens)}")
@@ -187,6 +188,14 @@ async def lifespan(app: FastAPI):
     else:
         print("✓ File cache cleanup task disabled (timeout <= 0)")
     print(f"✓ 429 auto-unban task started (runs every hour)")
+    if credits_refresh_started:
+        print(
+            "✓ Periodic credits refresh started "
+            f"(interval={config.credits_refresh_interval_seconds}s, "
+            f"concurrency={config.credits_refresh_concurrency})"
+        )
+    else:
+        print("✓ Periodic credits refresh disabled")
     print(f"✓ Server running on http://{config.server_host}:{config.server_port}")
     print("=" * 60)
 
@@ -202,12 +211,15 @@ async def lifespan(app: FastAPI):
         await auto_unban_task_handle
     except asyncio.CancelledError:
         pass
+    # Stop balance refresh before browser services because AT/ST recovery may use them.
+    await token_manager.stop_periodic_credits_refresh()
     # Close browser if initialized
     if browser_service:
         await browser_service.close()
         print("✓ Browser captcha service closed")
     print("✓ File cache cleanup task stopped")
     print("✓ 429 auto-unban task stopped")
+    print("✓ Periodic credits refresh task stopped")
 
 
 # Initialize components

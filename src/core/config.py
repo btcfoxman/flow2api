@@ -122,6 +122,33 @@ class Config:
         self._config["flow"]["max_retries"] = normalized
 
     @property
+    def credits_refresh_interval_seconds(self) -> int:
+        """Periodic active-token balance refresh interval; 0 disables it."""
+        value = self._config.get("flow", {}).get(
+            "credits_refresh_interval_seconds",
+            900,
+        )
+        try:
+            normalized = int(value)
+        except (TypeError, ValueError):
+            return 900
+        if normalized <= 0:
+            return 0
+        return max(60, min(86400, normalized))
+
+    @property
+    def credits_refresh_concurrency(self) -> int:
+        """Maximum number of token balances refreshed at the same time."""
+        value = self._config.get("flow", {}).get(
+            "credits_refresh_concurrency",
+            3,
+        )
+        try:
+            return max(1, min(20, int(value)))
+        except (TypeError, ValueError):
+            return 3
+
+    @property
     def flow_image_request_timeout(self) -> int:
         """图片生成单次 HTTP 请求超时(秒)。"""
         default_timeout = min(self.flow_timeout, 40)
