@@ -14,6 +14,7 @@ from ..core.credits import (
 from ..core.media_errors import (
     is_media_invalid_argument_error,
     is_media_policy_error,
+    is_media_traffic_error,
     is_media_transport_error,
     is_project_image_upload_error,
     is_project_image_upload_invalid_argument_error,
@@ -36,6 +37,7 @@ from .watermark_processor import WatermarkProcessor
 
 
 MAX_QUOTA_ACCOUNT_SWITCHES = 2
+MAX_TRAFFIC_ACCOUNT_SWITCHES = 1
 
 
 # Model configuration
@@ -773,16 +775,21 @@ def _make_abra_t2v_config(model_key: str) -> Dict[str, Any]:
     }
 
 
-def _make_abra_edit_config() -> Dict[str, Any]:
+def _make_abra_edit_config(
+    model_key: str = "abra_edit",
+    output_resolution: str = "VIDEO_RESOLUTION_720P",
+) -> Dict[str, Any]:
     return {
         "type": "video",
         "video_type": "v2v",
-        "model_key": "abra_edit",
+        "model_key": model_key,
+        "output_resolution": output_resolution,
         "aspect_ratio": "VIDEO_ASPECT_RATIO_LANDSCAPE",
         "supports_images": True,
         "min_images": 1,
         "max_images": 5,
         "requires_video_input": True,
+        "allow_tier_upgrade": False,
         "allow_aspect_ratio_override": True,
     }
 
@@ -960,7 +967,14 @@ def _apply_veo_3_1_model_updates():
         MODEL_CONFIG[f"abra_t2v_{seconds}s"] = _make_abra_t2v_config(f"abra_t2v_{seconds}s")
         MODEL_CONFIG[f"abra_r2v_{seconds}s"] = _make_abra_r2v_config(f"abra_r2v_{seconds}s")
 
+    # Keep the original public name at Flow's 720p default while exposing both
+    # resolution choices explicitly. The 360p choice uses a distinct upstream key.
     MODEL_CONFIG["abra_edit"] = _make_abra_edit_config()
+    MODEL_CONFIG["abra_edit_720p"] = _make_abra_edit_config()
+    MODEL_CONFIG["abra_edit_360p"] = _make_abra_edit_config(
+        model_key="abra_edit_360p",
+        output_resolution="VIDEO_RESOLUTION_360P",
+    )
 
 
 _apply_veo_3_1_model_updates()
@@ -1290,6 +1304,7 @@ class GenerationHandler:
         watermark: bool = False,
         _quota_excluded_token_ids: Optional[Set[int]] = None,
         _quota_switches_remaining: int = MAX_QUOTA_ACCOUNT_SWITCHES,
+        _traffic_switches_remaining: int = MAX_TRAFFIC_ACCOUNT_SWITCHES,
         _suppress_start_event: bool = False,
         _request_context: Optional[Dict[str, Any]] = None,
     ) -> AsyncGenerator:
@@ -1329,6 +1344,7 @@ class GenerationHandler:
             request_context["request_log_state"] = request_log_state
         quota_excluded_token_ids = set(_quota_excluded_token_ids or ())
         quota_switches_remaining = max(0, int(_quota_switches_remaining or 0))
+        traffic_switches_remaining = max(0, int(_traffic_switches_remaining or 0))
 
         # 防止并发链路复用到上一次请求的指纹上下文
         if hasattr(self.flow_client, "clear_request_fingerprint"):
@@ -1732,6 +1748,7 @@ class GenerationHandler:
                         watermark=watermark,
                         _quota_excluded_token_ids=quota_excluded_token_ids,
                         _quota_switches_remaining=quota_switches_remaining - 1,
+                        _traffic_switches_remaining=traffic_switches_remaining,
                         _suppress_start_event=True,
                         _request_context=request_context,
                     ):
@@ -1739,6 +1756,72 @@ class GenerationHandler:
                     return
                 error_msg = quota_exhausted_message()
                 response_status_code = 503
+            elif (
+                generation_type == "video"
+                and is_media_traffic_error(raw_error_msg)
+                and traffic_switches_remaining > 0
+                and not response_state.get("submitted_video_task_id")
+                and video_type_for_op != "extend"
+                and (video_type_for_op != "v2v" or bool(video_bytes))
+            ):
+                token_id = getattr(token, "id", None)
+                if token_id is not None:
+                    quota_excluded_token_ids.add(token_id)
+                switch_number = (
+                    MAX_TRAFFIC_ACCOUNT_SWITCHES - traffic_switches_remaining + 1
+                )
+                perf_trace["traffic_account_switches"] = switch_number
+                perf_trace["status"] = "switching_account"
+                duration = time.time() - start_time
+                perf_trace["total_ms"] = int(duration * 1000)
+                debug_logger.log_warning(
+                    f"[TRAFFIC] Token {token_id} rejected by upstream traffic control; "
+                    f"switching account ({switch_number}/{MAX_TRAFFIC_ACCOUNT_SWITCHES}), "
+                    f"excluded={sorted(quota_excluded_token_ids)}"
+                )
+                await self._update_request_log_progress(
+                    request_log_state,
+                    token_id=token_id,
+                    status_text="switching_account",
+                    progress=max(1, int(request_log_state.get("progress") or 0)),
+                    response_extra={
+                        "traffic_account_switches": switch_number,
+                        "request_id": request_id,
+                    },
+                )
+                if pending_token_state.get("active") and token and self.load_balancer:
+                    await self.load_balancer.release_pending(
+                        token.id,
+                        for_image_generation=False,
+                        for_video_generation=True,
+                    )
+                    pending_token_state["active"] = False
+                if stream:
+                    yield self._create_stream_chunk(
+                        "当前账号提交被限流，正在切换其他账号重试"
+                        f"（{switch_number}/{MAX_TRAFFIC_ACCOUNT_SWITCHES}）...\n"
+                    )
+                async for chunk in self.handle_generation(
+                    model=model,
+                    prompt=prompt,
+                    images=images,
+                    stream=stream,
+                    base_url_override=base_url_override,
+                    video_media_id=video_media_id,
+                    video_bytes=video_bytes,
+                    video_mime_type=video_mime_type,
+                    video_file_name=video_file_name,
+                    aspect_ratio_override=aspect_ratio_override,
+                    async_video_task=async_video_task,
+                    watermark=watermark,
+                    _quota_excluded_token_ids=quota_excluded_token_ids,
+                    _quota_switches_remaining=quota_switches_remaining,
+                    _traffic_switches_remaining=traffic_switches_remaining - 1,
+                    _suppress_start_event=True,
+                    _request_context=request_context,
+                ):
+                    yield chunk
+                return
             elif generation_type == "video" and is_project_image_upload_error(raw_error_msg):
                 error_msg, response_status_code = project_image_upload_failure_response(
                     raw_error_msg
@@ -2438,6 +2521,7 @@ class GenerationHandler:
                     video_media_id=video_media_id,
                     reference_images=reference_images,
                     video_end_frame_index=video_end_frame_index,
+                    output_resolution=model_config["output_resolution"],
                     user_paygate_tier=normalized_tier,
                     token_id=token.id,
                     token_video_concurrency=token.video_concurrency,

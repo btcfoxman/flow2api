@@ -509,17 +509,24 @@ class VeoLiteGenerationHandlerTests(unittest.TestCase):
             self.assertTrue(cfg["use_v2_model_config"])
             self.assertTrue(cfg["allow_aspect_ratio_override"])
 
-    def test_abra_edit_is_direct_public_model(self):
+    def test_abra_edit_supports_720p_default_and_explicit_resolutions(self):
         cfg = MODEL_CONFIG["abra_edit"]
 
         self.assertEqual(cfg["model_key"], "abra_edit")
+        self.assertEqual(cfg["output_resolution"], "VIDEO_RESOLUTION_720P")
         self.assertEqual(cfg["video_type"], "v2v")
         self.assertEqual(cfg["aspect_ratio"], "VIDEO_ASPECT_RATIO_LANDSCAPE")
         self.assertEqual(cfg["min_images"], 1)
         self.assertEqual(cfg["max_images"], 5)
         self.assertTrue(cfg["supports_images"])
         self.assertTrue(cfg["requires_video_input"])
+        self.assertFalse(cfg["allow_tier_upgrade"])
         self.assertTrue(cfg["allow_aspect_ratio_override"])
+
+        self.assertEqual(MODEL_CONFIG["abra_edit_720p"], cfg)
+        cfg_360p = MODEL_CONFIG["abra_edit_360p"]
+        self.assertEqual(cfg_360p["model_key"], "abra_edit_360p")
+        self.assertEqual(cfg_360p["output_resolution"], "VIDEO_RESOLUTION_360P")
 
     def test_direct_upsampler_keys_are_not_public_models(self):
         self.assertNotIn("veo_3_1_upsampler_4k", MODEL_CONFIG)
@@ -882,12 +889,13 @@ class VeoLiteFlowClientTests(unittest.IsolatedAsyncioTestCase):
             at="at-token",
             project_id="project-1",
             prompt="edit scene",
-            model_key="abra_edit",
+            model_key="abra_edit_360p",
             aspect_ratio="VIDEO_ASPECT_RATIO_LANDSCAPE",
             video_media_id="video-media-1",
             reference_images=[
                 {"mediaId": "image-1", "imageUsageType": "IMAGE_USAGE_TYPE_ASSET"},
             ],
+            output_resolution="VIDEO_RESOLUTION_360P",
         )
 
         self.assertTrue(captured["url"].endswith("/video:batchAsyncGenerateVideoEditVideo"))
@@ -896,7 +904,11 @@ class VeoLiteFlowClientTests(unittest.IsolatedAsyncioTestCase):
         request_data = json_data["requests"][0]
         self.assertIn("mediaGenerationContext", json_data)
         self.assertNotIn("useV2ModelConfig", json_data)
-        self.assertEqual(request_data["videoModelKey"], "abra_edit")
+        self.assertEqual(request_data["videoModelKey"], "abra_edit_360p")
+        self.assertEqual(
+            request_data["outputSpec"],
+            {"resolution": "VIDEO_RESOLUTION_360P"},
+        )
         self.assertEqual(request_data["metadata"], {})
         self.assertEqual(
             request_data["videoInput"],
@@ -931,6 +943,11 @@ class VeoLiteFlowClientTests(unittest.IsolatedAsyncioTestCase):
         )
 
         request_data = captured["json_data"]["requests"][0]
+        self.assertEqual(request_data["videoModelKey"], "abra_edit")
+        self.assertEqual(
+            request_data["outputSpec"],
+            {"resolution": "VIDEO_RESOLUTION_720P"},
+        )
         self.assertEqual(request_data["videoInput"]["startFrameIndex"], 0)
         self.assertEqual(request_data["videoInput"]["endFrameIndex"], 96)
 

@@ -54,6 +54,40 @@ def _truncate_text(text: Any, limit: int = 240) -> str:
     return f"{value[:limit - 3]}..."
 
 
+def _normalize_plugin_captcha_proxy_url(request: Dict[str, Any]) -> tuple[Optional[str], bool]:
+    """Validate an optional per-profile proxy sent by the token updater extension.
+
+    Older extension versions do not send this field, so absence must preserve the
+    token's current binding. An explicitly supplied empty/invalid value is rejected
+    to prevent a profile refresh from silently falling back to the global proxy.
+    """
+    if "captcha_proxy_url" not in request:
+        return None, False
+
+    raw_proxy = request.get("captcha_proxy_url")
+    if not isinstance(raw_proxy, str) or not raw_proxy.strip():
+        raise HTTPException(status_code=400, detail="captcha_proxy_url cannot be empty")
+    if len(raw_proxy) > 2048 or any(ord(char) < 32 for char in raw_proxy):
+        raise HTTPException(status_code=400, detail="Invalid captcha_proxy_url")
+
+    try:
+        normalized = proxy_manager.normalize_proxy_url(raw_proxy)
+        parsed = urlparse(normalized or "")
+        port = parsed.port
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid captcha_proxy_url: {exc}") from exc
+
+    if (
+        not normalized
+        or parsed.scheme.lower() not in {"http", "https", "socks5"}
+        or not parsed.hostname
+        or port is None
+        or not 1 <= port <= 65535
+    ):
+        raise HTTPException(status_code=400, detail="Invalid captcha_proxy_url")
+    return normalized, True
+
+
 def _extract_error_summary(payload: Any) -> str:
     """从响应体里提取用户可读的错误摘要。"""
     if payload is None:
@@ -2404,6 +2438,8 @@ async def plugin_update_token(request: dict, authorization: Optional[str] = Head
     if not plugin_config.connection_token or provided_token != plugin_config.connection_token:
         raise HTTPException(status_code=401, detail="Invalid connection token")
 
+    captcha_proxy_url, proxy_provided = _normalize_plugin_captcha_proxy_url(request)
+
     # Extract session token from request
     session_token = request.get("session_token")
 
@@ -2440,28 +2476,34 @@ async def plugin_update_token(request: dict, authorization: Optional[str] = Head
         # Update existing token
         try:
             # Update token
-            await token_manager.update_token(
+            update_fields = dict(
                 token_id=existing_token.id,
                 st=session_token,
                 at=at,
                 at_expires=at_expires
             )
+            if proxy_provided:
+                update_fields["captcha_proxy_url"] = captcha_proxy_url
+            await token_manager.update_token(**update_fields)
+
+            response = {
+                "success": True,
+                "message": f"Token updated for {email}",
+                "action": "updated",
+                "proxy_updated": proxy_provided,
+                "proxy_configured": bool(
+                    captcha_proxy_url
+                    or getattr(existing_token, "captcha_proxy_url", None)
+                ),
+            }
 
             # Check if auto-enable is enabled and token is disabled
             if plugin_config.auto_enable_on_update and not existing_token.is_active:
                 await token_manager.enable_token(existing_token.id)
-                return {
-                    "success": True,
-                    "message": f"Token updated and auto-enabled for {email}",
-                    "action": "updated",
-                    "auto_enabled": True
-                }
+                response["message"] = f"Token updated and auto-enabled for {email}"
+                response["auto_enabled"] = True
 
-            return {
-                "success": True,
-                "message": f"Token updated for {email}",
-                "action": "updated"
-            }
+            return response
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to update token: {str(e)}")
     else:
@@ -2469,14 +2511,17 @@ async def plugin_update_token(request: dict, authorization: Optional[str] = Head
         try:
             new_token = await token_manager.add_token(
                 st=session_token,
-                remark="Added by Chrome Extension"
+                remark="Added by Chrome Extension",
+                captcha_proxy_url=captcha_proxy_url if proxy_provided else None,
             )
 
             return {
                 "success": True,
                 "message": f"Token added for {new_token.email}",
                 "action": "added",
-                "token_id": new_token.id
+                "token_id": new_token.id,
+                "proxy_updated": proxy_provided,
+                "proxy_configured": bool(captcha_proxy_url),
             }
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to add token: {str(e)}")

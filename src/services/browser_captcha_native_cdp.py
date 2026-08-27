@@ -337,6 +337,7 @@ class NativeCdpAccountBrowser:
         self.last_used_at = time.monotonic()
         self.last_started_at: Optional[float] = None
         self.last_error: Optional[str] = None
+        self.last_upstream_error: Optional[str] = None
         self.last_fingerprint: Optional[Dict[str, Any]] = None
         self.solve_count = 0
         self._project_sessions: Dict[str, tuple[str, str]] = {}
@@ -864,7 +865,9 @@ class NativeCdpAccountBrowser:
                 status = int(result.get("status") or 0)
                 text = str(result.get("text") or "")
                 if status >= 400:
-                    raise RuntimeError(self._format_browser_fetch_http_error(status, text))
+                    upstream_error = self._format_browser_fetch_http_error(status, text)
+                    self.last_upstream_error = upstream_error[:240]
+                    raise RuntimeError(upstream_error)
                 if not text:
                     return {}
                 try:
@@ -878,6 +881,7 @@ class NativeCdpAccountBrowser:
                         f"native browser fetch returned unexpected JSON type: {type(parsed).__name__}"
                     )
                 self.last_error = None
+                self.last_upstream_error = None
                 return parsed
             except Exception as exc:
                 self.last_error = f"{type(exc).__name__}: {str(exc)[:240]}"
@@ -974,6 +978,7 @@ class NativeCdpAccountBrowser:
             "proxy_source": self.proxy_binding.source if self.proxy_binding else None,
             "solve_count": self.solve_count,
             "last_error": self.last_error,
+            "last_upstream_error": self.last_upstream_error,
             "video_submit_reservations": len(self._video_submit_reservations),
             "idle_seconds": 0 if self.is_busy else int(max(0, time.monotonic() - self.last_used_at)),
         }
@@ -1135,7 +1140,9 @@ class BrowserCaptchaService:
     ) -> None:
         if token_id and int(token_id) in self._workers:
             worker = self._workers[int(token_id)]
-            worker.last_error = error_reason or error_message or "upstream_error"
+            worker.last_upstream_error = (
+                error_message or error_reason or "upstream_error"
+            )[:240]
         debug_logger.log_warning(
             f"[NativeCDP] upstream error project_id={project_id or '-'}, "
             f"token_id={token_id or '-'}, reason={(error_reason or error_message or 'unknown')[:160]}"

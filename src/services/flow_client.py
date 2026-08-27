@@ -2370,6 +2370,7 @@ class FlowClient:
         video_media_id: str,
         reference_images: List[Dict],
         video_end_frame_index: int = 240,
+        output_resolution: str = "VIDEO_RESOLUTION_720P",
         user_paygate_tier: str = "PAYGATE_TIER_ONE",
         token_id: Optional[int] = None,
         token_video_concurrency: Optional[int] = None,
@@ -2377,6 +2378,9 @@ class FlowClient:
         url = f"{self.api_base_url}/video:batchAsyncGenerateVideoEditVideo"
         max_retries = self._captcha_aware_max_retries()
         last_error = None
+        # A retry is still the same launch. Rotate only the one-shot captcha token.
+        session_id = self._generate_session_id()
+        batch_id = str(uuid.uuid4())
 
         for retry_attempt in range(max_retries):
             launch_gate_acquired = False
@@ -2411,8 +2415,6 @@ class FlowClient:
                     continue
                 raise last_error
 
-            session_id = self._generate_session_id()
-            batch_id = str(uuid.uuid4())
             json_data = {
                 "mediaGenerationContext": self._build_video_media_generation_context(batch_id),
                 "clientContext": {
@@ -2426,6 +2428,9 @@ class FlowClient:
                     "userPaygateTier": user_paygate_tier
                 },
                 "requests": [{
+                    "outputSpec": {
+                        "resolution": output_resolution
+                    },
                     "aspectRatio": aspect_ratio,
                     "seed": random.randint(1, 99999),
                     "textInput": {
