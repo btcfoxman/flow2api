@@ -267,6 +267,49 @@ class VeoLiteGenerationHandlerTests(unittest.TestCase):
         self.assertEqual(status_code, 502)
         self.assertIn("请重试", message)
 
+    def test_failed_video_submit_keeps_submit_latency_in_performance_trace(self):
+        async def run():
+            handler = GenerationHandler.__new__(GenerationHandler)
+            handler.flow_client = types.SimpleNamespace(
+                generate_video_text=AsyncMock(
+                    side_effect=RuntimeError(
+                        "PUBLIC_ERROR_UNUSUAL_ACTIVITY_TOO_MUCH_TRAFFIC"
+                    )
+                )
+            )
+            handler._update_request_log_progress = AsyncMock()
+            token = types.SimpleNamespace(
+                id=1,
+                at="access-token",
+                user_paygate_tier="PAYGATE_TIER_ONE",
+                video_concurrency=1,
+            )
+            performance = {"request_id": "gen-test"}
+
+            with self.assertRaisesRegex(RuntimeError, "TOO_MUCH_TRAFFIC"):
+                async for _ in handler._handle_video_generation(
+                    token=token,
+                    project_id="project-1",
+                    model_config=dict(MODEL_CONFIG["abra_t2v_10s"]),
+                    prompt="hello",
+                    images=None,
+                    stream=False,
+                    perf_trace=performance,
+                    generation_result=handler._create_generation_result(),
+                    request_log_state={"id": None, "progress": 0},
+                ):
+                    pass
+
+            return performance
+
+        performance = asyncio.run(run())
+
+        self.assertIn("submit_generation_ms", performance["video_generation"])
+        self.assertGreaterEqual(
+            performance["video_generation"]["submit_generation_ms"],
+            0,
+        )
+
     def test_r2v_missing_images_marks_client_error_status(self):
         async def run():
             handler = GenerationHandler.__new__(GenerationHandler)
@@ -738,6 +781,10 @@ class VeoLiteFlowClientTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(request_data["videoModelKey"], "abra_r2v_8s")
         self.assertEqual(request_data["aspectRatio"], "VIDEO_ASPECT_RATIO_LANDSCAPE")
+        self.assertEqual(
+            request_data["outputSpec"],
+            {"resolution": "VIDEO_RESOLUTION_720P"},
+        )
         self.assertEqual(request_data["metadata"], {})
         self.assertEqual(
             request_data["referenceImages"][0]["imageUsageType"],

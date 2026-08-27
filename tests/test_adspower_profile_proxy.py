@@ -1,7 +1,7 @@
 import asyncio
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from src.services.browser_captcha import (
     BROWSER_FETCH_BOOTSTRAP_URL,
@@ -362,6 +362,77 @@ class AdsPowerBlankPageCleanupTests(unittest.IsolatedAsyncioTestCase):
 
 
 class BrowserFetchLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_flow_runtime_warmup_uses_real_project_page(self):
+        class FakeMouse:
+            async def move(self, *args, **kwargs):
+                return None
+
+            async def wheel(self, *args, **kwargs):
+                return None
+
+        class FakeRuntimePage:
+            def __init__(self):
+                self.goto_calls = []
+                self.mouse = FakeMouse()
+
+            async def goto(self, url, **kwargs):
+                self.goto_calls.append((url, kwargs))
+
+            async def evaluate(self, script, payload=None):
+                if script == "document.readyState":
+                    return "complete"
+                return None
+
+            async def bring_to_front(self):
+                return None
+
+            async def wait_for_function(self, expression, **kwargs):
+                return True
+
+        browser = TokenBrowser(token_id=0, user_data_dir="tmp/unit-flow-runtime")
+        browser._capture_page_fingerprint = AsyncMock()
+        page = FakeRuntimePage()
+
+        with patch("src.services.browser_captcha.asyncio.sleep", new=AsyncMock()):
+            ready = await browser._prepare_flow_runtime_page(
+                page,
+                project_id="project-1",
+                website_key="site-key",
+                action="VIDEO_GENERATION",
+            )
+
+        self.assertTrue(ready)
+        self.assertEqual(
+            page.goto_calls[0][0],
+            "https://labs.google/fx/tools/flow/project/project-1",
+        )
+        browser._capture_page_fingerprint.assert_awaited_once_with(page)
+
+    async def test_browser_fetch_opens_the_request_project_page(self):
+        browser = TokenBrowser(token_id=0, user_data_dir="tmp/unit-browser-fetch-project")
+        context = _FakeFetchContext()
+
+        async def fake_get_or_create_shared_browser():
+            return None, None, context
+
+        async def fake_capture_page_fingerprint(page):
+            return None
+
+        browser._get_or_create_shared_browser = fake_get_or_create_shared_browser
+        browser._capture_page_fingerprint = fake_capture_page_fingerprint
+
+        result = await browser.fetch_json(
+            url="https://aisandbox-pa.googleapis.com/v1/video:submit",
+            json_data={"clientContext": {"projectId": "project-1"}},
+            timeout=10,
+        )
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(
+            context.created_pages[0].goto_calls[0][0],
+            "https://labs.google/fx/tools/flow/project/project-1",
+        )
+
     async def test_browser_fetch_waits_for_slot_semaphore(self):
         browser = TokenBrowser(token_id=0, user_data_dir="tmp/unit-browser-fetch-semaphore")
 

@@ -2188,6 +2188,11 @@ class FlowClient:
         # 403/reCAPTCHA 重试逻辑 - 使用配置的最大重试次数
         max_retries = self._captcha_aware_max_retries()
         last_error = None
+        # A retry still belongs to the same user launch. Keep the Flow session and
+        # batch identity stable and rotate only the one-shot reCAPTCHA token.
+        session_id = self._generate_session_id()
+        batch_id = str(uuid.uuid4())
+        scene_id = str(uuid.uuid4())
         
         for retry_attempt in range(max_retries):
             # 每次重试都重新获取 reCAPTCHA token - 视频使用 VIDEO_GENERATION action
@@ -2222,9 +2227,6 @@ class FlowClient:
                 if should_retry:
                     continue
                 raise last_error
-            session_id = self._generate_session_id()
-            batch_id = str(uuid.uuid4())
-            scene_id = str(uuid.uuid4())
             request_metadata = {}
             if not suppress_scene_id_metadata:
                 request_metadata["sceneId"] = scene_id
@@ -2242,6 +2244,9 @@ class FlowClient:
                     "userPaygateTier": user_paygate_tier
                 },
                 "requests": [{
+                    "outputSpec": {
+                        "resolution": "VIDEO_RESOLUTION_720P"
+                    },
                     "aspectRatio": aspect_ratio,
                     "seed": random.randint(1, 99999),
                     "textInput": {

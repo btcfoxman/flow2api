@@ -1888,12 +1888,177 @@ class TokenBrowser:
         if close_all:
             await self.recycle_browser(reason="force_close_all", rotate_profile=False)
 
+    def _build_flow_project_url(self, project_id: Optional[str]) -> str:
+        normalized_project_id = str(project_id or "").strip()
+        if normalized_project_id:
+            return f"{LABS_URL}/project/{urllib.parse.quote(normalized_project_id, safe='')}"
+        return LABS_URL
+
+    async def _wait_for_enterprise_ready(
+        self,
+        page,
+        website_key: str,
+        primary_host: str,
+        secondary_host: str,
+        *,
+        timeout_ms: int = 15000,
+        context_label: str = "",
+    ) -> bool:
+        """Wait for the real page's Enterprise runtime, injecting it only as fallback."""
+        wait_expression = (
+            "typeof grecaptcha !== 'undefined' && "
+            "typeof grecaptcha.enterprise !== 'undefined' && "
+            "typeof grecaptcha.enterprise.execute === 'function'"
+        )
+        label = f"{context_label} " if context_label else ""
+        try:
+            await page.wait_for_function(wait_expression, timeout=timeout_ms)
+            return True
+        except Exception as exc:
+            debug_logger.log_warning(
+                f"[BrowserCaptcha] Token-{self.token_id} {label}grecaptcha not ready; "
+                f"injecting enterprise.js fallback: {type(exc).__name__}: {str(exc)[:160]}"
+            )
+
+        try:
+            await page.evaluate(
+                """
+                ({ primaryUrl, secondaryUrl }) => {
+                    const existing = Array.from(document.scripts || []).some((script) =>
+                        (script && script.src || '').includes('/recaptcha/enterprise.js')
+                    );
+                    if (existing) return;
+                    const urls = [primaryUrl, secondaryUrl];
+                    const loadScript = (index) => {
+                        if (index >= urls.length) return;
+                        const script = document.createElement('script');
+                        script.src = urls[index];
+                        script.async = true;
+                        script.onerror = () => loadScript(index + 1);
+                        document.head.appendChild(script);
+                    };
+                    loadScript(0);
+                }
+                """,
+                {
+                    "primaryUrl": f"{primary_host}/recaptcha/enterprise.js?render={website_key}",
+                    "secondaryUrl": f"{secondary_host}/recaptcha/enterprise.js?render={website_key}",
+                },
+            )
+            await page.wait_for_function(wait_expression, timeout=timeout_ms)
+            return True
+        except Exception as exc:
+            debug_logger.log_warning(
+                f"[BrowserCaptcha] Token-{self.token_id} {label}grecaptcha unavailable: "
+                f"{type(exc).__name__}: {str(exc)[:160]}"
+            )
+            return False
+
+    async def _prepare_flow_runtime_page(
+        self,
+        page,
+        project_id: str,
+        website_key: str,
+        action: str,
+    ) -> bool:
+        """Open and warm the real Flow page before executing Enterprise reCAPTCHA."""
+        primary_host = "https://www.recaptcha.net" if self._browser_proxy_active else "https://www.google.com"
+        secondary_host = "https://www.google.com" if primary_host == "https://www.recaptcha.net" else "https://www.recaptcha.net"
+        page_urls = [self._build_flow_project_url(project_id), LABS_URL]
+        loaded = False
+
+        for target_url in page_urls:
+            try:
+                debug_logger.log_info(
+                    f"[BrowserCaptcha] Token-{self.token_id} opening real Flow page: "
+                    f"{target_url} (action={action})"
+                )
+                await page.goto(target_url, wait_until="domcontentloaded", timeout=45000)
+                loaded = True
+                break
+            except Exception as exc:
+                debug_logger.log_warning(
+                    f"[BrowserCaptcha] Token-{self.token_id} real Flow page failed: "
+                    f"{type(exc).__name__}: {str(exc)[:160]}"
+                )
+
+        if not loaded:
+            return False
+
+        for _ in range(20):
+            try:
+                if await page.evaluate("document.readyState") == "complete":
+                    break
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
+
+        try:
+            await page.bring_to_front()
+            await page.mouse.move(320, 220)
+            await page.mouse.move(560, 360, steps=16)
+            await page.mouse.wheel(0, 260)
+            await page.evaluate(
+                """
+                (() => {
+                    window.focus();
+                    window.dispatchEvent(new Event('focus'));
+                    document.dispatchEvent(new MouseEvent('mousemove', {
+                        bubbles: true,
+                        clientX: Math.max(32, Math.floor((window.innerWidth || 1280) * 0.42)),
+                        clientY: Math.max(32, Math.floor((window.innerHeight || 720) * 0.36))
+                    }));
+                    window.scrollTo(0, Math.min(320, document.body?.scrollHeight || 320));
+                })()
+                """
+            )
+        except Exception:
+            pass
+
+        warmup_seconds = float(getattr(config, "browser_flow_page_warmup_seconds", 6) or 6)
+        if warmup_seconds > 0:
+            await asyncio.sleep(warmup_seconds)
+
+        ready = await self._wait_for_enterprise_ready(
+            page,
+            website_key,
+            primary_host,
+            secondary_host,
+            context_label="real Flow page",
+        )
+        if ready:
+            await self._capture_page_fingerprint(page)
+        return ready
+
     async def _execute_captcha(self, context, project_id: str, website_key: str, action: str) -> Optional[str]:
         """在给定 context 中执行打码逻辑"""
         page = None
         try:
             page = await context.new_page()
             await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
+
+            # Current Flow executes Enterprise reCAPTCHA from a fully initialized
+            # project page. Prefer that first-party context; keep the synthetic page
+            # below as a compatibility fallback when the real page cannot initialize.
+            if await self._prepare_flow_runtime_page(page, project_id, website_key, action):
+                token = await asyncio.wait_for(
+                    page.evaluate(
+                        f"""
+                        (actionName) => new Promise((resolve, reject) => {{
+                            const timer = setTimeout(() => reject(new Error('timeout')), 25000);
+                            grecaptcha.enterprise.execute('{website_key}', {{action: actionName}})
+                                .then((value) => {{ clearTimeout(timer); resolve(value); }})
+                                .catch((error) => {{ clearTimeout(timer); reject(error); }});
+                        }})
+                        """,
+                        action,
+                    ),
+                    timeout=30,
+                )
+                post_wait_seconds = float(getattr(config, "browser_recaptcha_settle_seconds", 3) or 3)
+                if post_wait_seconds > 0:
+                    await asyncio.sleep(post_wait_seconds)
+                return token
 
             # 使用更简单的 API 地址，避免加载复杂页面
             page_url = "https://labs.google/fx/api/auth/providers"
@@ -2305,6 +2470,11 @@ class TokenBrowser:
                     _, _, context = await self._get_or_create_shared_browser()
                     page = None
                     route_url = BROWSER_FETCH_BOOTSTRAP_URL
+                    client_context = (json_data or {}).get("clientContext") or {}
+                    if not isinstance(client_context, dict):
+                        client_context = {}
+                    flow_page_url = self._build_flow_project_url(client_context.get("projectId"))
+                    navigation_timeout_ms = max(5000, min(20000, int(timeout * 500)))
                     try:
                         page = await context.new_page()
                         self._protected_temporary_page_ids.add(id(page))
@@ -2319,8 +2489,19 @@ class TokenBrowser:
                             else:
                                 await route.continue_()
 
-                        await page.route(route_url, handle_route)
-                        await page.goto(route_url, wait_until="domcontentloaded", timeout=15000)
+                        try:
+                            await page.goto(
+                                flow_page_url,
+                                wait_until="domcontentloaded",
+                                timeout=navigation_timeout_ms,
+                            )
+                        except Exception as exc:
+                            debug_logger.log_warning(
+                                f"[BrowserCaptcha] Token-{self.token_id} browser submit page failed; "
+                                f"using bootstrap fallback: {type(exc).__name__}: {str(exc)[:160]}"
+                            )
+                            await page.route(route_url, handle_route)
+                            await page.goto(route_url, wait_until="domcontentloaded", timeout=15000)
                         await self._capture_page_fingerprint(page)
 
                         payload = {
@@ -2341,7 +2522,7 @@ class TokenBrowser:
                                             method: payload.method,
                                             headers: payload.headers,
                                             body: payload.method === 'GET' ? undefined : payload.body,
-                                            credentials: 'omit',
+                                            credentials: 'include',
                                             mode: 'cors',
                                             signal: controller.signal
                                         });

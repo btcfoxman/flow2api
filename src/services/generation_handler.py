@@ -2124,6 +2124,7 @@ class GenerationHandler:
 
         await self._update_request_log_progress(request_log_state, token_id=token.id, status_text="preparing_video", progress=24)
 
+        submit_started_at: Optional[float] = None
         try:
             # 获取模型类型和配置
             video_type = model_config.get("video_type")
@@ -2553,7 +2554,17 @@ class GenerationHandler:
                 raise
 
         finally:
-            pass
+            if (
+                video_trace is not None
+                and submit_started_at is not None
+                and "submit_generation_ms" not in video_trace
+            ):
+                # Preserve submit latency on failures as well as successes. This is
+                # the critical timing for distinguishing upload work from a rejected
+                # Flow launch request.
+                video_trace["submit_generation_ms"] = int(
+                    (time.time() - submit_started_at) * 1000
+                )
 
     async def _run_video_task_background(
         self,

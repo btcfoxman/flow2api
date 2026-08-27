@@ -332,6 +332,61 @@ class FlowClientBrowserFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client._notify_browser_captcha_error.await_count, 1)
         self.assertEqual(client._notify_browser_captcha_request_finished.await_count, 2)
 
+    async def test_r2v_retry_keeps_flow_session_and_batch_identity(self):
+        config.set_captcha_method("adspower")
+        config.set_captcha_max_retries(4)
+        client = FlowClient(None)
+        client._acquire_video_launch_gate = AsyncMock(return_value=(True, 0, 0))
+        client._release_video_launch_gate = AsyncMock()
+        client._get_recaptcha_token = AsyncMock(
+            side_effect=[
+                ("recaptcha-token-1", "0:request-ref-1"),
+                ("recaptcha-token-2", "1:request-ref-2"),
+            ]
+        )
+        client._make_video_api_request = AsyncMock(
+            side_effect=[
+                Exception(
+                    "PUBLIC_ERROR_UNUSUAL_ACTIVITY_TOO_MUCH_TRAFFIC: "
+                    "reCAPTCHA evaluation failed"
+                ),
+                {"operations": [{"operation": {"name": "task-r2v"}}]},
+            ]
+        )
+        client._notify_browser_captcha_error = AsyncMock()
+        client._notify_browser_captcha_request_finished = AsyncMock()
+
+        with patch("src.services.flow_client.asyncio.sleep", AsyncMock()):
+            result = await client.generate_video_reference_images(
+                at="access-token",
+                project_id="project-1",
+                prompt="show product",
+                model_key="abra_r2v_8s",
+                aspect_ratio="VIDEO_ASPECT_RATIO_LANDSCAPE",
+                reference_images=[
+                    {"mediaId": "image-1", "imageUsageType": "IMAGE_USAGE_TYPE_ASSET"},
+                    {"mediaId": "image-2", "imageUsageType": "IMAGE_USAGE_TYPE_ASSET"},
+                ],
+                suppress_scene_id_metadata=True,
+                token_id=123,
+            )
+
+        self.assertEqual(result["operations"][0]["operation"]["name"], "task-r2v")
+        first_payload = client._make_video_api_request.await_args_list[0].kwargs["json_data"]
+        second_payload = client._make_video_api_request.await_args_list[1].kwargs["json_data"]
+        self.assertEqual(
+            first_payload["clientContext"]["sessionId"],
+            second_payload["clientContext"]["sessionId"],
+        )
+        self.assertEqual(
+            first_payload["mediaGenerationContext"]["batchId"],
+            second_payload["mediaGenerationContext"]["batchId"],
+        )
+        self.assertNotEqual(
+            first_payload["clientContext"]["recaptchaContext"]["token"],
+            second_payload["clientContext"]["recaptchaContext"]["token"],
+        )
+
     async def test_unusual_activity_stops_after_trying_two_profiles(self):
         config.set_captcha_method("adspower")
         config.set_captcha_max_retries(5)
