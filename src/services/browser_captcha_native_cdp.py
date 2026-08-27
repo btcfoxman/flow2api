@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import os
 import platform
@@ -14,16 +13,17 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Optional
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 from ..core.config import config
 from ..core.logger import debug_logger
 
 
-FLOW_CAPTCHA_PAGE_URL = "https://labs.google/fx/api/auth/providers"
+FLOW_PROJECT_BASE_URL = "https://labs.google/fx/zh/tools/flow"
 FLOW_WEBSITE_KEY = "6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV"
 DEFAULT_PROFILE_ROOT = Path("tmp") / "native_cdp_profiles"
 DEFAULT_IDLE_TTL_SECONDS = 600
+DEFAULT_VIDEO_SUBMIT_RESERVATION_SECONDS = 60
 
 
 def _mask_proxy(proxy_url: Optional[str]) -> str:
@@ -339,6 +339,8 @@ class NativeCdpAccountBrowser:
         self.last_error: Optional[str] = None
         self.last_fingerprint: Optional[Dict[str, Any]] = None
         self.solve_count = 0
+        self._project_sessions: Dict[str, tuple[str, str]] = {}
+        self._video_submit_reservations: list[float] = []
 
     @property
     def is_running(self) -> bool:
@@ -351,7 +353,34 @@ class NativeCdpAccountBrowser:
 
     @property
     def is_busy(self) -> bool:
-        return self.busy_count > 0 or self.solve_lock.locked()
+        self._prune_video_submit_reservations()
+        return (
+            self.busy_count > 0
+            or self.solve_lock.locked()
+            or bool(self._video_submit_reservations)
+        )
+
+    def _prune_video_submit_reservations(self) -> None:
+        now = time.monotonic()
+        self._video_submit_reservations = [
+            deadline
+            for deadline in self._video_submit_reservations
+            if deadline > now
+        ]
+
+    def reserve_for_video_submit(
+        self,
+        ttl_seconds: int = DEFAULT_VIDEO_SUBMIT_RESERVATION_SECONDS,
+    ) -> None:
+        self._prune_video_submit_reservations()
+        self._video_submit_reservations.append(
+            time.monotonic() + max(5, int(ttl_seconds))
+        )
+
+    def consume_video_submit_reservation(self) -> None:
+        self._prune_video_submit_reservations()
+        if self._video_submit_reservations:
+            self._video_submit_reservations.pop(0)
 
     async def _resolve_proxy(self) -> ProxyBinding:
         token = await self.db.get_token(self.token_id)
@@ -471,6 +500,8 @@ class NativeCdpAccountBrowser:
         process = self.process
         self.connection = None
         self.process = None
+        self._project_sessions.clear()
+        self._video_submit_reservations.clear()
         if connection:
             try:
                 await connection.send("Browser.close", timeout=3)
@@ -581,78 +612,105 @@ class NativeCdpAccountBrowser:
             except Exception:
                 pass
 
-    async def _navigate_captcha_page(
+    @staticmethod
+    def _project_page_url(project_id: Optional[str]) -> str:
+        normalized_project_id = str(project_id or "").strip()
+        if not normalized_project_id:
+            return FLOW_PROJECT_BASE_URL
+        return f"{FLOW_PROJECT_BASE_URL}/project/{quote(normalized_project_id, safe='')}"
+
+    async def _wait_for_document_ready(self, session_id: str, timeout: float = 35) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                ready_state = await self._evaluate(
+                    session_id,
+                    "document.readyState",
+                    timeout=3,
+                )
+                if ready_state in {"interactive", "complete"}:
+                    return
+            except Exception:
+                pass
+            await asyncio.sleep(0.25)
+        raise TimeoutError("real Flow project page did not become ready")
+
+    async def _open_real_project_page(
         self,
         session_id: str,
-        website_key: str,
+        project_id: str,
     ) -> None:
         if not self.connection:
             raise ConnectionError("native CDP browser is not connected")
-        html = f"""<!doctype html><html><head><meta charset="utf-8">
-<script>
-(() => {{
-  const urls = [
-    'https://www.google.com/recaptcha/enterprise.js?render={website_key}',
-    'https://www.recaptcha.net/recaptcha/enterprise.js?render={website_key}'
-  ];
-  const load = (index) => {{
-    if (index >= urls.length) return;
-    const script = document.createElement('script');
-    script.src = urls[index];
-    script.async = true;
-    script.onerror = () => load(index + 1);
-    document.head.appendChild(script);
-  }};
-  load(0);
-}})();
-</script></head><body><main aria-label="Google Labs"></main></body></html>"""
-        await self.connection.send(
-            "Fetch.enable",
-            {
-                "patterns": [
-                    {
-                        "urlPattern": f"{FLOW_CAPTCHA_PAGE_URL}*",
-                        "requestStage": "Request",
-                    }
-                ]
-            },
+        page_url = self._project_page_url(project_id)
+        navigation = await self.connection.send(
+            "Page.navigate",
+            {"url": page_url},
             session_id=session_id,
+            timeout=45,
         )
-        paused_task = asyncio.create_task(
-            self.connection.wait_event(
-                "Fetch.requestPaused",
-                session_id=session_id,
-                timeout=20,
+        if navigation.get("errorText"):
+            raise CdpProtocolError(
+                f"real Flow project page navigation failed: {navigation['errorText']}"
             )
+        await self._wait_for_document_ready(session_id)
+        current_url = str(
+            await self._evaluate(session_id, "window.location.href", timeout=5) or ""
         )
-        navigate_task = asyncio.create_task(
-            self.connection.send(
-                "Page.navigate",
-                {"url": FLOW_CAPTCHA_PAGE_URL},
-                session_id=session_id,
-                timeout=25,
+        normalized_project_id = str(project_id or "").strip()
+        if normalized_project_id and f"/project/{normalized_project_id}" not in current_url:
+            raise RuntimeError(
+                "real Flow project page did not retain the requested project context"
             )
-        )
-        paused = await paused_task
-        request_id = paused.get("requestId")
-        if not request_id:
-            navigate_task.cancel()
-            raise CdpProtocolError("Fetch.requestPaused returned no requestId")
-        await self.connection.send(
-            "Fetch.fulfillRequest",
-            {
-                "requestId": request_id,
-                "responseCode": 200,
-                "responseHeaders": [
-                    {"name": "content-type", "value": "text/html; charset=utf-8"},
-                    {"name": "cache-control", "value": "no-store"},
-                ],
-                "body": base64.b64encode(html.encode("utf-8")).decode("ascii"),
-            },
-            session_id=session_id,
-        )
-        await navigate_task
-        await self.connection.send("Fetch.disable", session_id=session_id)
+
+    async def _get_or_create_project_session(
+        self,
+        project_id: str,
+    ) -> tuple[str, str]:
+        normalized_project_id = str(project_id or "").strip()
+        cached = self._project_sessions.get(normalized_project_id)
+        if cached:
+            target_id, session_id = cached
+            try:
+                await self._evaluate(session_id, "document.readyState", timeout=3)
+                await self._seed_session_cookie(session_id)
+                return target_id, session_id
+            except Exception:
+                self._project_sessions.pop(normalized_project_id, None)
+
+        target_id, session_id = await self._create_page_session()
+        try:
+            await self._seed_session_cookie(session_id)
+            await self._open_real_project_page(session_id, normalized_project_id)
+            await self._capture_fingerprint(session_id)
+        except Exception:
+            if self.connection and not self.connection.closed:
+                try:
+                    await self.connection.send(
+                        "Target.closeTarget",
+                        {"targetId": target_id},
+                        timeout=5,
+                    )
+                except Exception:
+                    pass
+            raise
+        self._project_sessions[normalized_project_id] = (target_id, session_id)
+        return target_id, session_id
+
+    async def _discard_project_session(self, project_id: Optional[str]) -> None:
+        normalized_project_id = str(project_id or "").strip()
+        cached = self._project_sessions.pop(normalized_project_id, None)
+        if not cached or not self.connection or self.connection.closed:
+            return
+        target_id, _ = cached
+        try:
+            await self.connection.send(
+                "Target.closeTarget",
+                {"targetId": target_id},
+                timeout=5,
+            )
+        except Exception:
+            pass
 
     async def _wait_for_recaptcha(self, session_id: str, timeout: float = 35) -> None:
         deadline = time.monotonic() + timeout
@@ -695,6 +753,141 @@ class NativeCdpAccountBrowser:
         self.last_fingerprint = fingerprint
         return fingerprint
 
+    @staticmethod
+    def _browser_fetch_headers(headers: Optional[Dict[str, Any]]) -> Dict[str, str]:
+        forbidden_names = {
+            "accept-encoding",
+            "connection",
+            "content-length",
+            "cookie",
+            "host",
+            "origin",
+            "referer",
+            "user-agent",
+        }
+        filtered: Dict[str, str] = {}
+        for key, value in (headers or {}).items():
+            if value is None:
+                continue
+            key_text = str(key or "").strip()
+            key_lower = key_text.lower()
+            if not key_text or key_lower in forbidden_names:
+                continue
+            if key_lower.startswith("sec-") or key_lower.startswith("proxy-"):
+                continue
+            filtered[key_text] = str(value)
+        return filtered
+
+    @staticmethod
+    def _format_browser_fetch_http_error(status: int, text: str) -> str:
+        reason = f"HTTP Error {status}"
+        try:
+            payload = json.loads(text or "{}")
+            error_info = payload.get("error") if isinstance(payload, dict) else None
+            if isinstance(error_info, dict):
+                message = str(error_info.get("message") or "").strip()
+                for detail in error_info.get("details") or []:
+                    if isinstance(detail, dict) and detail.get("reason"):
+                        reason = str(detail["reason"])
+                        break
+                if message:
+                    reason = f"{reason}: {message}"
+        except Exception:
+            body = str(text or "").strip()
+            if body:
+                reason = f"{reason}: {body[:300]}"
+        return reason
+
+    async def fetch_json(
+        self,
+        *,
+        project_id: str,
+        url: str,
+        method: str = "POST",
+        headers: Optional[Dict[str, Any]] = None,
+        json_data: Optional[Dict[str, Any]] = None,
+        timeout: int = 60,
+    ) -> Dict[str, Any]:
+        """Execute an API request in the token's persistent real Flow project page."""
+        async with self.solve_lock:
+            self.busy_count += 1
+            try:
+                await self.start()
+                _, session_id = await self._get_or_create_project_session(project_id)
+                payload = {
+                    "url": str(url),
+                    "method": str(method or "POST").upper(),
+                    "headers": self._browser_fetch_headers(headers),
+                    "body": json.dumps(json_data or {}, ensure_ascii=False),
+                    "timeoutMs": max(1000, int(timeout * 1000)),
+                }
+                result = await self._evaluate(
+                    session_id,
+                    f"""
+                    (async () => {{
+                      const payload = {json.dumps(payload, ensure_ascii=False)};
+                      const controller = new AbortController();
+                      const timer = setTimeout(() => controller.abort(), payload.timeoutMs);
+                      try {{
+                        const response = await fetch(payload.url, {{
+                          method: payload.method,
+                          headers: payload.headers,
+                          body: payload.method === 'GET' ? undefined : payload.body,
+                          credentials: 'include',
+                          mode: 'cors',
+                          signal: controller.signal
+                        }});
+                        const text = await response.text();
+                        return {{
+                          status: response.status,
+                          statusText: response.statusText || '',
+                          text
+                        }};
+                      }} catch (error) {{
+                        return {{
+                          fetchError: `${{error && error.name ? error.name : 'Error'}}: ${{error && error.message ? error.message : String(error)}}`
+                        }};
+                      }} finally {{
+                        clearTimeout(timer);
+                      }}
+                    }})()
+                    """,
+                    await_promise=True,
+                    timeout=max(1, timeout + 5),
+                )
+                if not isinstance(result, dict):
+                    raise RuntimeError("native browser fetch returned invalid result")
+                fetch_error = result.get("fetchError")
+                if fetch_error:
+                    raise RuntimeError(f"native browser fetch failed: {fetch_error}")
+
+                status = int(result.get("status") or 0)
+                text = str(result.get("text") or "")
+                if status >= 400:
+                    raise RuntimeError(self._format_browser_fetch_http_error(status, text))
+                if not text:
+                    return {}
+                try:
+                    parsed = json.loads(text)
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"native browser fetch returned non-JSON response: {text[:300]}"
+                    ) from exc
+                if not isinstance(parsed, dict):
+                    raise RuntimeError(
+                        f"native browser fetch returned unexpected JSON type: {type(parsed).__name__}"
+                    )
+                self.last_error = None
+                return parsed
+            except Exception as exc:
+                self.last_error = f"{type(exc).__name__}: {str(exc)[:240]}"
+                if "native browser fetch failed" in str(exc).lower():
+                    await self._discard_project_session(project_id)
+                raise
+            finally:
+                self.busy_count = max(0, self.busy_count - 1)
+                self.last_used_at = time.monotonic()
+
     async def solve(
         self,
         project_id: str,
@@ -704,13 +897,9 @@ class NativeCdpAccountBrowser:
     ) -> Optional[str]:
         async with self.solve_lock:
             self.busy_count += 1
-            target_id = None
-            session_id = None
             try:
                 await self.start()
-                target_id, session_id = await self._create_page_session()
-                await self._seed_session_cookie(session_id)
-                await self._navigate_captcha_page(session_id, website_key)
+                _, session_id = await self._get_or_create_project_session(project_id)
                 await self._wait_for_recaptcha(session_id)
                 await asyncio.sleep(0.8 + random.random())
                 await self._evaluate(
@@ -766,23 +955,16 @@ class NativeCdpAccountBrowser:
                     f"[NativeCDP] solve failed token_id={self.token_id}, "
                     f"project_id={project_id}: {self.last_error}"
                 )
+                await self._discard_project_session(project_id)
                 if not self.is_running:
                     await self.stop(reason="runtime_disconnected")
                 return None
             finally:
-                if target_id and self.connection and not self.connection.closed:
-                    try:
-                        await self.connection.send(
-                            "Target.closeTarget",
-                            {"targetId": target_id},
-                            timeout=5,
-                        )
-                    except Exception:
-                        pass
                 self.busy_count = max(0, self.busy_count - 1)
                 self.last_used_at = time.monotonic()
 
     def status(self) -> Dict[str, Any]:
+        self._prune_video_submit_reservations()
         return {
             "token_id": self.token_id,
             "running": self.is_running,
@@ -792,6 +974,7 @@ class NativeCdpAccountBrowser:
             "proxy_source": self.proxy_binding.source if self.proxy_binding else None,
             "solve_count": self.solve_count,
             "last_error": self.last_error,
+            "video_submit_reservations": len(self._video_submit_reservations),
             "idle_seconds": 0 if self.is_busy else int(max(0, time.monotonic() - self.last_used_at)),
         }
 
@@ -887,7 +1070,49 @@ class BrowserCaptchaService:
         try:
             await self._ensure_capacity(worker)
             token = await worker.solve(project_id, action, website_key=self.website_key)
+            if token and str(action or "").strip().upper() == "VIDEO_GENERATION":
+                worker.reserve_for_video_submit()
             return token, f"native:{token_key}" if token else None
+        finally:
+            worker.busy_count = max(0, worker.busy_count - 1)
+            worker.last_used_at = time.monotonic()
+            async with self._capacity_condition:
+                self._capacity_condition.notify_all()
+
+    async def fetch_json(
+        self,
+        *,
+        token_id: Optional[int],
+        project_id: str,
+        url: str,
+        method: str = "POST",
+        headers: Optional[Dict[str, Any]] = None,
+        json_data: Optional[Dict[str, Any]] = None,
+        timeout: int = 60,
+        consume_video_reservation: bool = False,
+    ) -> Dict[str, Any]:
+        if self._closed:
+            raise RuntimeError("native_cdp service is closed")
+        if not token_id:
+            raise RuntimeError("native_cdp browser fetch requires token_id")
+        token_key = int(token_id)
+        worker = self._workers.get(token_key)
+        if worker is None:
+            worker = NativeCdpAccountBrowser(token_key, self.db)
+            self._workers[token_key] = worker
+        worker.busy_count += 1
+        if consume_video_reservation:
+            worker.consume_video_submit_reservation()
+        try:
+            await self._ensure_capacity(worker)
+            return await worker.fetch_json(
+                project_id=project_id,
+                url=url,
+                method=method,
+                headers=headers,
+                json_data=json_data,
+                timeout=timeout,
+            )
         finally:
             worker.busy_count = max(0, worker.busy_count - 1)
             worker.last_used_at = time.monotonic()

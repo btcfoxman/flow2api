@@ -566,6 +566,39 @@ class FlowClient:
         browser_ref = fingerprint.get("browser_ref") if isinstance(fingerprint, dict) else None
         captcha_method = str(getattr(config, "captcha_method", "") or "").strip().lower()
         respect_fingerprint_proxy = True
+        native_token_id = fingerprint.get("native_token_id") if isinstance(fingerprint, dict) else None
+        is_video_submit = "video:" in url and "batchCheckAsyncVideoGenerationStatus" not in url
+        if captcha_method == "native_cdp" and native_token_id and is_video_submit:
+            client_context = (json_data or {}).get("clientContext") or {}
+            if not isinstance(client_context, dict):
+                client_context = {}
+            project_id = str(client_context.get("projectId") or "").strip()
+            try:
+                from .browser_captcha_native_cdp import BrowserCaptchaService
+
+                service = await BrowserCaptchaService.get_instance(self.db)
+                return await asyncio.wait_for(
+                    service.fetch_json(
+                        token_id=int(native_token_id),
+                        project_id=project_id,
+                        method="POST",
+                        url=url,
+                        headers={
+                            "authorization": f"Bearer {at}",
+                            "content-type": "text/plain;charset=UTF-8",
+                        },
+                        json_data=json_data,
+                        timeout=timeout,
+                        consume_video_reservation=True,
+                    ),
+                    timeout=timeout + 5,
+                )
+            except asyncio.TimeoutError as exc:
+                raise Exception(
+                    f"Flow native browser video API request timed out after {timeout}s"
+                ) from exc
+            except Exception as exc:
+                raise Exception(f"Flow native browser API request failed: {exc}") from exc
         if captcha_method in {"browser", "adspower"} and self._is_local_browser_ref(browser_ref):
             try:
                 from .browser_captcha import BrowserCaptchaService
@@ -1098,6 +1131,7 @@ class FlowClient:
         aspect_ratio: str = "IMAGE_ASPECT_RATIO_LANDSCAPE",
         project_id: Optional[str] = None,
         st: Optional[str] = None,
+        token_id: Optional[int] = None,
     ) -> str:
         """上传图片,返回mediaId
 
@@ -1107,6 +1141,7 @@ class FlowClient:
             aspect_ratio: 图片或视频宽高比（会自动转换为图片格式）
             project_id: 项目ID（新上传接口可使用）
             st: Labs 会话，用于在首次上传前确认素材条款
+            token_id: 当前账号 ID；native_cdp 使用它复用真实项目页浏览器
 
         Returns:
             mediaId
@@ -1130,7 +1165,14 @@ class FlowClient:
 
             # 编码为base64 (去掉前缀)
             current_image_base64 = base64.b64encode(current_image_bytes).decode('utf-8')
-            current_ext = "png" if "png" in current_mime_type else "jpg"
+            current_ext = {
+                "image/png": "png",
+                "image/jpeg": "jpg",
+                "image/webp": "webp",
+                "image/gif": "gif",
+                "image/bmp": "bmp",
+                "image/jp2": "jp2",
+            }.get(current_mime_type, "jpg")
             current_upload_file_name = f"flow2api_upload_{int(time.time() * 1000)}.{current_ext}"
 
             current_new_json_data = {
@@ -1178,7 +1220,42 @@ class FlowClient:
         max_retries = self._captcha_aware_max_retries()
         last_error: Optional[Exception] = None
 
-        captcha_method = getattr(config, "captcha_method", "adspower")
+        captcha_method = str(
+            getattr(config, "captcha_method", "adspower") or "adspower"
+        ).strip().lower()
+
+        async def _upload_project_image(payload: Dict[str, Any]) -> Dict[str, Any]:
+            if captcha_method == "native_cdp" and token_id:
+                from .browser_captcha_native_cdp import BrowserCaptchaService
+
+                service = await BrowserCaptchaService.get_instance(self.db)
+                result = await service.fetch_json(
+                    token_id=token_id,
+                    project_id=normalized_project_id,
+                    method="POST",
+                    url=new_url,
+                    headers={
+                        "authorization": f"Bearer {at}",
+                        "content-type": "application/json",
+                    },
+                    json_data=payload,
+                    timeout=max(30, min(int(self.timeout or 0) or 120, 90)),
+                )
+                fingerprint = service.get_fingerprint(token_id)
+                if fingerprint:
+                    fingerprint_payload = dict(fingerprint)
+                    fingerprint_payload["native_token_id"] = token_id
+                    self._set_request_fingerprint(fingerprint_payload)
+                return result
+            return await self._make_request(
+                method="POST",
+                url=new_url,
+                json_data=payload,
+                use_at=True,
+                at_token=at,
+                use_media_proxy=True,
+            )
+
         if captcha_method == "personal":
             try:
                 from .browser_captcha_personal import BrowserCaptchaService
@@ -1193,14 +1270,7 @@ class FlowClient:
 
         for retry_attempt in range(max_retries):
             try:
-                new_result = await self._make_request(
-                    method="POST",
-                    url=new_url,
-                    json_data=new_json_data,
-                    use_at=True,
-                    at_token=at,
-                    use_media_proxy=True,
-                )
+                new_result = await _upload_project_image(new_json_data)
                 media_id = (
                     self._extract_media_name(new_result.get("media"))
                     or new_result.get("mediaGenerationId", {}).get("mediaGenerationId")

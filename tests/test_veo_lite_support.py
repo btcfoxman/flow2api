@@ -310,6 +310,68 @@ class VeoLiteGenerationHandlerTests(unittest.TestCase):
             0,
         )
 
+    def test_r2v_upload_invalid_argument_fails_over_to_one_other_project(self):
+        async def run():
+            handler = GenerationHandler.__new__(GenerationHandler)
+            upload_image = AsyncMock(
+                side_effect=[
+                    RuntimeError(
+                        "Project-scoped image upload failed via /flow/uploadImage "
+                        "(cause=HTTP Error 400: Request contains an invalid argument.)"
+                    ),
+                    "media-project-2",
+                ]
+            )
+            generate_video = AsyncMock(return_value={"operations": []})
+            handler.flow_client = types.SimpleNamespace(
+                upload_image=upload_image,
+                generate_video_reference_images=generate_video,
+            )
+            handler.token_manager = types.SimpleNamespace(
+                ensure_project_exists=AsyncMock(return_value="project-2")
+            )
+            handler._update_request_log_progress = AsyncMock()
+            token = types.SimpleNamespace(
+                id=1,
+                at="access-token",
+                st="session-token",
+                user_paygate_tier="PAYGATE_TIER_ONE",
+                video_concurrency=1,
+            )
+            performance = {"request_id": "gen-upload-failover"}
+
+            async for _ in handler._handle_video_generation(
+                token=token,
+                project_id="project-1",
+                model_config=dict(MODEL_CONFIG["abra_r2v_8s"]),
+                prompt="hello",
+                images=[b"image"],
+                stream=False,
+                perf_trace=performance,
+                generation_result=handler._create_generation_result(),
+                request_log_state={"id": None, "progress": 0},
+            ):
+                pass
+            return handler, upload_image, generate_video, performance
+
+        handler, upload_image, generate_video, performance = asyncio.run(run())
+
+        self.assertEqual(upload_image.await_count, 2)
+        self.assertEqual(
+            [call.kwargs["project_id"] for call in upload_image.await_args_list],
+            ["project-1", "project-2"],
+        )
+        self.assertEqual(
+            [call.kwargs["token_id"] for call in upload_image.await_args_list],
+            [1, 1],
+        )
+        handler.token_manager.ensure_project_exists.assert_awaited_once_with(1)
+        self.assertEqual(generate_video.await_args.kwargs["project_id"], "project-2")
+        self.assertEqual(
+            performance["video_generation"]["upload_project_failover_count"],
+            1,
+        )
+
     def test_r2v_missing_images_marks_client_error_status(self):
         async def run():
             handler = GenerationHandler.__new__(GenerationHandler)

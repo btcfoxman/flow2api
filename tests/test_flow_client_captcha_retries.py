@@ -140,6 +140,62 @@ class FlowClientBrowserFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake_service.call["headers"]["authorization"], "Bearer access-token")
         self.assertEqual(fake_service.call["headers"]["content-type"], "text/plain;charset=UTF-8")
 
+    async def test_video_submit_uses_native_project_page_fetch(self):
+        config.set_captcha_method("native_cdp")
+        client = FlowClient(None)
+        client._set_request_fingerprint({"native_token_id": 123})
+
+        class FakeNativeBrowserCaptchaService:
+            def __init__(self):
+                self.call = None
+
+            async def fetch_json(self, **kwargs):
+                self.call = kwargs
+                return {"operations": [{"operation": {"name": "task-native"}}]}
+
+        fake_service = FakeNativeBrowserCaptchaService()
+        with patch(
+            "src.services.browser_captcha_native_cdp.BrowserCaptchaService.get_instance",
+            AsyncMock(return_value=fake_service),
+        ), patch.object(client, "_make_request", AsyncMock()) as make_request:
+            result = await client._make_video_api_request(
+                url="https://aisandbox-pa.googleapis.com/v1/video:batchAsyncGenerateVideoReferenceImages",
+                json_data={"clientContext": {"projectId": "project-1"}},
+                at="access-token",
+                timeout=30,
+            )
+
+        self.assertEqual(result["operations"][0]["operation"]["name"], "task-native")
+        self.assertEqual(fake_service.call["token_id"], 123)
+        self.assertEqual(fake_service.call["project_id"], "project-1")
+        self.assertTrue(fake_service.call["consume_video_reservation"])
+        self.assertEqual(
+            fake_service.call["headers"]["content-type"],
+            "text/plain;charset=UTF-8",
+        )
+        make_request.assert_not_awaited()
+
+    async def test_native_status_poll_keeps_direct_http_path(self):
+        config.set_captcha_method("native_cdp")
+        client = FlowClient(None)
+        client._set_request_fingerprint({"native_token_id": 123})
+        expected = {"operations": [{"done": False}]}
+
+        with patch.object(
+            client,
+            "_make_request",
+            AsyncMock(return_value=expected),
+        ) as make_request:
+            result = await client._make_video_api_request(
+                url="https://aisandbox-pa.googleapis.com/v1/video:batchCheckAsyncVideoGenerationStatus",
+                json_data={"clientContext": {"projectId": "project-1"}},
+                at="access-token",
+                timeout=30,
+            )
+
+        self.assertEqual(result, expected)
+        make_request.assert_awaited_once()
+
     async def test_browser_fetch_transport_failure_falls_back_without_empty_fingerprint_proxy(self):
         config.set_captcha_method("adspower")
         client = FlowClient(None)

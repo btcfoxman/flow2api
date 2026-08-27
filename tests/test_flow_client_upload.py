@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 from PIL import Image
 
+from src.core.config import config
 from src.services.flow_client import FlowClient
 
 
@@ -12,6 +13,62 @@ JPEG_BYTES = b"\xff\xd8\xff" + b"0" * 16
 
 
 class FlowClientUploadImageTests(unittest.IsolatedAsyncioTestCase):
+    async def test_native_cdp_upload_uses_bound_real_project_page(self):
+        original_method = config.captcha_method
+        config.set_captcha_method("native_cdp")
+        client = FlowClient(proxy_manager=None, db=object())
+
+        class FakeNativeBrowserCaptchaService:
+            def __init__(self):
+                self.call = None
+
+            async def fetch_json(self, **kwargs):
+                self.call = kwargs
+                return {"media": {"name": "native-media-id"}}
+
+            def get_fingerprint(self, token_id):
+                return {"user_agent": "native-test"}
+
+        fake_service = FakeNativeBrowserCaptchaService()
+        try:
+            with patch(
+                "src.services.browser_captcha_native_cdp.BrowserCaptchaService.get_instance",
+                AsyncMock(return_value=fake_service),
+            ), patch.object(client, "_make_request", AsyncMock()) as make_request:
+                media_id = await client.upload_image(
+                    at="test-at",
+                    image_bytes=JPEG_BYTES,
+                    project_id="project-123",
+                    token_id=7,
+                )
+        finally:
+            config.set_captcha_method(original_method)
+
+        self.assertEqual(media_id, "native-media-id")
+        self.assertEqual(fake_service.call["token_id"], 7)
+        self.assertEqual(fake_service.call["project_id"], "project-123")
+        self.assertEqual(
+            fake_service.call["json_data"]["clientContext"]["projectId"],
+            "project-123",
+        )
+        make_request.assert_not_awaited()
+
+    async def test_webp_upload_keeps_matching_file_extension(self):
+        client = FlowClient(proxy_manager=None)
+        webp_bytes = b"RIFF" + (16).to_bytes(4, "little") + b"WEBP" + b"payload"
+        client._make_request = AsyncMock(return_value={"media": {"name": "webp-media"}})
+
+        media_id = await client.upload_image(
+            at="test-at",
+            image_bytes=webp_bytes,
+            project_id="project-123",
+        )
+
+        self.assertEqual(media_id, "webp-media")
+        payload = client._make_request.await_args.kwargs["json_data"]
+        self.assertEqual(payload["mimeType"], "image/webp")
+        self.assertTrue(payload["fileName"].endswith(".webp"))
+
     async def test_upload_accepts_flow_media_terms_once_per_session(self):
         client = FlowClient(proxy_manager=None)
         request_calls = []

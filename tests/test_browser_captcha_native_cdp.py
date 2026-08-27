@@ -2,7 +2,7 @@ import asyncio
 import json
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import websockets
 
@@ -115,16 +115,24 @@ class _FakeAccountBrowser:
         self.last_used_at = 0
         self.last_fingerprint = {"user_agent": f"token-{token_id}"}
         self.solve_calls = []
+        self.fetch_calls = []
         self.profile_dir = SimpleNamespace(name=f"token-{token_id}")
         self.process = None
         self.proxy_binding = None
         self.solve_count = 0
         self.last_error = None
+        self.video_submit_reservations = 0
         type(self).instances[self.token_id] = self
 
     @property
     def is_busy(self):
-        return self.busy_count > 0
+        return self.busy_count > 0 or self.video_submit_reservations > 0
+
+    def reserve_for_video_submit(self):
+        self.video_submit_reservations += 1
+
+    def consume_video_submit_reservation(self):
+        self.video_submit_reservations = max(0, self.video_submit_reservations - 1)
 
     async def start(self):
         self.is_running = True
@@ -135,6 +143,10 @@ class _FakeAccountBrowser:
             type(self).solve_started.setdefault(self.token_id, asyncio.Event()).set()
             await type(self).solve_release.setdefault(self.token_id, asyncio.Event()).wait()
         return f"captcha-{self.token_id}"
+
+    async def fetch_json(self, **kwargs):
+        self.fetch_calls.append(kwargs)
+        return {"projectId": kwargs["project_id"], "ok": True}
 
     async def stop(self, reason):
         self.is_running = False
@@ -184,6 +196,51 @@ class NativeCdpServiceTests(unittest.IsolatedAsyncioTestCase):
                 ["project-a", "project-b"],
             )
 
+    async def test_browser_fetch_reuses_account_worker(self):
+        with patch(
+            "src.services.browser_captcha_native_cdp.NativeCdpAccountBrowser",
+            _FakeAccountBrowser,
+        ):
+            service = await BrowserCaptchaService.get_instance(_FakeDatabase())
+
+            await service.get_token("project-a", token_id=1)
+            result = await service.fetch_json(
+                token_id=1,
+                project_id="project-a",
+                url="https://example.test/video:submit",
+                json_data={"clientContext": {"projectId": "project-a"}},
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(len(_FakeAccountBrowser.instances), 1)
+            self.assertEqual(
+                _FakeAccountBrowser.instances[1].fetch_calls[0]["project_id"],
+                "project-a",
+            )
+
+    async def test_worker_fetch_runs_in_real_project_page_session(self):
+        browser = NativeCdpAccountBrowser(7, _FakeDatabase())
+        browser.start = AsyncMock()
+        browser._get_or_create_project_session = AsyncMock(
+            return_value=("target-1", "session-1")
+        )
+        browser._evaluate = AsyncMock(
+            return_value={"status": 200, "statusText": "OK", "text": '{"ok": true}'}
+        )
+
+        result = await browser.fetch_json(
+            project_id="project-a",
+            url="https://example.test/video:submit",
+            headers={"authorization": "Bearer test", "user-agent": "blocked"},
+            json_data={"hello": "world"},
+        )
+
+        self.assertEqual(result, {"ok": True})
+        browser._get_or_create_project_session.assert_awaited_once_with("project-a")
+        expression = browser._evaluate.await_args.args[1]
+        self.assertIn("credentials: 'include'", expression)
+        self.assertNotIn('\\"user-agent\\"', expression)
+
     async def test_busy_worker_is_not_evicted_while_next_account_waits(self):
         config.set_browser_count(1)
         _FakeAccountBrowser.blocked_tokens = {1}
@@ -213,5 +270,42 @@ class NativeCdpServiceTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(first_result[0], "captcha-1")
             self.assertEqual(second_result[0], "captcha-2")
+            self.assertFalse(_FakeAccountBrowser.instances[1].is_running)
+            self.assertTrue(_FakeAccountBrowser.instances[2].is_running)
+
+    async def test_video_worker_is_reserved_until_bound_submit_starts(self):
+        config.set_browser_count(1)
+        with patch(
+            "src.services.browser_captcha_native_cdp.NativeCdpAccountBrowser",
+            _FakeAccountBrowser,
+        ):
+            service = await BrowserCaptchaService.get_instance(_FakeDatabase())
+            token, _ = await service.get_token(
+                "project-a",
+                action="VIDEO_GENERATION",
+                token_id=1,
+            )
+            self.assertEqual(token, "captcha-1")
+            self.assertEqual(_FakeAccountBrowser.instances[1].video_submit_reservations, 1)
+
+            next_account_task = asyncio.create_task(
+                service.get_token("project-b", action="IMAGE_GENERATION", token_id=2)
+            )
+            await asyncio.sleep(0.05)
+
+            self.assertEqual(service.get_status()["queued"], 1)
+            self.assertTrue(_FakeAccountBrowser.instances[1].is_running)
+            self.assertFalse(_FakeAccountBrowser.instances[2].is_running)
+
+            await service.fetch_json(
+                token_id=1,
+                project_id="project-a",
+                url="https://example.test/video:submit",
+                json_data={},
+                consume_video_reservation=True,
+            )
+            next_token, _ = await next_account_task
+
+            self.assertEqual(next_token, "captcha-2")
             self.assertFalse(_FakeAccountBrowser.instances[1].is_running)
             self.assertTrue(_FakeAccountBrowser.instances[2].is_running)

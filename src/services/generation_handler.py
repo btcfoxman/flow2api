@@ -16,6 +16,7 @@ from ..core.media_errors import (
     is_media_policy_error,
     is_media_transport_error,
     is_project_image_upload_error,
+    is_project_image_upload_invalid_argument_error,
     media_generation_failure_reason,
     media_generation_failure_response,
     project_image_upload_failure_response,
@@ -1851,6 +1852,7 @@ class GenerationHandler:
                         model_config["aspect_ratio"],
                         project_id=project_id,
                         st=token.st,
+                        token_id=token.id,
                     )
                     image_inputs.append({
                         "name": media_id,
@@ -2212,60 +2214,110 @@ class GenerationHandler:
             reference_images = []
             video_end_frame_index = 240
 
-            # I2V: 首尾帧处理
-            if video_type == "i2v" and images:
-                if image_count == 1:
-                    # 只有1张图: 仅作为首帧
-                    if stream:
-                        yield self._create_stream_chunk("上传首帧图片...\n")
-                    start_media_id = await self.flow_client.upload_image(
-                        token.at, images[0], model_config["aspect_ratio"], project_id=project_id, st=token.st
-                    )
-                    debug_logger.log_info(f"[I2V] 仅上传首帧: {start_media_id}")
-
-                elif image_count == 2:
-                    # 2张图: 首帧+尾帧
-                    if stream:
-                        yield self._create_stream_chunk("上传首帧和尾帧图片...\n")
-                    start_media_id = await self.flow_client.upload_image(
-                        token.at, images[0], model_config["aspect_ratio"], project_id=project_id, st=token.st
-                    )
-                    end_media_id = await self.flow_client.upload_image(
-                        token.at, images[1], model_config["aspect_ratio"], project_id=project_id, st=token.st
-                    )
-                    debug_logger.log_info(f"[I2V] 上传首尾帧: {start_media_id}, {end_media_id}")
-
-            # R2V: 多图处理
-            elif video_type == "r2v" and images:
-                if stream:
+            if stream:
+                if video_type == "i2v" and image_count == 1:
+                    yield self._create_stream_chunk("上传首帧图片...\n")
+                elif video_type == "i2v" and image_count == 2:
+                    yield self._create_stream_chunk("上传首帧和尾帧图片...\n")
+                elif video_type in {"r2v", "v2v"} and images:
                     yield self._create_stream_chunk(f"上传 {image_count} 张参考图片...\n")
 
-                for img in images:
-                    media_id = await self.flow_client.upload_image(
-                        token.at, img, model_config["aspect_ratio"], project_id=project_id, st=token.st
+            async def _upload_video_images(
+                active_project_id: str,
+            ) -> tuple[Optional[str], Optional[str], List[Dict[str, str]]]:
+                uploaded_start_media_id: Optional[str] = None
+                uploaded_end_media_id: Optional[str] = None
+                uploaded_reference_images: List[Dict[str, str]] = []
+
+                if video_type == "i2v" and images:
+                    uploaded_start_media_id = await self.flow_client.upload_image(
+                        token.at,
+                        images[0],
+                        model_config["aspect_ratio"],
+                        project_id=active_project_id,
+                        st=token.st,
+                        token_id=token.id,
                     )
-                    reference_images.append({
-                        "imageUsageType": "IMAGE_USAGE_TYPE_ASSET",
-                        "mediaId": media_id
-                    })
+                    if image_count == 2:
+                        uploaded_end_media_id = await self.flow_client.upload_image(
+                            token.at,
+                            images[1],
+                            model_config["aspect_ratio"],
+                            project_id=active_project_id,
+                            st=token.st,
+                            token_id=token.id,
+                        )
+                elif video_type in {"r2v", "v2v"} and images:
+                    for img in images:
+                        media_id = await self.flow_client.upload_image(
+                            token.at,
+                            img,
+                            model_config["aspect_ratio"],
+                            project_id=active_project_id,
+                            st=token.st,
+                            token_id=token.id,
+                        )
+                        uploaded_reference_images.append({
+                            "imageUsageType": "IMAGE_USAGE_TYPE_ASSET",
+                            "mediaId": media_id,
+                        })
+                return (
+                    uploaded_start_media_id,
+                    uploaded_end_media_id,
+                    uploaded_reference_images,
+                )
+
+            upload_project_failover_attempted = False
+            while True:
+                try:
+                    start_media_id, end_media_id, reference_images = (
+                        await _upload_video_images(project_id)
+                    )
+                    break
+                except Exception as upload_error:
+                    if (
+                        upload_project_failover_attempted
+                        or not is_project_image_upload_invalid_argument_error(upload_error)
+                    ):
+                        raise
+                    upload_project_failover_attempted = True
+                    try:
+                        replacement_project_id = (
+                            await self.token_manager.ensure_project_exists(token.id)
+                        )
+                    except Exception as failover_error:
+                        debug_logger.log_warning(
+                            "[UPLOAD] Could not prepare a replacement project after "
+                            f"invalid image upload: {failover_error}"
+                        )
+                        raise upload_error from failover_error
+                    if not replacement_project_id or replacement_project_id == project_id:
+                        raise
+                    previous_project_id = project_id
+                    project_id = replacement_project_id
+                    if video_trace is not None:
+                        video_trace["upload_project_failover_count"] = 1
+                        video_trace["upload_project_id"] = project_id
+                    debug_logger.log_warning(
+                        "[UPLOAD] Project-scoped image upload remained invalid after JPEG "
+                        f"normalization; retrying once with another project "
+                        f"(token_id={token.id}, from={previous_project_id}, to={project_id})"
+                    )
+
+            if video_type == "i2v" and start_media_id:
+                if end_media_id:
+                    debug_logger.log_info(
+                        f"[I2V] 上传首尾帧: {start_media_id}, {end_media_id}"
+                    )
+                else:
+                    debug_logger.log_info(f"[I2V] 仅上传首帧: {start_media_id}")
+            elif video_type == "r2v":
                 debug_logger.log_info(f"[R2V] 上传了 {len(reference_images)} 张参考图片")
 
             # ========== 调用生成API ==========
             if stream and video_type != "v2v":
                 yield self._create_stream_chunk("提交视频生成任务...\n")
             if video_type == "v2v":
-                if stream:
-                    yield self._create_stream_chunk(f"上传 {image_count} 张参考图片...\n")
-
-                for img in images or []:
-                    media_id = await self.flow_client.upload_image(
-                        token.at, img, model_config["aspect_ratio"], project_id=project_id, st=token.st
-                    )
-                    reference_images.append({
-                        "imageUsageType": "IMAGE_USAGE_TYPE_ASSET",
-                        "mediaId": media_id
-                    })
-
                 if not video_media_id and video_bytes:
                     try:
                         video_duration_seconds = _validate_reference_video_duration(video_bytes)
