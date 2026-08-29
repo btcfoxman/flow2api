@@ -211,11 +211,11 @@ class Config:
     @property
     def flow_image_launch_soft_limit(self) -> int:
         """图片生成前置发车软并发上限(0 表示关闭软整形，仅使用硬并发)。"""
-        value = self._config.get("flow", {}).get("image_launch_soft_limit", 0)
+        value = self._config.get("flow", {}).get("image_launch_soft_limit", 4)
         try:
             return max(0, min(200, int(value)))
         except Exception:
-            return 0
+            return 4
 
     @property
     def flow_image_launch_wait_timeout(self) -> float:
@@ -229,11 +229,11 @@ class Config:
     @property
     def flow_image_launch_stagger_ms(self) -> int:
         """图片请求前置发车间隔(毫秒)，用于平滑同批突发。"""
-        value = self._config.get("flow", {}).get("image_launch_stagger_ms", 0)
+        value = self._config.get("flow", {}).get("image_launch_stagger_ms", 750)
         try:
             return max(0, min(5000, int(value)))
         except Exception:
-            return 0
+            return 750
 
     @property
     def flow_video_slot_wait_timeout(self) -> float:
@@ -247,11 +247,11 @@ class Config:
     @property
     def flow_video_launch_soft_limit(self) -> int:
         """视频生成前置发车软并发上限(0 表示关闭软整形，仅使用硬并发)。"""
-        value = self._config.get("flow", {}).get("video_launch_soft_limit", 0)
+        value = self._config.get("flow", {}).get("video_launch_soft_limit", 2)
         try:
             return max(0, min(200, int(value)))
         except Exception:
-            return 0
+            return 2
 
     @property
     def flow_video_launch_wait_timeout(self) -> float:
@@ -265,11 +265,26 @@ class Config:
     @property
     def flow_video_launch_stagger_ms(self) -> int:
         """视频请求前置发车间隔(毫秒)，用于平滑同批突发。"""
-        value = self._config.get("flow", {}).get("video_launch_stagger_ms", 0)
+        value = self._config.get("flow", {}).get("video_launch_stagger_ms", 3000)
         try:
             return max(0, min(5000, int(value)))
         except Exception:
-            return 0
+            return 3000
+
+    @property
+    def flow_traffic_cooldown_seconds(self) -> float:
+        """Shared submit cooldown after a traffic-control response; 0 disables it."""
+        value = self._config.get("flow", {}).get(
+            "traffic_cooldown_seconds",
+            120,
+        )
+        try:
+            normalized = float(value)
+        except (TypeError, ValueError):
+            return 120.0
+        if normalized <= 0:
+            return 0.0
+        return max(10.0, min(1800.0, normalized))
 
     @property
     def poll_interval(self) -> float:

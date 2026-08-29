@@ -402,10 +402,7 @@ class FlowClientBrowserFetchTests(unittest.IsolatedAsyncioTestCase):
         )
         client._make_video_api_request = AsyncMock(
             side_effect=[
-                Exception(
-                    "PUBLIC_ERROR_UNUSUAL_ACTIVITY_TOO_MUCH_TRAFFIC: "
-                    "reCAPTCHA evaluation failed"
-                ),
+                Exception("HTTP Error 403: forbidden"),
                 {"operations": [{"operation": {"name": "task-r2v"}}]},
             ]
         )
@@ -457,10 +454,7 @@ class FlowClientBrowserFetchTests(unittest.IsolatedAsyncioTestCase):
         )
         client._make_video_api_request = AsyncMock(
             side_effect=[
-                Exception(
-                    "PUBLIC_ERROR_UNUSUAL_ACTIVITY_TOO_MUCH_TRAFFIC: "
-                    "reCAPTCHA evaluation failed"
-                ),
+                Exception("HTTP Error 403: forbidden"),
                 {"operations": [{"operation": {"name": "task-edit"}}]},
             ]
         )
@@ -502,7 +496,7 @@ class FlowClientBrowserFetchTests(unittest.IsolatedAsyncioTestCase):
             {"resolution": "VIDEO_RESOLUTION_360P"},
         )
 
-    async def test_unusual_activity_stops_after_trying_two_profiles(self):
+    async def test_unusual_activity_stops_without_profile_rotation_or_retry(self):
         config.set_captcha_method("adspower")
         config.set_captcha_max_retries(5)
         client = FlowClient(None)
@@ -511,27 +505,18 @@ class FlowClientBrowserFetchTests(unittest.IsolatedAsyncioTestCase):
         error = Exception(
             "PUBLIC_ERROR_UNUSUAL_ACTIVITY: reCAPTCHA evaluation failed"
         )
-        with patch("src.services.flow_client.asyncio.sleep", AsyncMock()):
-            should_retry_first = await client._handle_retryable_generation_error(
-                error=error,
-                retry_attempt=0,
-                max_retries=5,
-                browser_id="0:request-1",
-                project_id="project-1",
-                log_prefix="[VIDEO]",
-            )
-            should_retry_second = await client._handle_retryable_generation_error(
-                error=error,
-                retry_attempt=1,
-                max_retries=5,
-                browser_id="1:request-2",
-                project_id="project-1",
-                log_prefix="[VIDEO]",
-            )
+        should_retry = await client._handle_retryable_generation_error(
+            error=error,
+            retry_attempt=0,
+            max_retries=5,
+            browser_id="0:request-1",
+            project_id="project-1",
+            log_prefix="[VIDEO]",
+        )
 
-        self.assertTrue(should_retry_first)
-        self.assertFalse(should_retry_second)
-        self.assertEqual(client._notify_browser_captcha_error.await_count, 2)
+        self.assertFalse(should_retry)
+        client._notify_browser_captcha_error.assert_not_awaited()
+        self.assertGreater(client._traffic_cooldown_remaining(), 0)
 
 
 if __name__ == "__main__":

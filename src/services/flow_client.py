@@ -16,7 +16,7 @@ from curl_cffi.requests import AsyncSession
 from ..core.logger import debug_logger
 from ..core.config import config, get_yescaptcha_min_score
 from ..core.credits import is_quota_exhausted_error
-from ..core.media_errors import is_media_policy_error
+from ..core.media_errors import is_media_policy_error, is_media_traffic_error
 from .browser_cookie_utils import serialize_cookie_header
 
 try:
@@ -44,6 +44,13 @@ class FlowClient:
         self._remote_browser_prefill_last_sent: Dict[str, float] = {}
         self._flow_image_upload_acknowledgement_lock = asyncio.Lock()
         self._flow_image_upload_acknowledged_sessions: set[str] = set()
+        self._image_launch_gate_lock = asyncio.Lock()
+        self._image_launch_gate_inflight = 0
+        self._image_next_launch_at = 0.0
+        self._video_launch_gate_lock = asyncio.Lock()
+        self._video_launch_gate_inflight = 0
+        self._video_next_launch_at = 0.0
+        self._traffic_cooldown_until = 0.0
 
         # Default "real browser" headers (macOS Chrome Desktop) to reduce upstream 4xx/5xx instability.
         # These will be applied as defaults (won't override caller-provided headers).
@@ -58,8 +65,9 @@ class FlowClient:
             "x-browser-copyright": "Copyright 2026 Google LLC. All Rights reserved.",
             "x-browser-year": "2026",
         }
-        # 发车策略改为“请求到就发”：
-        # 不在 flow2api 本地对提交做批次整形或排队，避免把同批请求打成阶梯。
+        # Smooth captcha/submit preparation bursts across all accounts sharing
+        # this process and egress. Token-level hard concurrency remains managed
+        # by ConcurrencyManager.
 
     def _captcha_aware_max_retries(self) -> int:
         """Captcha-backed submit paths have their own retry budget."""
@@ -96,15 +104,14 @@ class FlowClient:
         if account_id in self._user_agent_cache:
             return self._user_agent_cache[account_id]
         
-        # 使用账号ID作为随机种子，确保同一账号生成相同的UA
-        import hashlib
-        seed = int(hashlib.md5(account_id.encode()).hexdigest()[:8], 16)
-        rng = random.Random(seed)
-        
-        # Chrome 版本池 - 匹配真实 Mac mini Chrome 147 环境
-        chrome_versions = ["147.0.7727.56", "146.0.7688.92", "145.0.7649.100"]
-        ch_version = rng.choice(chrome_versions)
-        user_agent = f"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{ch_version} Safari/537.36"
+        # When no real browser fingerprint is available, keep the HTTP User-Agent
+        # aligned with curl_cffi's chrome124 TLS impersonation instead of inventing
+        # a newer browser version. Real browser-backed requests override this value.
+        user_agent = (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.6367.207 Safari/537.36"
+        )
         
         # 缓存结果
         self._user_agent_cache[account_id] = user_agent
@@ -693,24 +700,144 @@ class FlowClient:
         token_id: Optional[int],
         token_image_concurrency: Optional[int],
     ) -> tuple[bool, int, int]:
-        """图片请求不再做本地发车排队，直接进入取 token 并提交上游。"""
-        return True, 0, 0
+        """Smooth image captcha/submit preparation across the shared egress."""
+        _ = token_id, token_image_concurrency
+        return await self._acquire_launch_gate(
+            media_type="image",
+            soft_limit=config.flow_image_launch_soft_limit,
+            wait_timeout=config.flow_image_launch_wait_timeout,
+            stagger_ms=config.flow_image_launch_stagger_ms,
+        )
 
     async def _release_image_launch_gate(self, token_id: Optional[int]):
-        """保留接口形状，当前无需释放任何本地发车状态。"""
-        return
+        """Release one process-wide image launch preparation slot."""
+        _ = token_id
+        async with self._image_launch_gate_lock:
+            self._image_launch_gate_inflight = max(
+                0,
+                self._image_launch_gate_inflight - 1,
+            )
 
     async def _acquire_video_launch_gate(
         self,
         token_id: Optional[int],
         token_video_concurrency: Optional[int],
     ) -> tuple[bool, int, int]:
-        """视频请求不再做本地发车排队，直接进入取 token 并提交上游。"""
-        return True, 0, 0
+        """Smooth video captcha/submit preparation across the shared egress."""
+        _ = token_id, token_video_concurrency
+        return await self._acquire_launch_gate(
+            media_type="video",
+            soft_limit=config.flow_video_launch_soft_limit,
+            wait_timeout=config.flow_video_launch_wait_timeout,
+            stagger_ms=config.flow_video_launch_stagger_ms,
+        )
 
     async def _release_video_launch_gate(self, token_id: Optional[int]):
-        """保留接口形状，当前无需释放任何本地发车状态。"""
-        return
+        """Release one process-wide video launch preparation slot."""
+        _ = token_id
+        async with self._video_launch_gate_lock:
+            self._video_launch_gate_inflight = max(
+                0,
+                self._video_launch_gate_inflight - 1,
+            )
+
+    def _activate_traffic_cooldown(self) -> float:
+        """Extend the process-wide submit cooldown after a traffic response."""
+        cooldown_seconds = config.flow_traffic_cooldown_seconds
+        if cooldown_seconds <= 0:
+            return 0.0
+        now = time.monotonic()
+        self._traffic_cooldown_until = max(
+            self._traffic_cooldown_until,
+            now + cooldown_seconds,
+        )
+        return max(0.0, self._traffic_cooldown_until - now)
+
+    def _traffic_cooldown_remaining(self) -> float:
+        return max(0.0, self._traffic_cooldown_until - time.monotonic())
+
+    async def _wait_for_traffic_cooldown(self, deadline: float) -> bool:
+        while True:
+            remaining = self._traffic_cooldown_remaining()
+            if remaining <= 0:
+                return True
+            if time.monotonic() + remaining > deadline:
+                return False
+            await asyncio.sleep(remaining)
+
+    async def _acquire_launch_gate(
+        self,
+        *,
+        media_type: str,
+        soft_limit: int,
+        wait_timeout: float,
+        stagger_ms: int,
+    ) -> tuple[bool, int, int]:
+        """Acquire a process-wide launch slot and enforce pacing/cooldown."""
+        wait_started = time.monotonic()
+        deadline = wait_started + max(1.0, float(wait_timeout or 1.0))
+        launch_limit = None if soft_limit <= 0 else max(1, int(soft_limit))
+        stagger_seconds = max(0.0, float(stagger_ms or 0) / 1000.0)
+
+        if not await self._wait_for_traffic_cooldown(deadline):
+            return False, int((time.monotonic() - wait_started) * 1000), 0
+
+        if media_type == "image":
+            gate_lock = self._image_launch_gate_lock
+            inflight_attr = "_image_launch_gate_inflight"
+            next_launch_attr = "_image_next_launch_at"
+        else:
+            gate_lock = self._video_launch_gate_lock
+            inflight_attr = "_video_launch_gate_inflight"
+            next_launch_attr = "_video_next_launch_at"
+
+        stagger_wait = 0.0
+        while True:
+            now = time.monotonic()
+            async with gate_lock:
+                inflight = int(getattr(self, inflight_attr, 0) or 0)
+                if launch_limit is None or inflight < launch_limit:
+                    setattr(self, inflight_attr, inflight + 1)
+                    next_allowed = max(
+                        now,
+                        float(getattr(self, next_launch_attr, 0.0) or 0.0),
+                    )
+                    stagger_wait = max(0.0, next_allowed - now)
+                    setattr(
+                        self,
+                        next_launch_attr,
+                        next_allowed + stagger_seconds,
+                    )
+                    break
+
+            if now >= deadline:
+                return False, int((now - wait_started) * 1000), 0
+            await asyncio.sleep(min(0.05, max(0.0, deadline - now)))
+
+        if time.monotonic() + stagger_wait > deadline:
+            async with gate_lock:
+                setattr(
+                    self,
+                    inflight_attr,
+                    max(0, int(getattr(self, inflight_attr, 0) or 0) - 1),
+                )
+            return False, int((time.monotonic() - wait_started) * 1000), 0
+
+        if stagger_wait > 0:
+            await asyncio.sleep(stagger_wait)
+
+        if not await self._wait_for_traffic_cooldown(deadline):
+            async with gate_lock:
+                setattr(
+                    self,
+                    inflight_attr,
+                    max(0, int(getattr(self, inflight_attr, 0) or 0) - 1),
+                )
+            return False, int((time.monotonic() - wait_started) * 1000), 0
+
+        total_wait_ms = int((time.monotonic() - wait_started) * 1000)
+        stagger_wait_ms = int(stagger_wait * 1000)
+        return True, max(0, total_wait_ms - stagger_wait_ms), stagger_wait_ms
 
     async def _make_image_generation_request(
         self,
@@ -730,18 +857,20 @@ class FlowClient:
         has_fingerprint_context = bool(isinstance(fingerprint, dict) and fingerprint)
 
         has_media_proxy = False
-        if self.proxy_manager and config.flow_image_timeout_use_media_proxy_fallback:
+        if (
+            not has_fingerprint_context
+            and self.proxy_manager
+            and config.flow_image_timeout_use_media_proxy_fallback
+        ):
             try:
                 has_media_proxy = bool(await self.proxy_manager.get_media_proxy_url())
             except Exception:
                 has_media_proxy = False
         prefer_media_first = bool(has_media_proxy and config.flow_image_prefer_media_proxy)
 
-        if has_fingerprint_context and prefer_media_first:
-            prefer_media_first = False
+        if has_fingerprint_context:
             debug_logger.log_info(
-                "[IMAGE] 检测到打码浏览器指纹上下文，首跳固定走打码链路；"
-                "媒体代理仅在网络超时时作为兜底回退。"
+                "[IMAGE] 检测到打码浏览器上下文，本次请求及网络重试固定使用同一出口。"
             )
 
         last_error: Optional[Exception] = None
@@ -3353,6 +3482,14 @@ class FlowClient:
     ) -> bool:
         """统一处理生成链路的重试判定与打码自愈通知。"""
         error_str = str(error)
+        if is_media_traffic_error(error_str):
+            cooldown_seconds = self._activate_traffic_cooldown()
+            debug_logger.log_warning(
+                f"{log_prefix}请求过于集中，停止当前请求的重复提交并进入"
+                f" {cooldown_seconds:.0f}s 全局冷却。"
+            )
+            return False
+
         retry_reason = self._get_retry_reason(error_str)
         notify_reason = retry_reason or error_str[:120] or type(error).__name__
         await self._notify_browser_captcha_error(

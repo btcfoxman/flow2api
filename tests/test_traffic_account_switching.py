@@ -19,6 +19,7 @@ class TrafficAccountSwitchingTests(unittest.IsolatedAsyncioTestCase):
         handler.flow_client = SimpleNamespace(
             clear_request_fingerprint=MagicMock(),
             prefill_remote_browser_pool=AsyncMock(),
+            _activate_traffic_cooldown=MagicMock(return_value=120),
         )
         tokens = [
             SimpleNamespace(
@@ -66,7 +67,7 @@ class TrafficAccountSwitchingTests(unittest.IsolatedAsyncioTestCase):
         handler._handle_video_generation = generate_video
         return handler, attempted, exclusions
 
-    async def test_switches_once_then_succeeds_with_another_account(self):
+    async def test_does_not_switch_accounts_for_shared_traffic_control(self):
         handler, attempted, exclusions = self._make_handler(failing_token_ids={1})
 
         chunks = [
@@ -78,18 +79,19 @@ class TrafficAccountSwitchingTests(unittest.IsolatedAsyncioTestCase):
             )
         ]
 
-        self.assertEqual(attempted, [1, 2])
-        self.assertEqual(exclusions, [set(), {1}])
-        self.assertEqual(handler.load_balancer.release_pending.await_count, 2)
+        self.assertEqual(attempted, [1])
+        self.assertEqual(exclusions, [set()])
+        self.assertEqual(handler.load_balancer.release_pending.await_count, 1)
+        handler.flow_client._activate_traffic_cooldown.assert_called_once_with()
         final_log = handler._log_request.await_args
-        self.assertEqual(final_log.kwargs["status_text"], "completed")
-        self.assertEqual(
-            final_log.args[3]["performance"]["traffic_account_switches"],
-            1,
+        self.assertEqual(final_log.kwargs["status_text"], "failed")
+        self.assertNotIn(
+            "traffic_account_switches",
+            final_log.args[3]["performance"],
         )
-        self.assertEqual(json.loads(chunks[-1])["choices"][0]["finish_reason"], "stop")
+        self.assertEqual(json.loads(chunks[-1])["error"]["status_code"], 429)
 
-    async def test_stops_after_one_alternate_account(self):
+    async def test_repeated_traffic_control_still_submits_only_once(self):
         handler, attempted, exclusions = self._make_handler(
             failing_token_ids={1, 2, 3}
         )
@@ -103,8 +105,8 @@ class TrafficAccountSwitchingTests(unittest.IsolatedAsyncioTestCase):
             )
         ]
 
-        self.assertEqual(attempted, [1, 2])
-        self.assertEqual(exclusions, [set(), {1}])
+        self.assertEqual(attempted, [1])
+        self.assertEqual(exclusions, [set()])
         payload = json.loads(chunks[-1])
         self.assertEqual(payload["error"]["status_code"], 429)
 
@@ -126,7 +128,7 @@ class TrafficAccountSwitchingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(exclusions, [set()])
         self.assertEqual(json.loads(chunks[-1])["error"]["status_code"], 429)
 
-    async def test_uploaded_v2v_bytes_can_switch_accounts(self):
+    async def test_uploaded_v2v_bytes_also_does_not_switch_accounts(self):
         handler, attempted, _ = self._make_handler(failing_token_ids={1})
 
         chunks = [
@@ -140,8 +142,8 @@ class TrafficAccountSwitchingTests(unittest.IsolatedAsyncioTestCase):
             )
         ]
 
-        self.assertEqual(attempted, [1, 2])
-        self.assertEqual(json.loads(chunks[-1])["choices"][0]["finish_reason"], "stop")
+        self.assertEqual(attempted, [1])
+        self.assertEqual(json.loads(chunks[-1])["error"]["status_code"], 429)
 
 
 if __name__ == "__main__":

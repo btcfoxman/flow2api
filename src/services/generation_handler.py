@@ -37,7 +37,6 @@ from .watermark_processor import WatermarkProcessor
 
 
 MAX_QUOTA_ACCOUNT_SWITCHES = 2
-MAX_TRAFFIC_ACCOUNT_SWITCHES = 1
 
 
 # Model configuration
@@ -1223,6 +1222,8 @@ class GenerationHandler:
             return False
         if is_quota_exhausted_error(text):
             return False
+        if is_media_traffic_error(text):
+            return False
         if is_media_policy_error(text):
             return False
         if is_media_invalid_argument_error(text):
@@ -1232,6 +1233,30 @@ class GenerationHandler:
         if "project-scoped image upload failed via /flow/uploadimage" in lowered:
             return False
         return True
+
+    def _activate_shared_traffic_cooldown(
+        self,
+        error_message: Any,
+        status_code: Optional[int] = None,
+    ) -> float:
+        """Propagate any traffic-control result to the shared submit gate."""
+        try:
+            is_traffic_response = int(status_code or 0) == 429
+        except (TypeError, ValueError):
+            is_traffic_response = False
+        if not is_traffic_response and not is_media_traffic_error(error_message):
+            return 0.0
+
+        activate = getattr(self.flow_client, "_activate_traffic_cooldown", None)
+        if not callable(activate):
+            return 0.0
+        try:
+            return float(activate() or 0.0)
+        except Exception as exc:
+            debug_logger.log_warning(
+                f"[TRAFFIC] Failed to activate shared submit cooldown: {exc}"
+            )
+            return 0.0
 
     def _resolve_video_model_key_for_tier(self, model_config: Dict[str, Any], user_tier: str) -> tuple[str, Optional[str]]:
         """根据账号层级调整视频模型 key。"""
@@ -1304,7 +1329,6 @@ class GenerationHandler:
         watermark: bool = False,
         _quota_excluded_token_ids: Optional[Set[int]] = None,
         _quota_switches_remaining: int = MAX_QUOTA_ACCOUNT_SWITCHES,
-        _traffic_switches_remaining: int = MAX_TRAFFIC_ACCOUNT_SWITCHES,
         _suppress_start_event: bool = False,
         _request_context: Optional[Dict[str, Any]] = None,
     ) -> AsyncGenerator:
@@ -1344,7 +1368,6 @@ class GenerationHandler:
             request_context["request_log_state"] = request_log_state
         quota_excluded_token_ids = set(_quota_excluded_token_ids or ())
         quota_switches_remaining = max(0, int(_quota_switches_remaining or 0))
-        traffic_switches_remaining = max(0, int(_traffic_switches_remaining or 0))
 
         # 防止并发链路复用到上一次请求的指纹上下文
         if hasattr(self.flow_client, "clear_request_fingerprint"):
@@ -1566,6 +1589,10 @@ class GenerationHandler:
                     response_status_code = 503
                 else:
                     response_status_code = int(generation_result.get("status_code") or 500)
+                self._activate_shared_traffic_cooldown(
+                    error_msg,
+                    response_status_code,
+                )
                 if token and self._should_record_token_error(error_msg, response_status_code):
                     await self.token_manager.record_error(token.id)
                 elif token:
@@ -1748,7 +1775,6 @@ class GenerationHandler:
                         watermark=watermark,
                         _quota_excluded_token_ids=quota_excluded_token_ids,
                         _quota_switches_remaining=quota_switches_remaining - 1,
-                        _traffic_switches_remaining=traffic_switches_remaining,
                         _suppress_start_event=True,
                         _request_context=request_context,
                     ):
@@ -1756,72 +1782,6 @@ class GenerationHandler:
                     return
                 error_msg = quota_exhausted_message()
                 response_status_code = 503
-            elif (
-                generation_type == "video"
-                and is_media_traffic_error(raw_error_msg)
-                and traffic_switches_remaining > 0
-                and not response_state.get("submitted_video_task_id")
-                and video_type_for_op != "extend"
-                and (video_type_for_op != "v2v" or bool(video_bytes))
-            ):
-                token_id = getattr(token, "id", None)
-                if token_id is not None:
-                    quota_excluded_token_ids.add(token_id)
-                switch_number = (
-                    MAX_TRAFFIC_ACCOUNT_SWITCHES - traffic_switches_remaining + 1
-                )
-                perf_trace["traffic_account_switches"] = switch_number
-                perf_trace["status"] = "switching_account"
-                duration = time.time() - start_time
-                perf_trace["total_ms"] = int(duration * 1000)
-                debug_logger.log_warning(
-                    f"[TRAFFIC] Token {token_id} rejected by upstream traffic control; "
-                    f"switching account ({switch_number}/{MAX_TRAFFIC_ACCOUNT_SWITCHES}), "
-                    f"excluded={sorted(quota_excluded_token_ids)}"
-                )
-                await self._update_request_log_progress(
-                    request_log_state,
-                    token_id=token_id,
-                    status_text="switching_account",
-                    progress=max(1, int(request_log_state.get("progress") or 0)),
-                    response_extra={
-                        "traffic_account_switches": switch_number,
-                        "request_id": request_id,
-                    },
-                )
-                if pending_token_state.get("active") and token and self.load_balancer:
-                    await self.load_balancer.release_pending(
-                        token.id,
-                        for_image_generation=False,
-                        for_video_generation=True,
-                    )
-                    pending_token_state["active"] = False
-                if stream:
-                    yield self._create_stream_chunk(
-                        "当前账号提交被限流，正在切换其他账号重试"
-                        f"（{switch_number}/{MAX_TRAFFIC_ACCOUNT_SWITCHES}）...\n"
-                    )
-                async for chunk in self.handle_generation(
-                    model=model,
-                    prompt=prompt,
-                    images=images,
-                    stream=stream,
-                    base_url_override=base_url_override,
-                    video_media_id=video_media_id,
-                    video_bytes=video_bytes,
-                    video_mime_type=video_mime_type,
-                    video_file_name=video_file_name,
-                    aspect_ratio_override=aspect_ratio_override,
-                    async_video_task=async_video_task,
-                    watermark=watermark,
-                    _quota_excluded_token_ids=quota_excluded_token_ids,
-                    _quota_switches_remaining=quota_switches_remaining,
-                    _traffic_switches_remaining=traffic_switches_remaining - 1,
-                    _suppress_start_event=True,
-                    _request_context=request_context,
-                ):
-                    yield chunk
-                return
             elif generation_type == "video" and is_project_image_upload_error(raw_error_msg):
                 error_msg, response_status_code = project_image_upload_failure_response(
                     raw_error_msg
@@ -1837,6 +1797,10 @@ class GenerationHandler:
             else:
                 error_msg = f"生成失败: {raw_error_msg}"
                 response_status_code = 500
+            self._activate_shared_traffic_cooldown(
+                raw_error_msg,
+                response_status_code,
+            )
             debug_logger.log_error(f"[GENERATION] ❌ {error_msg}")
             if token and self._should_record_token_error(error_msg, response_status_code):
                 # 记录错误（所有错误统一处理，不再特殊处理429）
@@ -2864,7 +2828,9 @@ class GenerationHandler:
             response_state = self._create_response_state()
 
         max_attempts = config.max_poll_attempts
-        poll_interval = config.poll_interval
+        poll_interval = max(0.1, float(config.poll_interval))
+        progress_update_interval = max(1, int(round(20.0 / poll_interval)))
+        active_stall_attempts = max(1, int(240.0 / poll_interval))
         
         # 如果需要放大，轮询次数加倍（放大可能需要 30 分钟）
         if upsample_config:
@@ -2889,9 +2855,8 @@ class GenerationHandler:
                 operation = checked_operations[0]
                 status = operation.get("status")
 
-                # 状态更新 - 每20秒报告一次 (poll_interval=3秒, 20秒约7次轮询)
-                progress_update_interval = 7  # 每7次轮询 = 21秒
-                if stream and attempt % progress_update_interval == 0:  # 每20秒报告一次
+                # Keep progress reporting near 20 seconds when poll_interval changes.
+                if stream and attempt % progress_update_interval == 0:
                     progress = min(int((attempt / max_attempts) * 100), 95)
                     await self._update_request_log_progress(request_log_state, token_id=token.id, status_text="video_polling", progress=max(45, progress), response_extra={"upstream_status": status})
                     yield self._create_stream_chunk(f"生成进度: {progress}%\n")
@@ -3190,8 +3155,12 @@ class GenerationHandler:
                     yield self._create_error_response(error_msg, status_code=502)
                     return
                     
-                elif status == "MEDIA_GENERATION_STATUS_ACTIVE" and attempt > 80:
-                    # 如果持续4分钟（80次 * 3秒 = 240秒）依然是 ACTIVE 状态，则判定为卡死
+                elif (
+                    status == "MEDIA_GENERATION_STATUS_ACTIVE"
+                    and attempt >= active_stall_attempts
+                ):
+                    # Treat ACTIVE for roughly four minutes as stalled, independent
+                    # of the configured polling interval.
                     error_msg = "视频生成超时 (上游卡顿超过4分钟，已自动取消)"
                     await self._fail_video_task(checked_operations, error_msg)
                     self._mark_generation_failed(generation_result, error_msg)
