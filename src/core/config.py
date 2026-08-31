@@ -657,6 +657,27 @@ class Config:
         self._config["captcha"]["browser_personal_fresh_restart_every_n_solves"] = max(0, int(value))
 
     @property
+    def native_cdp_fresh_restart_every_n_solves(self) -> int:
+        """Native CDP successful solves per fresh profile; 0 disables rotation."""
+        value = self._config.get("captcha", {}).get(
+            "native_cdp_fresh_restart_every_n_solves",
+            10,
+        )
+        try:
+            return max(0, int(value))
+        except Exception:
+            return 10
+
+    def set_native_cdp_fresh_restart_every_n_solves(self, value: int):
+        """Set the Native CDP fresh-profile rotation threshold."""
+        if "captcha" not in self._config:
+            self._config["captcha"] = {}
+        self._config["captcha"]["native_cdp_fresh_restart_every_n_solves"] = max(
+            0,
+            int(value),
+        )
+
+    @property
     def yescaptcha_api_key(self) -> str:
         """Get YesCaptcha API key"""
         return self._config.get("captcha", {}).get("yescaptcha_api_key", "")

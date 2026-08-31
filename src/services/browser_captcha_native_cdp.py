@@ -24,6 +24,25 @@ FLOW_WEBSITE_KEY = "6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV"
 DEFAULT_PROFILE_ROOT = Path("tmp") / "native_cdp_profiles"
 DEFAULT_IDLE_TTL_SECONDS = 600
 DEFAULT_VIDEO_SUBMIT_RESERVATION_SECONDS = 60
+DEFAULT_FRESH_PROFILE_RESTART_EVERY_N_SOLVES = 10
+PROFILE_STATE_VERSION = "2"
+PROFILE_STATE_VERSION_FILE = ".flow2api-native-cdp-version"
+
+
+def _is_recaptcha_profile_risk_error(error_message: Any) -> bool:
+    """Return whether Flow rejected the browser's reCAPTCHA risk state."""
+    error_lower = str(error_message or "").lower()
+    if "recaptcha evaluation failed" not in error_lower:
+        return False
+    return any(
+        marker in error_lower
+        for marker in (
+            "public_error_unusual_activity",
+            "public_error_something_went_wrong",
+            "unusual_activity",
+            "unusual activity",
+        )
+    )
 
 
 def _mask_proxy(proxy_url: Optional[str]) -> str:
@@ -340,6 +359,20 @@ class NativeCdpAccountBrowser:
         self.last_upstream_error: Optional[str] = None
         self.last_fingerprint: Optional[Dict[str, Any]] = None
         self.solve_count = 0
+        self.profile_solve_count = 0
+        self.profile_reset_count = 0
+        self._profile_reset_pending = False
+        self._profile_reset_reason = ""
+        if self.profile_dir.exists():
+            try:
+                profile_version = (
+                    self.profile_dir / PROFILE_STATE_VERSION_FILE
+                ).read_text(encoding="utf-8").strip()
+            except (FileNotFoundError, OSError, UnicodeError):
+                profile_version = ""
+            if profile_version != PROFILE_STATE_VERSION:
+                self._profile_reset_pending = True
+                self._profile_reset_reason = "profile_baseline_upgrade"
         self._project_sessions: Dict[str, tuple[str, str]] = {}
         self._video_submit_reservations: list[float] = []
 
@@ -383,6 +416,47 @@ class NativeCdpAccountBrowser:
         if self._video_submit_reservations:
             self._video_submit_reservations.pop(0)
 
+    def _fresh_profile_restart_threshold(self) -> int:
+        value = getattr(
+            config,
+            "native_cdp_fresh_restart_every_n_solves",
+            DEFAULT_FRESH_PROFILE_RESTART_EVERY_N_SOLVES,
+        )
+        try:
+            return max(0, int(value))
+        except Exception:
+            return DEFAULT_FRESH_PROFILE_RESTART_EVERY_N_SOLVES
+
+    def _mark_profile_reset_pending(self, reason: str) -> None:
+        self._profile_reset_pending = True
+        self._profile_reset_reason = str(reason or "recaptcha_risk")[:160]
+
+    async def _reset_profile(self, *, reason: str) -> None:
+        normalized_reason = str(reason or "scheduled")[:160]
+        await self.stop(reason=f"profile_reset:{normalized_reason}")
+        shutil.rmtree(self.profile_dir, ignore_errors=True)
+        self.profile_solve_count = 0
+        self.profile_reset_count += 1
+        self._profile_reset_pending = False
+        self._profile_reset_reason = ""
+        self.last_fingerprint = None
+        debug_logger.log_warning(
+            f"[NativeCDP] reset fresh profile token={self.token_id}, "
+            f"reason={normalized_reason}, resets={self.profile_reset_count}"
+        )
+
+    async def _prepare_profile(self, *, for_solve: bool) -> None:
+        reset_reason = ""
+        if self._profile_reset_pending:
+            reset_reason = self._profile_reset_reason or "recaptcha_risk"
+        elif for_solve:
+            threshold = self._fresh_profile_restart_threshold()
+            if threshold > 0 and self.profile_solve_count >= threshold:
+                reset_reason = f"solve_threshold_{threshold}"
+        if reset_reason:
+            await self._reset_profile(reason=reset_reason)
+        await self.start()
+
     async def _resolve_proxy(self) -> ProxyBinding:
         token = await self.db.get_token(self.token_id)
         token_proxy = str(getattr(token, "captcha_proxy_url", "") or "").strip() if token else ""
@@ -420,7 +494,14 @@ class NativeCdpAccountBrowser:
         proxy_binding = await self._resolve_proxy()
         if self.is_running and self.proxy_binding and self.proxy_binding.signature == proxy_binding.signature:
             return
-        if self.process or self.connection:
+        proxy_changed = bool(
+            self.proxy_binding
+            and self.proxy_binding.signature != proxy_binding.signature
+        )
+        if proxy_changed:
+            # A browser identity must not survive an account proxy change.
+            await self._reset_profile(reason="proxy_changed")
+        elif self.process or self.connection:
             await self.stop(reason="proxy_changed_or_reconnect")
 
         executable = _detect_browser_executable()
@@ -431,6 +512,15 @@ class NativeCdpAccountBrowser:
             )
 
         self.profile_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            (self.profile_dir / PROFILE_STATE_VERSION_FILE).write_text(
+                PROFILE_STATE_VERSION,
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            debug_logger.log_warning(
+                f"[NativeCDP] failed to persist profile baseline token={self.token_id}: {exc}"
+            )
         active_port_path = self.profile_dir / "DevToolsActivePort"
         try:
             active_port_path.unlink(missing_ok=True)
@@ -447,6 +537,7 @@ class NativeCdpAccountBrowser:
             "--no-default-browser-check",
             "--disable-component-update",
             "--disable-features=Translate,OptimizationHints",
+            "--disable-blink-features=AutomationControlled",
             "--window-size=1440,900",
             "about:blank",
         ]
@@ -550,6 +641,22 @@ class NativeCdpAccountBrowser:
         await self.connection.send("Page.enable", session_id=session_id)
         await self.connection.send("Runtime.enable", session_id=session_id)
         await self.connection.send("Network.enable", session_id=session_id)
+        await self.connection.send(
+            "Page.addScriptToEvaluateOnNewDocument",
+            {
+                "source": """
+                    (() => {
+                      try {
+                        Object.defineProperty(Navigator.prototype, 'webdriver', {
+                          get: () => undefined,
+                          configurable: true
+                        });
+                      } catch (_) {}
+                    })();
+                """,
+            },
+            session_id=session_id,
+        )
         return target_id, session_id
 
     async def _evaluate(
@@ -813,7 +920,7 @@ class NativeCdpAccountBrowser:
         async with self.solve_lock:
             self.busy_count += 1
             try:
-                await self.start()
+                await self._prepare_profile(for_solve=False)
                 _, session_id = await self._get_or_create_project_session(project_id)
                 payload = {
                     "url": str(url),
@@ -885,7 +992,10 @@ class NativeCdpAccountBrowser:
                 return parsed
             except Exception as exc:
                 self.last_error = f"{type(exc).__name__}: {str(exc)[:240]}"
-                if "native browser fetch failed" in str(exc).lower():
+                if _is_recaptcha_profile_risk_error(exc):
+                    self._mark_profile_reset_pending("recaptcha_risk_rejected")
+                    await self._discard_project_session(project_id)
+                elif "native browser fetch failed" in str(exc).lower():
                     await self._discard_project_session(project_id)
                 raise
             finally:
@@ -902,7 +1012,7 @@ class NativeCdpAccountBrowser:
         async with self.solve_lock:
             self.busy_count += 1
             try:
-                await self.start()
+                await self._prepare_profile(for_solve=True)
                 _, session_id = await self._get_or_create_project_session(project_id)
                 await self._wait_for_recaptcha(session_id)
                 await asyncio.sleep(0.8 + random.random())
@@ -947,6 +1057,7 @@ class NativeCdpAccountBrowser:
                 if settle_seconds > 0:
                     await asyncio.sleep(min(10.0, settle_seconds))
                 self.solve_count += 1
+                self.profile_solve_count += 1
                 self.last_error = None
                 debug_logger.log_info(
                     f"[NativeCDP] captcha acquired token_id={self.token_id}, "
@@ -977,6 +1088,14 @@ class NativeCdpAccountBrowser:
             "profile": self.profile_dir.name,
             "proxy_source": self.proxy_binding.source if self.proxy_binding else None,
             "solve_count": self.solve_count,
+            "profile_solve_count": self.profile_solve_count,
+            "profile_reset_count": self.profile_reset_count,
+            "profile_reset_pending": self._profile_reset_pending,
+            "webdriver": (
+                self.last_fingerprint.get("webdriver")
+                if self.last_fingerprint
+                else None
+            ),
             "last_error": self.last_error,
             "last_upstream_error": self.last_upstream_error,
             "video_submit_reservations": len(self._video_submit_reservations),

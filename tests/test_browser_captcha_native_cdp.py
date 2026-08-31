@@ -1,6 +1,8 @@
 import asyncio
 import json
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -11,6 +13,7 @@ from src.services.browser_captcha_native_cdp import (
     BrowserCaptchaService,
     CdpConnection,
     NativeCdpAccountBrowser,
+    _is_recaptcha_profile_risk_error,
     _parse_proxy_url,
 )
 
@@ -73,6 +76,25 @@ class _FakeDatabase:
 
 
 class NativeCdpProxyTests(unittest.IsolatedAsyncioTestCase):
+    def test_identifies_recaptcha_profile_risk_error(self):
+        self.assertTrue(
+            _is_recaptcha_profile_risk_error(
+                "PUBLIC_ERROR_UNUSUAL_ACTIVITY: reCAPTCHA evaluation failed"
+            )
+        )
+        self.assertFalse(_is_recaptcha_profile_risk_error("HTTP Error 429"))
+
+    def test_legacy_profile_is_reset_before_reuse(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch(
+            "src.services.browser_captcha_native_cdp._profile_root",
+            return_value=Path(temp_dir),
+        ):
+            (Path(temp_dir) / "token-7").mkdir()
+            browser = NativeCdpAccountBrowser(7, _FakeDatabase())
+
+        self.assertTrue(browser._profile_reset_pending)
+        self.assertEqual(browser._profile_reset_reason, "profile_baseline_upgrade")
+
     def test_parse_authenticated_proxy(self):
         self.assertEqual(
             _parse_proxy_url("http://user:pass@proxy.example:8080"),
@@ -240,6 +262,51 @@ class NativeCdpServiceTests(unittest.IsolatedAsyncioTestCase):
         expression = browser._evaluate.await_args.args[1]
         self.assertIn("credentials: 'include'", expression)
         self.assertNotIn('\\"user-agent\\"', expression)
+
+    async def test_worker_marks_profile_for_reset_after_recaptcha_risk_rejection(self):
+        browser = NativeCdpAccountBrowser(7, _FakeDatabase())
+        browser._prepare_profile = AsyncMock()
+        browser._get_or_create_project_session = AsyncMock(
+            return_value=("target-1", "session-1")
+        )
+        browser._discard_project_session = AsyncMock()
+        browser._evaluate = AsyncMock(
+            return_value={
+                "status": 429,
+                "statusText": "Too Many Requests",
+                "text": json.dumps(
+                    {
+                        "error": {
+                            "message": "reCAPTCHA evaluation failed",
+                            "details": [
+                                {"reason": "PUBLIC_ERROR_UNUSUAL_ACTIVITY"}
+                            ],
+                        }
+                    }
+                ),
+            }
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "PUBLIC_ERROR_UNUSUAL_ACTIVITY"):
+            await browser.fetch_json(
+                project_id="project-a",
+                url="https://example.test/video:submit",
+                json_data={"hello": "world"},
+            )
+
+        self.assertTrue(browser._profile_reset_pending)
+        browser._discard_project_session.assert_awaited_once_with("project-a")
+
+    async def test_periodic_rotation_resets_profile_before_next_solve(self):
+        browser = NativeCdpAccountBrowser(7, _FakeDatabase())
+        browser.profile_solve_count = 10
+        browser._reset_profile = AsyncMock()
+        browser.start = AsyncMock()
+
+        await browser._prepare_profile(for_solve=True)
+
+        browser._reset_profile.assert_awaited_once_with(reason="solve_threshold_10")
+        browser.start.assert_awaited_once_with()
 
     async def test_busy_worker_is_not_evicted_while_next_account_waits(self):
         config.set_browser_count(1)
