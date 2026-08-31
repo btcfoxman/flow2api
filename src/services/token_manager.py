@@ -7,6 +7,7 @@ from ..core.config import config
 from ..core.credits import (
     get_minimum_generation_credits,
     has_minimum_generation_credits,
+    normalize_credits,
 )
 from ..core.models import Token, Project
 from ..core.logger import debug_logger
@@ -962,7 +963,11 @@ class TokenManager:
         except asyncio.CancelledError:
             pass
 
-    async def mark_quota_exhausted(self, token_id: int) -> int:
+    async def mark_quota_exhausted(
+        self,
+        token_id: int,
+        minimum_credits: Optional[int] = None,
+    ) -> int:
         """Refresh credits after upstream reports quota exhaustion.
 
         If the refresh itself fails, keep scheduling conservative by writing 0
@@ -976,7 +981,11 @@ class TokenManager:
             await self.db.update_token(token_id, credits=0)
             stored_credits = 0
 
-        minimum_credits = get_minimum_generation_credits()
+        minimum_credits = (
+            get_minimum_generation_credits()
+            if minimum_credits is None
+            else max(0, normalize_credits(minimum_credits))
+        )
         if not has_minimum_generation_credits(stored_credits, minimum_credits):
             debug_logger.log_warning(
                 f"[QUOTA] Token {token_id} credits={stored_credits} below minimum "

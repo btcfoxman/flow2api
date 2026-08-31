@@ -1,0 +1,177 @@
+{
+  "captured_at": "2026-08-31T16:46:01+08:00",
+  "source": "labs.google/fx Flow projectInitialData.modelConfig",
+  "family": {
+    "id": "abra",
+    "display_name": "Omni 1.1 Flash",
+    "health_key": "abra",
+    "health_at_capture": "MODEL_HEALTH_STATUS_HEALTHY",
+    "durations_seconds": [4, 6, 8, 10],
+    "resolutions": {
+      "default": "VIDEO_RESOLUTION_720P",
+      "preview": "VIDEO_RESOLUTION_360P"
+    },
+    "credit_costs": {
+      "same_for_entry_intermediate_and_advanced_service_tiers": true,
+      "duration_720p": {
+        "4": 7,
+        "6": 10,
+        "8": 12,
+        "10": 15
+      },
+      "duration_360p": {
+        "4": 4,
+        "6": 5,
+        "8": 6,
+        "10": 7
+      },
+      "edit_720p": 20,
+      "edit_360p": 10
+    },
+    "capabilities": {
+      "all_usages_output_audio": true,
+      "supported_aspect_ratios": ["LANDSCAPE", "PORTRAIT"],
+      "references_to_video": {
+        "max_image_inputs": 7,
+        "max_audio_references": 5,
+        "max_characters": 3
+      },
+      "video_edit": {
+        "max_image_inputs": 5,
+        "max_audio_references": 3,
+        "max_characters": 3,
+        "max_input_video_duration_seconds": 10
+      }
+    },
+    "usages": {
+      "text_to_video": {
+        "endpoint": "/v1/video:batchAsyncGenerateVideoText",
+        "requirements": ["VIDEO_REQUIREMENT_TEXT"],
+        "models_720p": [
+          "abra_t2v_4s",
+          "abra_t2v_6s",
+          "abra_t2v_8s",
+          "abra_t2v_10s"
+        ],
+        "models_360p": [
+          "abra_t2v_4s_360p",
+          "abra_t2v_6s_360p",
+          "abra_t2v_8s_360p",
+          "abra_t2v_10s_360p"
+        ]
+      },
+      "references_to_video": {
+        "endpoint": "/v1/video:batchAsyncGenerateVideoReferenceImages",
+        "requirements": [
+          "VIDEO_REQUIREMENT_TEXT",
+          "VIDEO_REQUIREMENT_REFERENCES"
+        ],
+        "models_720p": [
+          "abra_r2v_4s",
+          "abra_r2v_6s",
+          "abra_r2v_8s",
+          "abra_r2v_10s"
+        ],
+        "models_360p": [
+          "abra_r2v_4s_360p",
+          "abra_r2v_6s_360p",
+          "abra_r2v_8s_360p",
+          "abra_r2v_10s_360p"
+        ]
+      },
+      "start_image_to_video": {
+        "endpoint": "/v1/video:batchAsyncGenerateVideoStartImage",
+        "requirements": [
+          "VIDEO_REQUIREMENT_TEXT",
+          "VIDEO_REQUIREMENT_START_IMAGE"
+        ],
+        "models_720p": [
+          "abra_i2v_4s",
+          "abra_i2v_6s",
+          "abra_i2v_8s",
+          "abra_i2v_10s"
+        ],
+        "models_360p": [
+          "abra_i2v_4s_360p",
+          "abra_i2v_6s_360p",
+          "abra_i2v_8s_360p",
+          "abra_i2v_10s_360p"
+        ]
+      },
+      "first_last_image_to_video": {
+        "endpoint": "/v1/video:batchAsyncGenerateVideoStartAndEndImage",
+        "requirements": [
+          "VIDEO_REQUIREMENT_TEXT",
+          "VIDEO_REQUIREMENT_START_IMAGE",
+          "VIDEO_REQUIREMENT_END_IMAGE"
+        ],
+        "models_720p": [
+          "omni_flash_i2v_4s_first_last",
+          "omni_flash_i2v_6s_first_last",
+          "omni_flash_i2v_8s_first_last",
+          "omni_flash_i2v_10s_first_last"
+        ],
+        "models_360p": [
+          "omni_flash_i2v_4s_first_last_360p",
+          "omni_flash_i2v_6s_first_last_360p",
+          "omni_flash_i2v_8s_first_last_360p",
+          "omni_flash_i2v_10s_first_last_360p"
+        ]
+      },
+      "video_edit": {
+        "endpoint": "/v1/video:batchAsyncGenerateVideoEditVideo",
+        "models_720p": ["abra_edit"],
+        "models_360p": ["abra_edit_360p"]
+      }
+    }
+  },
+  "shared_request_fields": {
+    "clientContext.tool": "PINHOLE",
+    "clientContext.userPaygateTier": "PAYGATE_TIER_ONE",
+    "mediaGenerationContext.audioFailurePreference": "BLOCK_SILENCED_VIDEOS",
+    "useV2ModelConfig": true,
+    "outputSpec.resolution": "must match the selected model resolution"
+  },
+  "live_validations": [
+    {
+      "model": "abra_r2v_6s_360p",
+      "resolution": "VIDEO_RESOLUTION_360P",
+      "aspect_ratio": "VIDEO_ASPECT_RATIO_PORTRAIT",
+      "reference_image_count": 2,
+      "result": "MEDIA_GENERATION_STATUS_SUCCESSFUL",
+      "elapsed_seconds": 36,
+      "submit_remaining_credits": 6,
+      "final_remaining_credits": 6
+    },
+    {
+      "model": "abra_r2v_8s_360p",
+      "resolution": "VIDEO_RESOLUTION_360P",
+      "aspect_ratio": "VIDEO_ASPECT_RATIO_PORTRAIT",
+      "reference_image_count": 1,
+      "result": "MEDIA_GENERATION_STATUS_SUCCESSFUL",
+      "elapsed_seconds": 35,
+      "submit_remaining_credits": "field omitted when balance reached zero",
+      "final_remaining_credits": 0
+    }
+  ],
+  "follow_up_observations": [
+    {
+      "captured_at": "2026-08-31T17:51:58+08:00",
+      "activity": "session refresh only",
+      "http_status": 200,
+      "new_generation_or_protocol_change": false
+    }
+  ],
+  "validation_scope": {
+    "request_and_result_observed": [
+      "abra_r2v_6s_360p",
+      "abra_r2v_8s_360p"
+    ],
+    "catalog_confirmed_but_live_submit_pending": [
+      "text_to_video",
+      "start_image_to_video",
+      "first_last_image_to_video",
+      "video_edit"
+    ]
+  }
+}

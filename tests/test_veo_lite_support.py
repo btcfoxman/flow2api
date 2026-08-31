@@ -487,11 +487,19 @@ class VeoLiteGenerationHandlerTests(unittest.TestCase):
             self.assertEqual(cfg["model_key"], f"abra_r2v_{seconds}s")
             self.assertEqual(cfg["video_type"], "r2v")
             self.assertEqual(cfg["aspect_ratio"], "VIDEO_ASPECT_RATIO_LANDSCAPE")
+            self.assertEqual(cfg["output_resolution"], "VIDEO_RESOLUTION_720P")
+            self.assertEqual(cfg["credit_cost"], {4: 7, 6: 10, 8: 12, 10: 15}[seconds])
             self.assertEqual(cfg["min_images"], 1)
             self.assertEqual(cfg["max_images"], 7)
             self.assertTrue(cfg["use_v2_model_config"])
             self.assertTrue(cfg["suppress_scene_id_metadata"])
             self.assertTrue(cfg["allow_aspect_ratio_override"])
+
+            self.assertEqual(MODEL_CONFIG[f"abra_r2v_{seconds}s_720p"], cfg)
+            cfg_360p = MODEL_CONFIG[f"abra_r2v_{seconds}s_360p"]
+            self.assertEqual(cfg_360p["model_key"], f"abra_r2v_{seconds}s_360p")
+            self.assertEqual(cfg_360p["output_resolution"], "VIDEO_RESOLUTION_360P")
+            self.assertEqual(cfg_360p["credit_cost"], {4: 4, 6: 5, 8: 6, 10: 7}[seconds])
 
         self.assertEqual(
             MODEL_CONFIG["veo_3_1_r2v_fast_portrait"]["model_key"],
@@ -505,15 +513,53 @@ class VeoLiteGenerationHandlerTests(unittest.TestCase):
             self.assertEqual(cfg["model_key"], f"abra_t2v_{seconds}s")
             self.assertEqual(cfg["video_type"], "t2v")
             self.assertEqual(cfg["aspect_ratio"], "VIDEO_ASPECT_RATIO_LANDSCAPE")
+            self.assertEqual(cfg["output_resolution"], "VIDEO_RESOLUTION_720P")
+            self.assertEqual(cfg["credit_cost"], {4: 7, 6: 10, 8: 12, 10: 15}[seconds])
             self.assertFalse(cfg["supports_images"])
             self.assertTrue(cfg["use_v2_model_config"])
             self.assertTrue(cfg["allow_aspect_ratio_override"])
+
+            self.assertEqual(MODEL_CONFIG[f"abra_t2v_{seconds}s_720p"], cfg)
+            cfg_360p = MODEL_CONFIG[f"abra_t2v_{seconds}s_360p"]
+            self.assertEqual(cfg_360p["model_key"], f"abra_t2v_{seconds}s_360p")
+            self.assertEqual(cfg_360p["output_resolution"], "VIDEO_RESOLUTION_360P")
+            self.assertEqual(cfg_360p["credit_cost"], {4: 4, 6: 5, 8: 6, 10: 7}[seconds])
+
+    def test_omni_flash_i2v_models_cover_start_and_first_last_modes(self):
+        for seconds in (4, 6, 8, 10):
+            start_cfg = MODEL_CONFIG[f"abra_i2v_{seconds}s"]
+            self.assertEqual(start_cfg["model_key"], f"abra_i2v_{seconds}s")
+            self.assertEqual(start_cfg["output_resolution"], "VIDEO_RESOLUTION_720P")
+            self.assertEqual(start_cfg["credit_cost"], {4: 7, 6: 10, 8: 12, 10: 15}[seconds])
+            self.assertEqual(start_cfg["min_images"], 1)
+            self.assertEqual(start_cfg["max_images"], 1)
+            self.assertEqual(MODEL_CONFIG[f"abra_i2v_{seconds}s_720p"], start_cfg)
+
+            start_360p = MODEL_CONFIG[f"abra_i2v_{seconds}s_360p"]
+            self.assertEqual(start_360p["model_key"], f"abra_i2v_{seconds}s_360p")
+            self.assertEqual(start_360p["output_resolution"], "VIDEO_RESOLUTION_360P")
+            self.assertEqual(start_360p["credit_cost"], {4: 4, 6: 5, 8: 6, 10: 7}[seconds])
+
+            first_last_key = f"omni_flash_i2v_{seconds}s_first_last"
+            first_last_cfg = MODEL_CONFIG[first_last_key]
+            self.assertEqual(first_last_cfg["model_key"], first_last_key)
+            self.assertEqual(first_last_cfg["output_resolution"], "VIDEO_RESOLUTION_720P")
+            self.assertEqual(first_last_cfg["credit_cost"], {4: 7, 6: 10, 8: 12, 10: 15}[seconds])
+            self.assertEqual(first_last_cfg["min_images"], 2)
+            self.assertEqual(first_last_cfg["max_images"], 2)
+            self.assertEqual(MODEL_CONFIG[f"{first_last_key}_720p"], first_last_cfg)
+
+            first_last_360p = MODEL_CONFIG[f"{first_last_key}_360p"]
+            self.assertEqual(first_last_360p["model_key"], f"{first_last_key}_360p")
+            self.assertEqual(first_last_360p["output_resolution"], "VIDEO_RESOLUTION_360P")
+            self.assertEqual(first_last_360p["credit_cost"], {4: 4, 6: 5, 8: 6, 10: 7}[seconds])
 
     def test_abra_edit_supports_720p_default_and_explicit_resolutions(self):
         cfg = MODEL_CONFIG["abra_edit"]
 
         self.assertEqual(cfg["model_key"], "abra_edit")
         self.assertEqual(cfg["output_resolution"], "VIDEO_RESOLUTION_720P")
+        self.assertEqual(cfg["credit_cost"], 20)
         self.assertEqual(cfg["video_type"], "v2v")
         self.assertEqual(cfg["aspect_ratio"], "VIDEO_ASPECT_RATIO_LANDSCAPE")
         self.assertEqual(cfg["min_images"], 1)
@@ -527,6 +573,27 @@ class VeoLiteGenerationHandlerTests(unittest.TestCase):
         cfg_360p = MODEL_CONFIG["abra_edit_360p"]
         self.assertEqual(cfg_360p["model_key"], "abra_edit_360p")
         self.assertEqual(cfg_360p["output_resolution"], "VIDEO_RESOLUTION_360P")
+        self.assertEqual(cfg_360p["credit_cost"], 10)
+
+    def test_omni_flash_catalog_covers_all_captured_upstream_keys(self):
+        expected = {"abra_edit", "abra_edit_360p"}
+        for seconds in (4, 6, 8, 10):
+            for resolution_suffix in ("", "_360p"):
+                expected.update({
+                    f"abra_t2v_{seconds}s{resolution_suffix}",
+                    f"abra_r2v_{seconds}s{resolution_suffix}",
+                    f"abra_i2v_{seconds}s{resolution_suffix}",
+                    f"omni_flash_i2v_{seconds}s_first_last{resolution_suffix}",
+                })
+
+        configured = {
+            cfg["model_key"]
+            for cfg in MODEL_CONFIG.values()
+            if cfg.get("type") == "video" and cfg.get("model_key")
+        }
+
+        self.assertEqual(len(expected), 34)
+        self.assertTrue(expected.issubset(configured))
 
     def test_direct_upsampler_keys_are_not_public_models(self):
         self.assertNotIn("veo_3_1_upsampler_4k", MODEL_CONFIG)
@@ -680,14 +747,19 @@ class VeoLiteFlowClientTests(unittest.IsolatedAsyncioTestCase):
             at="at-token",
             project_id="project-1",
             prompt="text only",
-            model_key="abra_t2v_10s",
+            model_key="abra_t2v_10s_360p",
             aspect_ratio="VIDEO_ASPECT_RATIO_LANDSCAPE",
             use_v2_model_config=True,
+            output_resolution="VIDEO_RESOLUTION_360P",
         )
 
         self.assertTrue(captured["url"].endswith("/video:batchAsyncGenerateVideoText"))
         request_data = captured["json_data"]["requests"][0]
-        self.assertEqual(request_data["videoModelKey"], "abra_t2v_10s")
+        self.assertEqual(request_data["videoModelKey"], "abra_t2v_10s_360p")
+        self.assertEqual(
+            request_data["outputSpec"],
+            {"resolution": "VIDEO_RESOLUTION_360P"},
+        )
         self.assertEqual(
             request_data["textInput"]["structuredPrompt"]["parts"][0]["text"],
             "text only",
@@ -828,13 +900,14 @@ class VeoLiteFlowClientTests(unittest.IsolatedAsyncioTestCase):
             at="at-token",
             project_id="project-1",
             prompt="show product",
-            model_key="abra_r2v_8s",
-            aspect_ratio="VIDEO_ASPECT_RATIO_LANDSCAPE",
+            model_key="abra_r2v_8s_360p",
+            aspect_ratio="VIDEO_ASPECT_RATIO_PORTRAIT",
             reference_images=[
                 {"mediaId": "image-1", "imageUsageType": "IMAGE_USAGE_TYPE_ASSET"},
                 {"mediaId": "image-2", "imageUsageType": "IMAGE_USAGE_TYPE_ASSET"},
             ],
             suppress_scene_id_metadata=True,
+            output_resolution="VIDEO_RESOLUTION_360P",
         )
 
         self.assertTrue(captured["url"].endswith("/video:batchAsyncGenerateVideoReferenceImages"))
@@ -848,11 +921,11 @@ class VeoLiteFlowClientTests(unittest.IsolatedAsyncioTestCase):
             json_data["mediaGenerationContext"]["audioFailurePreference"],
             "BLOCK_SILENCED_VIDEOS",
         )
-        self.assertEqual(request_data["videoModelKey"], "abra_r2v_8s")
-        self.assertEqual(request_data["aspectRatio"], "VIDEO_ASPECT_RATIO_LANDSCAPE")
+        self.assertEqual(request_data["videoModelKey"], "abra_r2v_8s_360p")
+        self.assertEqual(request_data["aspectRatio"], "VIDEO_ASPECT_RATIO_PORTRAIT")
         self.assertEqual(
             request_data["outputSpec"],
-            {"resolution": "VIDEO_RESOLUTION_720P"},
+            {"resolution": "VIDEO_RESOLUTION_360P"},
         )
         self.assertEqual(request_data["metadata"], {})
         self.assertEqual(
@@ -1244,6 +1317,7 @@ class VeoLiteFlowClientTests(unittest.IsolatedAsyncioTestCase):
             start_media_id="start-media",
             end_media_id="end-media",
             use_v2_model_config=True,
+            output_resolution="VIDEO_RESOLUTION_360P",
         )
 
         json_data = captured["json_data"]
@@ -1254,8 +1328,43 @@ class VeoLiteFlowClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request_data["startImage"]["mediaId"], "start-media")
         self.assertEqual(request_data["endImage"]["mediaId"], "end-media")
         self.assertEqual(
+            request_data["outputSpec"],
+            {"resolution": "VIDEO_RESOLUTION_360P"},
+        )
+        self.assertEqual(
             request_data["textInput"]["structuredPrompt"]["parts"][0]["text"],
             "变身猫猫",
+        )
+
+
+    async def test_generate_video_start_image_uses_omni_360p_payload(self):
+        captured = {}
+
+        async def fake_make_request(method, url, json_data, use_at, at_token, **kwargs):
+            captured["url"] = url
+            captured["json_data"] = json_data
+            return {"operations": [{"operation": {"name": "task-omni-i2v"}}]}
+
+        self.client._make_request = AsyncMock(side_effect=fake_make_request)
+
+        await self.client.generate_video_start_image(
+            at="at-token",
+            project_id="project-1",
+            prompt="animate the frame",
+            model_key="abra_i2v_8s_360p",
+            aspect_ratio="VIDEO_ASPECT_RATIO_PORTRAIT",
+            start_media_id="start-media",
+            use_v2_model_config=True,
+            output_resolution="VIDEO_RESOLUTION_360P",
+        )
+
+        self.assertTrue(captured["url"].endswith("/video:batchAsyncGenerateVideoStartImage"))
+        request_data = captured["json_data"]["requests"][0]
+        self.assertEqual(request_data["videoModelKey"], "abra_i2v_8s_360p")
+        self.assertEqual(request_data["startImage"]["mediaId"], "start-media")
+        self.assertEqual(
+            request_data["outputSpec"],
+            {"resolution": "VIDEO_RESOLUTION_360P"},
         )
 
 

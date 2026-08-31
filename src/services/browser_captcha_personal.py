@@ -828,6 +828,48 @@ def _is_nodriver_connection_closed(connection_instance) -> bool:
         return True
 
 
+class _Flow2APILegacyTransaction(asyncio.Future):
+    """Legacy nodriver mapper entry independent of its changing Transaction API."""
+
+    def __init__(self, cdp_obj):
+        super().__init__()
+        self._cdp_obj = cdp_obj
+        method, *params = next(self._cdp_obj).values()
+        self.request = {
+            "method": method,
+            "params": params.pop() if params else {},
+        }
+        self.response = None
+        self.events = []
+        self.id = None
+
+    @property
+    def message(self) -> str:
+        request = dict(self.request)
+        request["id"] = self.id
+        return json.dumps(request)
+
+    def __call__(self, response=None, **response_fields):
+        if self.done():
+            return
+        if response is None:
+            response = response_fields
+        elif response_fields and isinstance(response, dict):
+            response = {**response, **response_fields}
+        if not isinstance(response, dict):
+            response = {"result": response}
+        self.response = response
+        if "error" in response:
+            self.set_exception(RuntimeError(str(response["error"])))
+            return
+        try:
+            self._cdp_obj.send(response.get("result"))
+        except StopIteration as exc:
+            self.set_result(exc.value)
+        except Exception as exc:
+            self.set_exception(exc)
+
+
 def _patch_nodriver_connection_instance(connection_instance):
     """在连接实例级别收口 websocket.send 的后台异常。"""
     if not connection_instance or getattr(connection_instance, "_flow2api_send_patched", False):
@@ -841,19 +883,16 @@ def _patch_nodriver_connection_instance(connection_instance):
     ):
         return
 
-    try:
-        from nodriver.core import connection as nodriver_connection_module
-    except Exception as e:
-        debug_logger.log_warning(f"[BrowserCaptcha] 加载 nodriver.connection 失败，跳过连接补丁: {e}")
-        return
-
     async def patched_send(self, cdp_obj, _is_update=False):
         if _is_nodriver_connection_closed(self):
             await self.connect()
         if not _is_update:
             await self._register_handlers()
 
-        transaction = nodriver_connection_module.Transaction(cdp_obj)
+        # nodriver 0.50 changed Transaction from an awaitable CDP generator mapper
+        # into a plain request-history object. This patch only targets legacy-shaped
+        # connections, so keep its mapper entry local and version-independent.
+        transaction = _Flow2APILegacyTransaction(cdp_obj)
         tx_id = next(self.__count__)
         transaction.id = tx_id
         self.mapper[tx_id] = transaction

@@ -2236,6 +2236,7 @@ class FlowClient:
         model_key: str,
         aspect_ratio: str,
         use_v2_model_config: bool = False,
+        output_resolution: Optional[str] = None,
         user_paygate_tier: str = "PAYGATE_TIER_ONE",
         token_id: Optional[int] = None,
         token_video_concurrency: Optional[int] = None,
@@ -2320,6 +2321,8 @@ class FlowClient:
                     "sceneId": scene_id
                 }
             }
+            if output_resolution:
+                request_data["outputSpec"] = {"resolution": output_resolution}
             json_data = {
                 "clientContext": client_context,
                 "requests": [request_data]
@@ -2363,6 +2366,7 @@ class FlowClient:
         model_key: str,
         aspect_ratio: str,
         reference_images: List[Dict],
+        output_resolution: str = "VIDEO_RESOLUTION_720P",
         user_paygate_tier: str = "PAYGATE_TIER_ONE",
         token_id: Optional[int] = None,
         token_video_concurrency: Optional[int] = None,
@@ -2444,7 +2448,7 @@ class FlowClient:
                 },
                 "requests": [{
                     "outputSpec": {
-                        "resolution": "VIDEO_RESOLUTION_720P"
+                        "resolution": output_resolution
                     },
                     "aspectRatio": aspect_ratio,
                     "seed": random.randint(1, 99999),
@@ -2616,6 +2620,7 @@ class FlowClient:
         start_media_id: str,
         end_media_id: str,
         use_v2_model_config: bool = False,
+        output_resolution: Optional[str] = None,
         user_paygate_tier: str = "PAYGATE_TIER_ONE",
         token_id: Optional[int] = None,
         token_video_concurrency: Optional[int] = None,
@@ -2701,6 +2706,8 @@ class FlowClient:
                     "sceneId": scene_id
                 }
             }
+            if output_resolution:
+                request_data["outputSpec"] = {"resolution": output_resolution}
             json_data = {
                 "clientContext": client_context,
                 "requests": [request_data]
@@ -2745,6 +2752,7 @@ class FlowClient:
         aspect_ratio: str,
         start_media_id: str,
         use_v2_model_config: bool = False,
+        output_resolution: Optional[str] = None,
         user_paygate_tier: str = "PAYGATE_TIER_ONE",
         token_id: Optional[int] = None,
         token_video_concurrency: Optional[int] = None,
@@ -2827,6 +2835,8 @@ class FlowClient:
                     "sceneId": scene_id
                 }
             }
+            if output_resolution:
+                request_data["outputSpec"] = {"resolution": output_resolution}
             json_data = {
                 "clientContext": client_context,
                 "requests": [request_data]

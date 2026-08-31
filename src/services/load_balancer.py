@@ -7,6 +7,7 @@ from ..core.config import config
 from ..core.credits import (
     get_minimum_generation_credits,
     has_minimum_generation_credits,
+    normalize_credits,
 )
 from ..core.account_tiers import (
     get_paygate_tier_label,
@@ -26,6 +27,7 @@ class LoadBalancer:
         self.concurrency_manager = concurrency_manager
         self._image_pending: Dict[int, int] = {}
         self._video_pending: Dict[int, int] = {}
+        self._pending_credits: Dict[int, int] = {}
         self._pending_lock = asyncio.Lock()
         self._round_robin_state: Dict[str, Optional[int]] = {"image": None, "video": None, "default": None}
         self._rr_lock = asyncio.Lock()
@@ -38,14 +40,46 @@ class LoadBalancer:
                 return max(0, int(self._video_pending.get(token_id, 0)))
             return 0
 
-    async def _add_pending(self, token_id: int, for_image_generation: bool, for_video_generation: bool):
+    async def _get_pending_credits(self, token_id: int) -> int:
         async with self._pending_lock:
+            return max(0, int(self._pending_credits.get(token_id, 0)))
+
+    async def _add_pending(
+        self,
+        token_id: int,
+        for_image_generation: bool,
+        for_video_generation: bool,
+        *,
+        credit_cost: int = 0,
+        available_credits: Optional[int] = None,
+    ) -> bool:
+        """Atomically add pending load and, when known, reserve model credits."""
+        normalized_cost = max(0, normalize_credits(credit_cost))
+        async with self._pending_lock:
+            reserved_credits = max(0, int(self._pending_credits.get(token_id, 0)))
+            if (
+                normalized_cost > 0
+                and available_credits is not None
+                and normalize_credits(available_credits) - reserved_credits < normalized_cost
+            ):
+                return False
+
             if for_image_generation:
                 self._image_pending[token_id] = max(0, int(self._image_pending.get(token_id, 0))) + 1
             elif for_video_generation:
                 self._video_pending[token_id] = max(0, int(self._video_pending.get(token_id, 0))) + 1
+            if normalized_cost > 0:
+                self._pending_credits[token_id] = reserved_credits + normalized_cost
+            return True
 
-    async def release_pending(self, token_id: int, for_image_generation: bool = False, for_video_generation: bool = False):
+    async def release_pending(
+        self,
+        token_id: int,
+        for_image_generation: bool = False,
+        for_video_generation: bool = False,
+        *,
+        credit_cost: Optional[int] = None,
+    ):
         async with self._pending_lock:
             if for_image_generation:
                 current = max(0, int(self._image_pending.get(token_id, 0)))
@@ -59,6 +93,15 @@ class LoadBalancer:
                     self._video_pending.pop(token_id, None)
                 else:
                     self._video_pending[token_id] = current - 1
+
+            normalized_cost = max(0, normalize_credits(credit_cost))
+            if normalized_cost > 0:
+                reserved_credits = max(0, int(self._pending_credits.get(token_id, 0)))
+                remaining_credits = max(0, reserved_credits - normalized_cost)
+                if remaining_credits:
+                    self._pending_credits[token_id] = remaining_credits
+                else:
+                    self._pending_credits.pop(token_id, None)
 
     async def _get_token_load(self, token_id: int, for_image_generation: bool, for_video_generation: bool) -> tuple[int, Optional[int]]:
         """获取 token 当前负载。
@@ -150,6 +193,7 @@ class LoadBalancer:
         enforce_concurrency_filter: bool = True,
         track_pending: bool = False,
         exclude_token_ids: Optional[Collection[int]] = None,
+        minimum_credits: Optional[int] = None,
     ) -> Optional[Token]:
         """
         Select a token using load-aware balancing
@@ -169,6 +213,9 @@ class LoadBalancer:
             exclude_token_ids:
                 Token IDs already attempted by the current request. They remain excluded
                 even when their cached credits still look sufficient.
+            minimum_credits:
+                Exact credits required by the resolved model. When omitted, use the
+                administrator-configured fallback threshold.
 
         Returns:
             Selected token or None if no available tokens
@@ -188,7 +235,13 @@ class LoadBalancer:
         available_tokens = []
         filtered_reasons = {}
         required_tier = get_required_paygate_tier_for_model(model)
-        minimum_credits = get_minimum_generation_credits()
+        has_exact_credit_cost = minimum_credits is not None
+        minimum_credits = (
+            get_minimum_generation_credits()
+            if minimum_credits is None
+            else max(0, int(minimum_credits))
+        )
+        pending_credit_cost = minimum_credits if has_exact_credit_cost else 0
         excluded_ids = {
             int(token_id)
             for token_id in (exclude_token_ids or ())
@@ -199,8 +252,13 @@ class LoadBalancer:
             if token.id in excluded_ids:
                 filtered_reasons[token.id] = "excluded after a failed attempt in this request"
                 continue
-            if not has_minimum_generation_credits(token.credits, minimum_credits):
-                filtered_reasons[token.id] = f"credits below {minimum_credits}"
+            reserved_credits = await self._get_pending_credits(token.id)
+            effective_credits = max(0, normalize_credits(token.credits) - reserved_credits)
+            if not has_minimum_generation_credits(effective_credits, minimum_credits):
+                filtered_reasons[token.id] = (
+                    f"effective credits below {minimum_credits} "
+                    f"(stored={normalize_credits(token.credits)}, reserved={reserved_credits})"
+                )
                 continue
 
             normalized_tier = normalize_user_paygate_tier(token.user_paygate_tier)
@@ -253,6 +311,8 @@ class LoadBalancer:
                 "inflight": inflight,
                 "remaining": remaining,
                 "needs_refresh": self.token_manager.needs_at_refresh(token),
+                "reserved_credits": reserved_credits,
+                "effective_credits": effective_credits,
                 "random": random.random()
             })
 
@@ -306,7 +366,9 @@ class LoadBalancer:
             debug_logger.log_info(
                 f"[LOAD_BALANCER]   - Token {token.id} ({token.email}) "
                 f"inflight={item['inflight']}, remaining={remaining}, "
-                f"needs_refresh={item['needs_refresh']}, credits={token.credits}"
+                f"needs_refresh={item['needs_refresh']}, credits={token.credits}, "
+                f"reserved_credits={item['reserved_credits']}, "
+                f"effective_credits={item['effective_credits']}"
             )
 
         # 只为候选列表中真正尝试到的 token 做 AT 校验，避免每次请求把所有 token 全扫一遍
@@ -319,12 +381,31 @@ class LoadBalancer:
                 debug_logger.log_info(f"[LOAD_BALANCER] 跳过 Token {token_id}: AT无效或已过期")
                 continue
 
+            if track_pending:
+                pending_added = await self._add_pending(
+                    token.id,
+                    for_image_generation,
+                    for_video_generation,
+                    credit_cost=pending_credit_cost,
+                    available_credits=token.credits,
+                )
+                if not pending_added:
+                    debug_logger.log_info(
+                        f"[LOAD_BALANCER] 跳过 Token {token.id}: "
+                        f"并发余额预占失败（需要 {pending_credit_cost}）"
+                    )
+                    continue
+
             if reserve and not await self._reserve_slot(token.id, for_image_generation, for_video_generation):
+                if track_pending:
+                    await self.release_pending(
+                        token.id,
+                        for_image_generation=for_image_generation,
+                        for_video_generation=for_video_generation,
+                        credit_cost=pending_credit_cost,
+                    )
                 debug_logger.log_info(f"[LOAD_BALANCER] 跳过 Token {token.id}: 预占槽位失败")
                 continue
-
-            if track_pending:
-                await self._add_pending(token.id, for_image_generation, for_video_generation)
 
             debug_logger.log_info(
                 f"[LOAD_BALANCER] ✅ 已选择Token {token.id} ({token.email}) - "
@@ -341,6 +422,7 @@ class LoadBalancer:
         for_image_generation: bool = False,
         for_video_generation: bool = False,
         model: Optional[str] = None,
+        minimum_credits: Optional[int] = None,
     ) -> Optional[str]:
         """给出更明确的“无可用账号”原因，优先用于分辨率/tier 档位提示。"""
         active_tokens = await self.token_manager.get_active_tokens()
@@ -367,11 +449,17 @@ class LoadBalancer:
                 continue
             capability_tokens.append(token)
 
-        minimum_credits = get_minimum_generation_credits()
-        funded_tokens = [
-            token for token in capability_tokens
-            if has_minimum_generation_credits(token.credits, minimum_credits)
-        ]
+        minimum_credits = (
+            get_minimum_generation_credits()
+            if minimum_credits is None
+            else max(0, int(minimum_credits))
+        )
+        funded_tokens = []
+        for token in capability_tokens:
+            reserved_credits = await self._get_pending_credits(token.id)
+            effective_credits = max(0, normalize_credits(token.credits) - reserved_credits)
+            if has_minimum_generation_credits(effective_credits, minimum_credits):
+                funded_tokens.append(token)
         if capability_tokens and not funded_tokens:
             return (
                 f"\u5f53\u524d\u7b26\u5408\u6761\u4ef6\u7684\u8d26\u53f7"

@@ -747,11 +747,17 @@ def _make_i2v_config(
     return cfg
 
 
-def _make_abra_r2v_config(model_key: str) -> Dict[str, Any]:
+def _make_abra_r2v_config(
+    model_key: str,
+    output_resolution: str = "VIDEO_RESOLUTION_720P",
+    credit_cost: int = 15,
+) -> Dict[str, Any]:
     return {
         "type": "video",
         "video_type": "r2v",
         "model_key": model_key,
+        "output_resolution": output_resolution,
+        "credit_cost": credit_cost,
         "aspect_ratio": "VIDEO_ASPECT_RATIO_LANDSCAPE",
         "supports_images": True,
         "min_images": 1,
@@ -762,13 +768,42 @@ def _make_abra_r2v_config(model_key: str) -> Dict[str, Any]:
     }
 
 
-def _make_abra_t2v_config(model_key: str) -> Dict[str, Any]:
+def _make_abra_t2v_config(
+    model_key: str,
+    output_resolution: str = "VIDEO_RESOLUTION_720P",
+    credit_cost: int = 15,
+) -> Dict[str, Any]:
     return {
         "type": "video",
         "video_type": "t2v",
         "model_key": model_key,
+        "output_resolution": output_resolution,
+        "credit_cost": credit_cost,
         "aspect_ratio": "VIDEO_ASPECT_RATIO_LANDSCAPE",
         "supports_images": False,
+        "use_v2_model_config": True,
+        "allow_aspect_ratio_override": True,
+    }
+
+
+def _make_abra_i2v_config(
+    model_key: str,
+    *,
+    output_resolution: str = "VIDEO_RESOLUTION_720P",
+    first_last: bool = False,
+    credit_cost: int = 15,
+) -> Dict[str, Any]:
+    image_count = 2 if first_last else 1
+    return {
+        "type": "video",
+        "video_type": "i2v",
+        "model_key": model_key,
+        "output_resolution": output_resolution,
+        "credit_cost": credit_cost,
+        "aspect_ratio": "VIDEO_ASPECT_RATIO_LANDSCAPE",
+        "supports_images": True,
+        "min_images": image_count,
+        "max_images": image_count,
         "use_v2_model_config": True,
         "allow_aspect_ratio_override": True,
     }
@@ -777,12 +812,14 @@ def _make_abra_t2v_config(model_key: str) -> Dict[str, Any]:
 def _make_abra_edit_config(
     model_key: str = "abra_edit",
     output_resolution: str = "VIDEO_RESOLUTION_720P",
+    credit_cost: int = 20,
 ) -> Dict[str, Any]:
     return {
         "type": "video",
         "video_type": "v2v",
         "model_key": model_key,
         "output_resolution": output_resolution,
+        "credit_cost": credit_cost,
         "aspect_ratio": "VIDEO_ASPECT_RATIO_LANDSCAPE",
         "supports_images": True,
         "min_images": 1,
@@ -963,8 +1000,60 @@ def _apply_veo_3_1_model_updates():
     add_alias("veo_3_1_r2v_fast_landscape_ultra_1080p", "veo_3_1_r2v_fast_ultra_1080p")
 
     for seconds in (4, 6, 8, 10):
-        MODEL_CONFIG[f"abra_t2v_{seconds}s"] = _make_abra_t2v_config(f"abra_t2v_{seconds}s")
-        MODEL_CONFIG[f"abra_r2v_{seconds}s"] = _make_abra_r2v_config(f"abra_r2v_{seconds}s")
+        suffix = f"{seconds}s"
+        credit_cost_720p = {4: 7, 6: 10, 8: 12, 10: 15}[seconds]
+        credit_cost_360p = {4: 4, 6: 5, 8: 6, 10: 7}[seconds]
+
+        abra_t2v_720p = _make_abra_t2v_config(
+            f"abra_t2v_{suffix}",
+            credit_cost=credit_cost_720p,
+        )
+        MODEL_CONFIG[f"abra_t2v_{suffix}"] = abra_t2v_720p
+        MODEL_CONFIG[f"abra_t2v_{suffix}_720p"] = dict(abra_t2v_720p)
+        MODEL_CONFIG[f"abra_t2v_{suffix}_360p"] = _make_abra_t2v_config(
+            f"abra_t2v_{suffix}_360p",
+            output_resolution="VIDEO_RESOLUTION_360P",
+            credit_cost=credit_cost_360p,
+        )
+
+        abra_r2v_720p = _make_abra_r2v_config(
+            f"abra_r2v_{suffix}",
+            credit_cost=credit_cost_720p,
+        )
+        MODEL_CONFIG[f"abra_r2v_{suffix}"] = abra_r2v_720p
+        MODEL_CONFIG[f"abra_r2v_{suffix}_720p"] = dict(abra_r2v_720p)
+        MODEL_CONFIG[f"abra_r2v_{suffix}_360p"] = _make_abra_r2v_config(
+            f"abra_r2v_{suffix}_360p",
+            output_resolution="VIDEO_RESOLUTION_360P",
+            credit_cost=credit_cost_360p,
+        )
+
+        abra_i2v_720p = _make_abra_i2v_config(
+            f"abra_i2v_{suffix}",
+            credit_cost=credit_cost_720p,
+        )
+        MODEL_CONFIG[f"abra_i2v_{suffix}"] = abra_i2v_720p
+        MODEL_CONFIG[f"abra_i2v_{suffix}_720p"] = dict(abra_i2v_720p)
+        MODEL_CONFIG[f"abra_i2v_{suffix}_360p"] = _make_abra_i2v_config(
+            f"abra_i2v_{suffix}_360p",
+            output_resolution="VIDEO_RESOLUTION_360P",
+            credit_cost=credit_cost_360p,
+        )
+
+        first_last_key = f"omni_flash_i2v_{suffix}_first_last"
+        first_last_720p = _make_abra_i2v_config(
+            first_last_key,
+            first_last=True,
+            credit_cost=credit_cost_720p,
+        )
+        MODEL_CONFIG[first_last_key] = first_last_720p
+        MODEL_CONFIG[f"{first_last_key}_720p"] = dict(first_last_720p)
+        MODEL_CONFIG[f"{first_last_key}_360p"] = _make_abra_i2v_config(
+            f"{first_last_key}_360p",
+            output_resolution="VIDEO_RESOLUTION_360P",
+            first_last=True,
+            credit_cost=credit_cost_360p,
+        )
 
     # Keep the original public name at Flow's 720p default while exposing both
     # resolution choices explicitly. The 360p choice uses a distinct upstream key.
@@ -973,6 +1062,7 @@ def _apply_veo_3_1_model_updates():
     MODEL_CONFIG["abra_edit_360p"] = _make_abra_edit_config(
         model_key="abra_edit_360p",
         output_resolution="VIDEO_RESOLUTION_360P",
+        credit_cost=10,
     )
 
 
@@ -1161,14 +1251,22 @@ class GenerationHandler:
             return text
         return f"{text[:max_length - 3]}..."
 
-    async def _handle_quota_exhausted_error(self, token: Any, error_message: Any) -> bool:
+    async def _handle_quota_exhausted_error(
+        self,
+        token: Any,
+        error_message: Any,
+        minimum_credits: Optional[int] = None,
+    ) -> bool:
         if not is_quota_exhausted_error(error_message):
             return False
         token_id = getattr(token, "id", None)
         if token_id is None:
             return True
         try:
-            await self.token_manager.mark_quota_exhausted(token_id)
+            await self.token_manager.mark_quota_exhausted(
+                token_id,
+                minimum_credits=minimum_credits,
+            )
         except Exception as exc:
             debug_logger.log_warning(
                 f"[QUOTA] Failed to refresh quota after exhaustion for token {token_id}: {exc}"
@@ -1383,6 +1481,10 @@ class GenerationHandler:
 
         model_config = MODEL_CONFIG[model]
         generation_type = model_config["type"]
+        required_credits = model_config.get("credit_cost")
+        if required_credits is not None:
+            required_credits = max(0, int(required_credits))
+            perf_trace["required_credits"] = required_credits
         video_type_for_op = model_config.get("video_type", "")
         request_operation = "extend_video" if video_type_for_op == "extend" else f"generate_{generation_type}"
         prompt_for_log = prompt if len(prompt) <= 2000 else f"{prompt[:2000]}...(truncated)"
@@ -1429,6 +1531,7 @@ class GenerationHandler:
                 enforce_concurrency_filter=False,
                 track_pending=True,
                 exclude_token_ids=quota_excluded_token_ids,
+                minimum_credits=required_credits,
             )
         else:
             token = await self.load_balancer.select_token(
@@ -1438,6 +1541,7 @@ class GenerationHandler:
                 enforce_concurrency_filter=False,
                 track_pending=True,
                 exclude_token_ids=quota_excluded_token_ids,
+                minimum_credits=required_credits,
             )
         perf_trace["token_select_ms"] = int((time.time() - token_select_started_at) * 1000)
 
@@ -1448,6 +1552,7 @@ class GenerationHandler:
                     for_image_generation=(generation_type == "image"),
                     for_video_generation=(generation_type == "video"),
                     model=model,
+                    minimum_credits=required_credits,
                 )
             if not error_msg:
                 error_msg = self._get_no_token_error_message(generation_type)
@@ -1584,8 +1689,12 @@ class GenerationHandler:
                     # Route quota failures returned through generation_result through
                     # the same account-switching path as raised exceptions.
                     raise RuntimeError(error_msg)
-                if await self._handle_quota_exhausted_error(token, error_msg):
-                    error_msg = quota_exhausted_message()
+                if await self._handle_quota_exhausted_error(
+                    token,
+                    error_msg,
+                    minimum_credits=required_credits,
+                ):
+                    error_msg = quota_exhausted_message(required_credits)
                     response_status_code = 503
                 else:
                     response_status_code = int(generation_result.get("status_code") or 500)
@@ -1718,7 +1827,11 @@ class GenerationHandler:
         except Exception as e:
             raw_error_msg = str(e)
             if is_quota_exhausted_error(raw_error_msg):
-                await self._handle_quota_exhausted_error(token, raw_error_msg)
+                await self._handle_quota_exhausted_error(
+                    token,
+                    raw_error_msg,
+                    minimum_credits=required_credits,
+                )
                 token_id = getattr(token, "id", None)
                 if token_id is not None:
                     quota_excluded_token_ids.add(token_id)
@@ -1730,7 +1843,7 @@ class GenerationHandler:
                     switch_number = MAX_QUOTA_ACCOUNT_SWITCHES - quota_switches_remaining + 1
                     perf_trace["quota_account_switches"] = switch_number
                     perf_trace["status"] = "switching_account"
-                    perf_trace["error"] = quota_exhausted_message()
+                    perf_trace["error"] = quota_exhausted_message(required_credits)
                     duration = time.time() - start_time
                     perf_trace["total_ms"] = int(duration * 1000)
                     debug_logger.log_warning(
@@ -1753,6 +1866,7 @@ class GenerationHandler:
                             token.id,
                             for_image_generation=(generation_type == "image"),
                             for_video_generation=(generation_type == "video"),
+                            credit_cost=required_credits,
                         )
                         pending_token_state["active"] = False
                     if stream:
@@ -1780,7 +1894,7 @@ class GenerationHandler:
                     ):
                         yield chunk
                     return
-                error_msg = quota_exhausted_message()
+                error_msg = quota_exhausted_message(required_credits)
                 response_status_code = 503
             elif generation_type == "video" and is_project_image_upload_error(raw_error_msg):
                 error_msg, response_status_code = project_image_upload_failure_response(
@@ -1837,6 +1951,7 @@ class GenerationHandler:
                     token.id,
                     for_image_generation=(generation_type == "image"),
                     for_video_generation=(generation_type == "video"),
+                    credit_cost=required_credits,
                 )
                 pending_token_state["active"] = False
 
@@ -2434,6 +2549,7 @@ class GenerationHandler:
                         start_media_id=start_media_id,
                         end_media_id=end_media_id,
                         use_v2_model_config=use_v2_model_config,
+                        output_resolution=model_config.get("output_resolution"),
                         user_paygate_tier=normalized_tier,
                         token_id=token.id,
                         token_video_concurrency=token.video_concurrency,
@@ -2454,6 +2570,7 @@ class GenerationHandler:
                         aspect_ratio=model_config["aspect_ratio"],
                         start_media_id=start_media_id,
                         use_v2_model_config=use_v2_model_config,
+                        output_resolution=model_config.get("output_resolution"),
                         user_paygate_tier=normalized_tier,
                         token_id=token.id,
                         token_video_concurrency=token.video_concurrency,
@@ -2472,6 +2589,7 @@ class GenerationHandler:
                     token_id=token.id,
                     token_video_concurrency=token.video_concurrency,
                     suppress_scene_id_metadata=bool(model_config.get("suppress_scene_id_metadata", False)),
+                    output_resolution=model_config.get("output_resolution", "VIDEO_RESOLUTION_720P"),
                 )
 
             # V2V: 参考图 + 视频生成
@@ -2525,6 +2643,7 @@ class GenerationHandler:
                     model_key=model_config["model_key"],
                     aspect_ratio=model_config["aspect_ratio"],
                     use_v2_model_config=use_v2_model_config,
+                    output_resolution=model_config.get("output_resolution"),
                     user_paygate_tier=normalized_tier,
                     token_id=token.id,
                     token_video_concurrency=token.video_concurrency,
@@ -2585,6 +2704,11 @@ class GenerationHandler:
                     watermark=bool(watermark),
                 )
                 self._mark_generation_succeeded(generation_result)
+                transfer_pending_reservation = bool(
+                    isinstance(pending_token_state, dict)
+                    and pending_token_state.get("active")
+                    and model_config.get("credit_cost") is not None
+                )
                 self._spawn_background_task(
                     self._run_video_task_background(
                         token=token,
@@ -2595,8 +2719,12 @@ class GenerationHandler:
                         request_log_state=async_result_log_state,
                         extend_source_media_id=video_media_id if video_type == "extend" else None,
                         watermark=bool(watermark),
+                        release_pending_on_finish=transfer_pending_reservation,
+                        pending_credit_cost=model_config.get("credit_cost"),
                     )
                 )
+                if transfer_pending_reservation:
+                    pending_token_state["active"] = False
                 yield self._create_video_task_response(
                     task_id=task_id,
                     model=model_config["model_key"],
@@ -2634,6 +2762,11 @@ class GenerationHandler:
                     "request_payload": dict(continuation_log_state.get("request_payload") or {}),
                 })
                 response_state["video_continuation_started"] = True
+                transfer_pending_reservation = bool(
+                    isinstance(pending_token_state, dict)
+                    and pending_token_state.get("active")
+                    and model_config.get("credit_cost") is not None
+                )
                 self._spawn_background_task(
                     self._run_video_task_background(
                         token=token,
@@ -2645,8 +2778,12 @@ class GenerationHandler:
                         extend_source_media_id=extend_source_id,
                         watermark=bool(watermark),
                         record_usage_on_success=True,
+                        release_pending_on_finish=transfer_pending_reservation,
+                        pending_credit_cost=model_config.get("credit_cost"),
                     )
                 )
+                if transfer_pending_reservation:
+                    pending_token_state["active"] = False
                 debug_logger.log_warning(
                     f"[VIDEO] client disconnected after submit; polling continues in background "
                     f"task={_operation_task_id(operations)}"
@@ -2678,6 +2815,8 @@ class GenerationHandler:
         extend_source_media_id: Optional[str],
         watermark: bool,
         record_usage_on_success: bool = False,
+        release_pending_on_finish: bool = False,
+        pending_credit_cost: Optional[int] = None,
     ) -> None:
         generation_result = self._create_generation_result()
         try:
@@ -2728,6 +2867,19 @@ class GenerationHandler:
                 debug_logger.log_info(
                     f"[VIDEO ASYNC] Skip token error count for token {token.id}: {error_msg}"
                 )
+        finally:
+            if release_pending_on_finish and self.load_balancer:
+                try:
+                    await self.load_balancer.release_pending(
+                        token.id,
+                        for_video_generation=True,
+                        credit_cost=pending_credit_cost,
+                    )
+                except Exception as exc:
+                    debug_logger.log_warning(
+                        f"[VIDEO ASYNC] Failed to release pending credit reservation "
+                        f"for token {token.id}: {exc}"
+                    )
 
     async def _start_async_video_result_log(
         self,

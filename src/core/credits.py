@@ -49,8 +49,12 @@ def is_quota_exhausted_error(error_message: Any) -> bool:
     )
 
 
-def quota_exhausted_message() -> str:
-    minimum_credits = get_minimum_generation_credits()
+def quota_exhausted_message(minimum_credits: Any = None) -> str:
+    minimum_credits = (
+        get_minimum_generation_credits()
+        if minimum_credits is None
+        else max(0, normalize_credits(minimum_credits))
+    )
     return (
         f"\u8d26\u53f7\u989d\u5ea6\u4e0d\u8db3\uff08\u5df2\u6392\u9664"
         f"\u989d\u5ea6\u4f4e\u4e8e {minimum_credits} \u7684"

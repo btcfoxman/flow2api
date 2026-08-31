@@ -179,7 +179,7 @@ h1 { text-align: center; margin-bottom: 8px; font-size: 24px; color: #7c8aff; }
         </div>
 
         <div class="form-group" id="videoUploadGroup" style="display:none;">
-          <label>上传参考视频 <span style="color:#666;font-size:12px;">(abra_edit)</span></label>
+          <label>上传参考视频 <span style="color:#666;font-size:12px;">(Omni abra_edit*)</span></label>
           <div class="image-upload-area" id="videoUploadArea">
             <div class="image-upload-hint" id="videoHint">点击或拖拽上传 MP4 视频</div>
             <div id="videoPreview"></div>
@@ -211,7 +211,11 @@ const MODEL_CATEGORIES = {
   "Veo 3.1 文生视频 (T2V)": { filter: m => m.startsWith("veo_3_1_t2v") && !m.includes("4k") && !m.includes("1080p") },
   "Veo 3.1 图生视频 (I2V)": { filter: m => m.startsWith("veo_3_1_i2v") && !m.includes("4k") && !m.includes("1080p") },
   "Veo 3.1 多图视频 (R2V)": { filter: m => m.startsWith("veo_3_1_r2v") && !m.includes("4k") && !m.includes("1080p") },
-  "Labs Abra 参考媒体": { filter: m => m.startsWith("abra_t2v_") || m.startsWith("abra_r2v_") || m === "abra_edit" },
+  "Omni 1.1 Flash 文生视频": { filter: m => m.startsWith("abra_t2v_") },
+  "Omni 1.1 Flash 参考图视频": { filter: m => m.startsWith("abra_r2v_") },
+  "Omni 1.1 Flash 首帧视频": { filter: m => m.startsWith("abra_i2v_") },
+  "Omni 1.1 Flash 首尾帧视频": { filter: m => m.startsWith("omni_flash_i2v_") },
+  "Omni 1.1 Flash 视频编辑": { filter: m => m.startsWith("abra_edit") },
   "视频放大 (Upsample)": { filter: m => m.includes("4k") || m.includes("1080p") },
 };
 
@@ -268,15 +272,6 @@ const FALLBACK_MODELS = {
   "veo_3_1_i2v_s_6s_1080p": "Video upsample alias - generate 6s then upscale to 1080P",
   "veo_3_1_i2v_s_landscape_6s_1080p": "Video upsample alias - generate 6s landscape then upscale to 1080P",
   "veo_3_1_r2v_fast": "Video generation (alias) - supports landscape/portrait via generationConfig",
-  "abra_t2v_4s": "Video generation - Labs T2V modelKey, text only",
-  "abra_t2v_6s": "Video generation - Labs T2V modelKey, text only",
-  "abra_t2v_8s": "Video generation - Labs T2V modelKey, text only",
-  "abra_t2v_10s": "Video generation - Labs T2V modelKey, text only",
-  "abra_r2v_4s": "Video generation - Labs R2V modelKey, 1-7 reference images",
-  "abra_r2v_6s": "Video generation - Labs R2V modelKey, 1-7 reference images",
-  "abra_r2v_8s": "Video generation - Labs R2V modelKey, 1-7 reference images",
-  "abra_r2v_10s": "Video generation - Labs R2V modelKey, 1-7 reference images",
-  "abra_edit": "Video generation - Labs edit model, reference images plus one video",
   "veo_3_1_r2v_fast_landscape": "Video generation - R2V fast landscape",
   "veo_3_1_r2v_fast_ultra": "Video generation (alias) - supports landscape/portrait via generationConfig",
   "veo_3_1_r2v_fast_landscape_ultra": "Video generation - R2V fast ultra landscape",
@@ -285,6 +280,27 @@ const FALLBACK_MODELS = {
   "veo_3_1_r2v_fast_landscape_ultra_4k": "Video upsample alias - generate R2V landscape then upscale to 4K",
   "veo_3_1_r2v_fast_landscape_ultra_1080p": "Video upsample alias - generate R2V landscape then upscale to 1080P",
 };
+
+const OMNI_FLASH_CREDITS = {
+  "720p": { 4: 7, 6: 10, 8: 12, 10: 15 },
+  "360p": { 4: 4, 6: 5, 8: 6, 10: 7 },
+};
+for (const seconds of [4, 6, 8, 10]) {
+  for (const [suffix, resolution] of [["", "720p"], ["_720p", "720p"], ["_360p", "360p"]]) {
+    const credits = OMNI_FLASH_CREDITS[resolution][seconds];
+    FALLBACK_MODELS[`abra_t2v_${seconds}s${suffix}`] =
+      `Omni 1.1 Flash T2V - ${seconds}s ${resolution}, text only, ${credits} credits`;
+    FALLBACK_MODELS[`abra_r2v_${seconds}s${suffix}`] =
+      `Omni 1.1 Flash R2V - ${seconds}s ${resolution}, 1-7 reference images, ${credits} credits`;
+    FALLBACK_MODELS[`abra_i2v_${seconds}s${suffix}`] =
+      `Omni 1.1 Flash I2V - ${seconds}s ${resolution}, one start image, ${credits} credits`;
+    FALLBACK_MODELS[`omni_flash_i2v_${seconds}s_first_last${suffix}`] =
+      `Omni 1.1 Flash I2V - ${seconds}s ${resolution}, start and end images, ${credits} credits`;
+  }
+}
+FALLBACK_MODELS.abra_edit = "Omni 1.1 Flash edit - 720p, reference images plus one video, 20 credits";
+FALLBACK_MODELS.abra_edit_720p = FALLBACK_MODELS.abra_edit;
+FALLBACK_MODELS.abra_edit_360p = "Omni 1.1 Flash edit - 360p, reference images plus one video, 10 credits";
 
 let ALL_MODELS = {};
 
@@ -334,9 +350,11 @@ function getModelType(modelId) {
 
 function getModelMeta(modelId) {
   // Determine supports_images, min/max from model name patterns
-  const isAbraEdit = modelId === "abra_edit";
+  const isAbraEdit = /^abra_edit(?:_(?:360p|720p))?$/.test(modelId);
   const isAbraT2V = modelId.startsWith("abra_t2v_");
   const isAbraR2V = modelId.startsWith("abra_r2v_");
+  const isAbraI2V = modelId.startsWith("abra_i2v_");
+  const isOmniFirstLastI2V = modelId.startsWith("omni_flash_i2v_");
   const isI2V = modelId.includes("i2v");
   const isR2V = modelId.includes("r2v");
   const isT2V = modelId.includes("t2v");
@@ -345,6 +363,8 @@ function getModelMeta(modelId) {
   if (isAbraEdit) return { type: "video", supportsImages: true, minImages: 1, maxImages: 5, supportsVideo: true };
   if (isAbraT2V) return { type: "video", supportsImages: false, minImages: 0, maxImages: 0, supportsVideo: false };
   if (isAbraR2V) return { type: "video", supportsImages: true, minImages: 1, maxImages: 7, supportsVideo: false };
+  if (isAbraI2V) return { type: "video", supportsImages: true, minImages: 1, maxImages: 1, supportsVideo: false };
+  if (isOmniFirstLastI2V) return { type: "video", supportsImages: true, minImages: 2, maxImages: 2, supportsVideo: false };
   if (isImage) return { type: "image", supportsImages: true, minImages: 0, maxImages: 5 };
   if (isI2V) return { type: "video", supportsImages: true, minImages: 1, maxImages: 2, supportsVideo: false };
   if (isR2V) return { type: "video", supportsImages: true, minImages: 0, maxImages: 3, supportsVideo: false };
@@ -555,6 +575,14 @@ async function generate() {
   if (!prompt) { alert("请输入提示词"); return; }
   if (!apiKey) { alert("请输入 API Key"); return; }
   if (!baseUrl) { alert("请输入服务地址"); return; }
+  if (
+    STATE.modelConfig
+    && STATE.modelConfig.supportsImages
+    && STATE.images.length < STATE.modelConfig.minImages
+  ) {
+    alert(`请上传至少 ${STATE.modelConfig.minImages} 张图片`);
+    return;
+  }
   if (STATE.modelConfig && STATE.modelConfig.supportsVideo && !STATE.video) {
     alert("请上传参考视频");
     return;
