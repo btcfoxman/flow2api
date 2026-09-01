@@ -1208,7 +1208,7 @@ class BrowserCaptchaService:
 
     @staticmethod
     def _risk_backoff_seconds(failure_streak: int) -> float:
-        """Use a bounded 2/5/15/30 minute proxy-level backoff by default."""
+        """Escalate repeated proxy verdicts from minutes to a six-hour quarantine."""
         base = float(getattr(config, "flow_traffic_cooldown_seconds", 120) or 0)
         if base <= 0:
             return 0.0
@@ -1217,6 +1217,9 @@ class BrowserCaptchaService:
             max(base, 300.0),
             max(base, 900.0),
             max(base, 1800.0),
+            max(base, 3600.0),
+            max(base, 7200.0),
+            max(base, 21600.0),
         )
         index = min(max(1, int(failure_streak)) - 1, len(steps) - 1)
         return steps[index]
