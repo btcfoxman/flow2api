@@ -2,6 +2,7 @@ import asyncio
 import json
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -15,6 +16,7 @@ from src.services.browser_captcha_native_cdp import (
     NativeCdpAccountBrowser,
     _is_recaptcha_profile_risk_error,
     _parse_proxy_url,
+    _proxy_egress_key,
 )
 
 
@@ -57,13 +59,25 @@ class NativeCdpConnectionTests(unittest.IsolatedAsyncioTestCase):
 
 
 class _FakeDatabase:
-    def __init__(self, token_proxy=None, global_proxy=None, global_enabled=False):
+    def __init__(
+        self,
+        token_proxy=None,
+        global_proxy=None,
+        global_enabled=False,
+        token_proxies=None,
+        logs=None,
+    ):
         self.token_proxy = token_proxy
         self.global_proxy = global_proxy
         self.global_enabled = global_enabled
+        self.token_proxies = token_proxies or {}
+        self.logs = logs or []
 
     async def get_token(self, token_id):
-        return SimpleNamespace(captcha_proxy_url=self.token_proxy, st="session-token")
+        return SimpleNamespace(
+            captcha_proxy_url=self.token_proxies.get(int(token_id), self.token_proxy),
+            st="session-token",
+        )
 
     async def get_captcha_config(self):
         return SimpleNamespace(
@@ -73,6 +87,9 @@ class _FakeDatabase:
 
     async def get_active_tokens(self):
         return []
+
+    async def get_logs(self, limit=500, include_payload=False):
+        return list(self.logs[:limit])
 
 
 class NativeCdpProxyTests(unittest.IsolatedAsyncioTestCase):
@@ -101,6 +118,16 @@ class NativeCdpProxyTests(unittest.IsolatedAsyncioTestCase):
             ("http", "proxy.example", 8080, "user", "pass"),
         )
 
+    def test_proxy_egress_key_normalizes_local_xray_aliases(self):
+        localhost_key = _proxy_egress_key("http://user:one@127.0.0.1:18080")
+        docker_host_key = _proxy_egress_key(
+            "socks5://other:secret@host.docker.internal:18080"
+        )
+        other_port_key = _proxy_egress_key("http://127.0.0.1:18081")
+
+        self.assertEqual(localhost_key, docker_host_key)
+        self.assertNotEqual(localhost_key, other_port_key)
+
     async def test_token_proxy_takes_priority(self):
         browser = NativeCdpAccountBrowser(
             7,
@@ -128,6 +155,7 @@ class _FakeAccountBrowser:
     blocked_tokens = set()
     solve_started = {}
     solve_release = {}
+    fetch_errors = {}
 
     def __init__(self, token_id, db):
         self.token_id = int(token_id)
@@ -168,6 +196,9 @@ class _FakeAccountBrowser:
 
     async def fetch_json(self, **kwargs):
         self.fetch_calls.append(kwargs)
+        error = type(self).fetch_errors.get(self.token_id)
+        if error is not None:
+            raise error
         return {"projectId": kwargs["project_id"], "ok": True}
 
     async def stop(self, reason):
@@ -189,6 +220,7 @@ class NativeCdpServiceTests(unittest.IsolatedAsyncioTestCase):
         _FakeAccountBrowser.blocked_tokens = set()
         _FakeAccountBrowser.solve_started = {}
         _FakeAccountBrowser.solve_release = {}
+        _FakeAccountBrowser.fetch_errors = {}
 
     async def asyncTearDown(self):
         config.set_browser_count(self.original_count)
@@ -346,7 +378,9 @@ class NativeCdpServiceTests(unittest.IsolatedAsyncioTestCase):
             "src.services.browser_captcha_native_cdp.NativeCdpAccountBrowser",
             _FakeAccountBrowser,
         ):
-            service = await BrowserCaptchaService.get_instance(_FakeDatabase())
+            service = await BrowserCaptchaService.get_instance(
+                _FakeDatabase(token_proxy="http://127.0.0.1:18080")
+            )
             token, _ = await service.get_token(
                 "project-a",
                 action="VIDEO_GENERATION",
@@ -376,3 +410,75 @@ class NativeCdpServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(next_token, "captcha-2")
             self.assertFalse(_FakeAccountBrowser.instances[1].is_running)
             self.assertTrue(_FakeAccountBrowser.instances[2].is_running)
+
+    async def test_traffic_failure_quarantines_shared_proxy_but_not_other_exit(self):
+        database = _FakeDatabase(
+            token_proxies={
+                1: "http://127.0.0.1:18080",
+                2: "socks5://host.docker.internal:18080",
+                3: "http://127.0.0.1:18081",
+            }
+        )
+        _FakeAccountBrowser.fetch_errors[1] = RuntimeError("HTTP Error 429")
+        with patch(
+            "src.services.browser_captcha_native_cdp.NativeCdpAccountBrowser",
+            _FakeAccountBrowser,
+        ):
+            service = await BrowserCaptchaService.get_instance(database)
+
+            with self.assertRaisesRegex(RuntimeError, "429"):
+                await service.fetch_json(
+                    token_id=1,
+                    project_id="project-a",
+                    url="https://example.test/video:submit",
+                    json_data={},
+                    consume_video_reservation=True,
+                )
+
+            shared_state = await service.get_video_proxy_state(2)
+            other_state = await service.get_video_proxy_state(3)
+
+            self.assertFalse(shared_state["available"])
+            self.assertEqual(shared_state["failure_streak"], 1)
+            self.assertTrue(other_state["available"])
+            status = service.get_status()
+            self.assertNotIn(
+                "proxy_key",
+                status["video_proxy_risk_groups"][0],
+            )
+
+    async def test_recent_log_history_restores_shared_proxy_cooldown(self):
+        now = datetime.now(tz=timezone.utc)
+        database = _FakeDatabase(
+            token_proxies={
+                1: "http://127.0.0.1:18080",
+                2: "http://host.docker.internal:18080",
+            },
+            logs=[
+                {
+                    "operation": "generate_video",
+                    "token_id": 1,
+                    "status_code": 429,
+                    "updated_at": (now - timedelta(minutes=3)).isoformat(),
+                },
+                {
+                    "operation": "generate_video",
+                    "token_id": 2,
+                    "status_code": 429,
+                    "updated_at": (now - timedelta(seconds=10)).isoformat(),
+                },
+            ],
+        )
+        service = await BrowserCaptchaService.get_instance(database)
+        active_tokens = [
+            SimpleNamespace(id=1, captcha_proxy_url=database.token_proxies[1]),
+            SimpleNamespace(id=2, captcha_proxy_url=database.token_proxies[2]),
+        ]
+
+        await service.hydrate_proxy_risk_history(active_tokens)
+        state = await service.get_video_proxy_state(1)
+
+        self.assertFalse(state["available"])
+        self.assertEqual(state["failure_streak"], 2)
+        self.assertGreater(state["cooldown_remaining_seconds"], 0)
+        self.assertTrue(service.get_status()["proxy_risk_history_loaded"])

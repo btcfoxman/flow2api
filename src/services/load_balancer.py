@@ -27,6 +27,8 @@ class LoadBalancer:
         self.concurrency_manager = concurrency_manager
         self._image_pending: Dict[int, int] = {}
         self._video_pending: Dict[int, int] = {}
+        self._video_proxy_pending: Dict[str, int] = {}
+        self._video_proxy_pending_keys: Dict[int, list[str]] = {}
         self._pending_credits: Dict[int, int] = {}
         self._pending_lock = asyncio.Lock()
         self._round_robin_state: Dict[str, Optional[int]] = {"image": None, "video": None, "default": None}
@@ -52,10 +54,17 @@ class LoadBalancer:
         *,
         credit_cost: int = 0,
         available_credits: Optional[int] = None,
+        video_proxy_key: Optional[str] = None,
     ) -> bool:
         """Atomically add pending load and, when known, reserve model credits."""
         normalized_cost = max(0, normalize_credits(credit_cost))
         async with self._pending_lock:
+            if (
+                for_video_generation
+                and video_proxy_key
+                and int(self._video_proxy_pending.get(video_proxy_key, 0)) > 0
+            ):
+                return False
             reserved_credits = max(0, int(self._pending_credits.get(token_id, 0)))
             if (
                 normalized_cost > 0
@@ -68,6 +77,11 @@ class LoadBalancer:
                 self._image_pending[token_id] = max(0, int(self._image_pending.get(token_id, 0))) + 1
             elif for_video_generation:
                 self._video_pending[token_id] = max(0, int(self._video_pending.get(token_id, 0))) + 1
+                if video_proxy_key:
+                    self._video_proxy_pending[video_proxy_key] = 1
+                    self._video_proxy_pending_keys.setdefault(token_id, []).append(
+                        video_proxy_key
+                    )
             if normalized_cost > 0:
                 self._pending_credits[token_id] = reserved_credits + normalized_cost
             return True
@@ -93,6 +107,12 @@ class LoadBalancer:
                     self._video_pending.pop(token_id, None)
                 else:
                     self._video_pending[token_id] = current - 1
+                proxy_keys = self._video_proxy_pending_keys.get(token_id) or []
+                if proxy_keys:
+                    proxy_key = proxy_keys.pop(0)
+                    self._video_proxy_pending.pop(proxy_key, None)
+                    if not proxy_keys:
+                        self._video_proxy_pending_keys.pop(token_id, None)
 
             normalized_cost = max(0, normalize_credits(credit_cost))
             if normalized_cost > 0:
@@ -102,6 +122,54 @@ class LoadBalancer:
                     self._pending_credits[token_id] = remaining_credits
                 else:
                     self._pending_credits.pop(token_id, None)
+
+    async def _is_video_proxy_pending(self, proxy_key: Optional[str]) -> bool:
+        if not proxy_key:
+            return False
+        async with self._pending_lock:
+            return int(self._video_proxy_pending.get(proxy_key, 0)) > 0
+
+    async def _get_native_video_proxy_state(self, token: Token) -> Dict[str, object]:
+        """Resolve a credential-free proxy group and its current quarantine state."""
+        from .browser_captcha_native_cdp import (
+            BrowserCaptchaService,
+            _proxy_egress_key,
+        )
+
+        token_proxy_url = str(getattr(token, "captcha_proxy_url", "") or "").strip()
+        service = BrowserCaptchaService._instance
+        if service is None:
+            db = getattr(self.token_manager, "db", None)
+            if db is not None:
+                service = await BrowserCaptchaService.get_instance(db)
+        if service is not None:
+            return await service.get_video_proxy_state(
+                int(token.id),
+                token_proxy_url=token_proxy_url or None,
+            )
+        if token_proxy_url:
+            proxy_key = _proxy_egress_key(token_proxy_url)
+            return {
+                "proxy_key": proxy_key,
+                "proxy_fingerprint": proxy_key[:12],
+                "available": True,
+                "failure_streak": 0,
+                "cooldown_remaining_seconds": 0,
+            }
+        raise RuntimeError("native_cdp proxy route is unavailable")
+
+    async def get_video_proxy_diagnostics(self, token: Token) -> Optional[Dict[str, object]]:
+        """Return safe route metadata suitable for request performance logs."""
+        if str(getattr(config, "captcha_method", "") or "").strip().lower() != "native_cdp":
+            return None
+        state = await self._get_native_video_proxy_state(token)
+        return {
+            "fingerprint": str(state.get("proxy_fingerprint") or ""),
+            "failure_streak": int(state.get("failure_streak") or 0),
+            "cooldown_remaining_seconds": int(
+                state.get("cooldown_remaining_seconds") or 0
+            ),
+        }
 
     async def _get_token_load(self, token_id: int, for_image_generation: bool, for_video_generation: bool) -> tuple[int, Optional[int]]:
         """获取 token 当前负载。
@@ -249,6 +317,7 @@ class LoadBalancer:
         }
 
         for token in active_tokens:
+            video_proxy_state = None
             if token.id in excluded_ids:
                 filtered_reasons[token.id] = "excluded after a failed attempt in this request"
                 continue
@@ -288,6 +357,30 @@ class LoadBalancer:
                     filtered_reasons[token.id] = "视频生成已禁用"
                     continue
 
+                if str(getattr(config, "captcha_method", "") or "").strip().lower() == "native_cdp":
+                    try:
+                        video_proxy_state = await self._get_native_video_proxy_state(token)
+                    except Exception as exc:
+                        filtered_reasons[token.id] = f"native proxy route unavailable: {exc}"
+                        continue
+                    proxy_key = str(video_proxy_state.get("proxy_key") or "")
+                    proxy_fingerprint = str(
+                        video_proxy_state.get("proxy_fingerprint") or proxy_key[:12]
+                    )
+                    if not bool(video_proxy_state.get("available", True)):
+                        retry_after = int(
+                            video_proxy_state.get("cooldown_remaining_seconds") or 0
+                        )
+                        filtered_reasons[token.id] = (
+                            f"proxy {proxy_fingerprint} cooling down ({retry_after}s)"
+                        )
+                        continue
+                    if await self._is_video_proxy_pending(proxy_key):
+                        filtered_reasons[token.id] = (
+                            f"proxy {proxy_fingerprint} already has an active video task"
+                        )
+                        continue
+
                 route_ok, route_reason = await self._check_extension_route(token)
                 if not route_ok:
                     filtered_reasons[token.id] = route_reason
@@ -313,6 +406,11 @@ class LoadBalancer:
                 "needs_refresh": self.token_manager.needs_at_refresh(token),
                 "reserved_credits": reserved_credits,
                 "effective_credits": effective_credits,
+                "video_proxy_key": (
+                    str(video_proxy_state.get("proxy_key") or "")
+                    if video_proxy_state
+                    else None
+                ),
                 "random": random.random()
             })
 
@@ -388,11 +486,13 @@ class LoadBalancer:
                     for_video_generation,
                     credit_cost=pending_credit_cost,
                     available_credits=token.credits,
+                    video_proxy_key=item.get("video_proxy_key"),
                 )
                 if not pending_added:
                     debug_logger.log_info(
                         f"[LOAD_BALANCER] 跳过 Token {token.id}: "
-                        f"并发余额预占失败（需要 {pending_credit_cost}）"
+                        f"pending credit/proxy reservation failed "
+                        f"(required_credits={pending_credit_cost})"
                     )
                     continue
 
@@ -468,6 +568,36 @@ class LoadBalancer:
                 "\u8d26\u53f7\u3002\u8bf7\u5237\u65b0\u989d\u5ea6"
                 "\u6216\u8865\u5145\u53ef\u7528\u8d26\u53f7\u3002"
             )
+
+        if (
+            for_video_generation
+            and funded_tokens
+            and str(getattr(config, "captcha_method", "") or "").strip().lower() == "native_cdp"
+        ):
+            blocked_states = []
+            for token in funded_tokens:
+                try:
+                    state = await self._get_native_video_proxy_state(token)
+                except Exception:
+                    blocked_states.append((True, 0))
+                    continue
+                proxy_key = str(state.get("proxy_key") or "")
+                cooling_down = not bool(state.get("available", True))
+                proxy_pending = await self._is_video_proxy_pending(proxy_key)
+                blocked_states.append(
+                    (
+                        cooling_down or proxy_pending,
+                        int(state.get("cooldown_remaining_seconds") or 0),
+                    )
+                )
+            if blocked_states and all(blocked for blocked, _ in blocked_states):
+                retry_after = min(
+                    (seconds for _, seconds in blocked_states if seconds > 0),
+                    default=0,
+                )
+                if retry_after:
+                    return f"当前可用账号的代理出口正在风险冷却，请约 {retry_after} 秒后重试。"
+                return "当前可用账号的代理出口已有视频任务，任务结束后即可继续提交。"
 
         if supported_tokens and not capability_tokens:
             if for_image_generation:

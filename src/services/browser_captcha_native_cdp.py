@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import platform
@@ -10,13 +11,15 @@ import random
 import shutil
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Optional
 from urllib.parse import quote, unquote, urlparse
 
 from ..core.config import config
 from ..core.logger import debug_logger
+from ..core.media_errors import is_media_traffic_error
 
 
 FLOW_PROJECT_BASE_URL = "https://labs.google/fx/zh/tools/flow"
@@ -76,6 +79,54 @@ def _parse_proxy_url(proxy_url: str) -> tuple[str, str, int, Optional[str], Opti
         unquote(parsed.username) if parsed.username is not None else None,
         unquote(parsed.password) if parsed.password is not None else None,
     )
+
+
+def _proxy_egress_key(proxy_url: str) -> str:
+    """Return a credential-free stable key for one configured proxy endpoint.
+
+    Native CDP profiles may refer to the Docker host through localhost,
+    127.0.0.1, or host.docker.internal.  Those aliases reach the same xray
+    listener, so normalize them before grouping accounts.  Credentials are
+    deliberately excluded: the endpoint is the observable egress boundary and
+    secrets must never enter diagnostics.
+    """
+    scheme, host, port, username, _ = _parse_proxy_url(proxy_url)
+    normalized_host = str(host or "").strip().lower().strip("[]")
+    is_local_listener = normalized_host in {
+        "localhost",
+        "127.0.0.1",
+        "0.0.0.0",
+        "::1",
+        "host.docker.internal",
+    }
+    if is_local_listener:
+        normalized_host = "local-xray"
+        endpoint = f"{normalized_host}:{int(port)}"
+    else:
+        # Remote proxy gateways can route credentials to different exits. Keep
+        # those identities separate without retaining or exposing the username.
+        auth_identity = hashlib.sha256(
+            str(username or "").encode("utf-8")
+        ).hexdigest()
+        endpoint = f"{scheme}://{normalized_host}:{int(port)}#{auth_identity}"
+    return hashlib.sha256(endpoint.encode("utf-8")).hexdigest()
+
+
+def _timestamp_seconds(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
 
 
 def _detect_browser_executable() -> Optional[str]:
@@ -340,6 +391,20 @@ class ProxyBinding:
     @property
     def signature(self) -> str:
         return self.url
+
+
+@dataclass
+class ProxyRiskState:
+    """Traffic-control state shared by every account on one proxy egress."""
+
+    failure_streak: int = 0
+    cooldown_until: float = 0.0
+    last_failure_at: Optional[float] = None
+    last_success_at: Optional[float] = None
+    last_error: str = ""
+    token_ids: set[int] = field(default_factory=set)
+    last_failure_token_id: Optional[int] = None
+    last_failure_monotonic: float = 0.0
 
 
 class NativeCdpAccountBrowser:
@@ -1111,6 +1176,9 @@ class BrowserCaptchaService:
         self.db = db
         self.website_key = FLOW_WEBSITE_KEY
         self._workers: Dict[int, NativeCdpAccountBrowser] = {}
+        self._proxy_risk_states: Dict[str, ProxyRiskState] = {}
+        self._risk_history_loaded = False
+        self._risk_history_lock = asyncio.Lock()
         self._capacity_lock = asyncio.Lock()
         self._capacity_condition = asyncio.Condition()
         self._queued = 0
@@ -1137,6 +1205,263 @@ class BrowserCaptchaService:
             return max(60, int(value))
         except Exception:
             return DEFAULT_IDLE_TTL_SECONDS
+
+    @staticmethod
+    def _risk_backoff_seconds(failure_streak: int) -> float:
+        """Use a bounded 2/5/15/30 minute proxy-level backoff by default."""
+        base = float(getattr(config, "flow_traffic_cooldown_seconds", 120) or 0)
+        if base <= 0:
+            return 0.0
+        steps = (
+            base,
+            max(base, 300.0),
+            max(base, 900.0),
+            max(base, 1800.0),
+        )
+        index = min(max(1, int(failure_streak)) - 1, len(steps) - 1)
+        return steps[index]
+
+    @staticmethod
+    def _public_proxy_state(
+        proxy_key: str,
+        state: Optional[ProxyRiskState],
+    ) -> Dict[str, Any]:
+        now = time.time()
+        if state is None:
+            return {
+                "proxy_key": proxy_key,
+                "proxy_fingerprint": proxy_key[:12],
+                "available": True,
+                "failure_streak": 0,
+                "cooldown_remaining_seconds": 0,
+                "cooldown_until": None,
+                "last_failure_at": None,
+                "last_success_at": None,
+                "token_ids": [],
+            }
+        remaining = max(0.0, state.cooldown_until - now)
+
+        def iso_timestamp(value: Optional[float]) -> Optional[str]:
+            if value is None:
+                return None
+            return datetime.fromtimestamp(value, tz=timezone.utc).isoformat()
+
+        return {
+            "proxy_key": proxy_key,
+            "proxy_fingerprint": proxy_key[:12],
+            "available": remaining <= 0,
+            "failure_streak": max(0, int(state.failure_streak)),
+            "cooldown_remaining_seconds": int(remaining + 0.999),
+            "cooldown_until": iso_timestamp(state.cooldown_until) if remaining > 0 else None,
+            "last_failure_at": iso_timestamp(state.last_failure_at),
+            "last_success_at": iso_timestamp(state.last_success_at),
+            "token_ids": sorted(state.token_ids),
+        }
+
+    async def _resolve_proxy_url(
+        self,
+        token_id: int,
+        token_proxy_url: Optional[str] = None,
+    ) -> str:
+        proxy_url = str(token_proxy_url or "").strip()
+        if not proxy_url:
+            token = await self.db.get_token(int(token_id))
+            proxy_url = str(
+                getattr(token, "captcha_proxy_url", "") or ""
+            ).strip() if token else ""
+        if proxy_url:
+            _parse_proxy_url(proxy_url)
+            return proxy_url
+
+        captcha_config = await self.db.get_captcha_config()
+        global_proxy = str(
+            getattr(captcha_config, "browser_proxy_url", "") or ""
+        ).strip()
+        if bool(getattr(captcha_config, "browser_proxy_enabled", False)) and global_proxy:
+            _parse_proxy_url(global_proxy)
+            return global_proxy
+        raise RuntimeError(
+            f"native_cdp token {int(token_id)} has no token proxy and no enabled global browser proxy"
+        )
+
+    async def get_video_proxy_state(
+        self,
+        token_id: int,
+        *,
+        token_proxy_url: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        proxy_url = await self._resolve_proxy_url(token_id, token_proxy_url)
+        proxy_key = _proxy_egress_key(proxy_url)
+        state = self._proxy_risk_states.get(proxy_key)
+        if state is not None:
+            state.token_ids.add(int(token_id))
+        return self._public_proxy_state(proxy_key, state)
+
+    async def _record_proxy_risk(
+        self,
+        token_id: int,
+        error: Any,
+        *,
+        token_proxy_url: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        proxy_url = await self._resolve_proxy_url(token_id, token_proxy_url)
+        proxy_key = _proxy_egress_key(proxy_url)
+        state = self._proxy_risk_states.setdefault(proxy_key, ProxyRiskState())
+        now = time.time()
+        monotonic_now = time.monotonic()
+        token_key = int(token_id)
+        state.token_ids.add(token_key)
+
+        # Browser fetch and its outer error reporter can observe the same response.
+        # Count it once so one rejection advances only one backoff step.
+        if (
+            state.last_failure_token_id == token_key
+            and monotonic_now - state.last_failure_monotonic < 5.0
+        ):
+            return self._public_proxy_state(proxy_key, state)
+
+        if state.last_failure_at is None or now - state.last_failure_at > 6 * 3600:
+            state.failure_streak = 1
+        else:
+            state.failure_streak = max(0, int(state.failure_streak)) + 1
+        cooldown_seconds = self._risk_backoff_seconds(state.failure_streak)
+        state.cooldown_until = max(state.cooldown_until, now + cooldown_seconds)
+        state.last_failure_at = now
+        state.last_failure_token_id = token_key
+        state.last_failure_monotonic = monotonic_now
+        state.last_error = str(error or "traffic_control")[:240]
+        public_state = self._public_proxy_state(proxy_key, state)
+        debug_logger.log_warning(
+            f"[NativeCDP] proxy risk fp={public_state['proxy_fingerprint']}, "
+            f"token={token_key}, streak={state.failure_streak}, "
+            f"cooldown={public_state['cooldown_remaining_seconds']}s"
+        )
+        return public_state
+
+    async def _record_proxy_success(
+        self,
+        token_id: int,
+        *,
+        token_proxy_url: Optional[str] = None,
+    ) -> None:
+        proxy_url = await self._resolve_proxy_url(token_id, token_proxy_url)
+        proxy_key = _proxy_egress_key(proxy_url)
+        state = self._proxy_risk_states.get(proxy_key)
+        if state is None:
+            return
+        state.token_ids.add(int(token_id))
+        state.failure_streak = 0
+        state.cooldown_until = 0.0
+        state.last_success_at = time.time()
+        state.last_error = ""
+        debug_logger.log_info(
+            f"[NativeCDP] proxy recovered fp={proxy_key[:12]}, token={int(token_id)}"
+        )
+
+    async def hydrate_proxy_risk_history(self, active_tokens: list[Any]) -> None:
+        """Restore recent proxy risk from persistent request logs after restart."""
+        if self._risk_history_loaded:
+            return
+        async with self._risk_history_lock:
+            if self._risk_history_loaded:
+                return
+            self._risk_history_loaded = True
+            get_logs = getattr(self.db, "get_logs", None)
+            if not callable(get_logs):
+                return
+
+            token_proxy_keys: Dict[int, str] = {}
+            global_proxy = ""
+            try:
+                captcha_config = await self.db.get_captcha_config()
+                if bool(getattr(captcha_config, "browser_proxy_enabled", False)):
+                    global_proxy = str(
+                        getattr(captcha_config, "browser_proxy_url", "") or ""
+                    ).strip()
+            except Exception:
+                global_proxy = ""
+
+            for token in active_tokens:
+                token_id = getattr(token, "id", None)
+                if token_id is None:
+                    continue
+                proxy_url = str(
+                    getattr(token, "captcha_proxy_url", "") or global_proxy
+                ).strip()
+                if not proxy_url:
+                    continue
+                try:
+                    token_proxy_keys[int(token_id)] = _proxy_egress_key(proxy_url)
+                except Exception:
+                    continue
+
+            try:
+                logs = await get_logs(limit=500, include_payload=False)
+            except TypeError:
+                logs = await get_logs(limit=500)
+            except Exception as exc:
+                debug_logger.log_warning(
+                    f"[NativeCDP] unable to hydrate proxy risk history: {exc}"
+                )
+                return
+
+            now = time.time()
+            cutoff = now - 6 * 3600
+            events = []
+            for log in logs or []:
+                if str(log.get("operation") or "") != "generate_video":
+                    continue
+                token_id = log.get("token_id")
+                try:
+                    token_key = int(token_id)
+                    status_code = int(log.get("status_code") or 0)
+                except (TypeError, ValueError):
+                    continue
+                proxy_key = token_proxy_keys.get(token_key)
+                if not proxy_key or (status_code != 429 and not 200 <= status_code < 300):
+                    continue
+                occurred_at = _timestamp_seconds(
+                    log.get("updated_at") or log.get("created_at")
+                )
+                if occurred_at is None or occurred_at < cutoff:
+                    continue
+                events.append((occurred_at, token_key, proxy_key, status_code))
+
+            for occurred_at, token_id, proxy_key, status_code in sorted(events):
+                state = self._proxy_risk_states.get(proxy_key)
+                if status_code == 429:
+                    if state is None:
+                        state = ProxyRiskState()
+                        self._proxy_risk_states[proxy_key] = state
+                    if (
+                        state.last_failure_at is None
+                        or occurred_at - state.last_failure_at > 6 * 3600
+                    ):
+                        state.failure_streak = 1
+                    else:
+                        state.failure_streak += 1
+                    state.last_failure_at = occurred_at
+                    state.token_ids.add(token_id)
+                    state.cooldown_until = max(
+                        state.cooldown_until,
+                        occurred_at + self._risk_backoff_seconds(state.failure_streak),
+                    )
+                elif state is not None:
+                    state.token_ids.add(token_id)
+                    state.failure_streak = 0
+                    state.cooldown_until = 0.0
+                    state.last_success_at = occurred_at
+
+            active_groups = sum(
+                1
+                for state in self._proxy_risk_states.values()
+                if state.cooldown_until > now
+            )
+            if self._proxy_risk_states:
+                debug_logger.log_info(
+                    f"[NativeCDP] hydrated {len(self._proxy_risk_states)} proxy risk group(s), "
+                    f"active_cooldowns={active_groups}"
+                )
 
     def _running_workers(self) -> list[NativeCdpAccountBrowser]:
         return [worker for worker in self._workers.values() if worker.is_running]
@@ -1229,7 +1554,7 @@ class BrowserCaptchaService:
             worker.consume_video_submit_reservation()
         try:
             await self._ensure_capacity(worker)
-            return await worker.fetch_json(
+            result = await worker.fetch_json(
                 project_id=project_id,
                 url=url,
                 method=method,
@@ -1237,6 +1562,38 @@ class BrowserCaptchaService:
                 json_data=json_data,
                 timeout=timeout,
             )
+            if consume_video_reservation:
+                try:
+                    await self._record_proxy_success(
+                        token_key,
+                        token_proxy_url=(
+                            worker.proxy_binding.url
+                            if worker.proxy_binding is not None
+                            else None
+                        ),
+                    )
+                except Exception as exc:
+                    debug_logger.log_warning(
+                        f"[NativeCDP] unable to record proxy success token={token_key}: {exc}"
+                    )
+            return result
+        except Exception as exc:
+            if consume_video_reservation and is_media_traffic_error(exc):
+                try:
+                    await self._record_proxy_risk(
+                        token_key,
+                        exc,
+                        token_proxy_url=(
+                            worker.proxy_binding.url
+                            if worker.proxy_binding is not None
+                            else None
+                        ),
+                    )
+                except Exception as risk_exc:
+                    debug_logger.log_warning(
+                        f"[NativeCDP] unable to record proxy risk token={token_key}: {risk_exc}"
+                    )
+            raise
         finally:
             worker.busy_count = max(0, worker.busy_count - 1)
             worker.last_used_at = time.monotonic()
@@ -1262,6 +1619,14 @@ class BrowserCaptchaService:
             worker.last_upstream_error = (
                 error_message or error_reason or "upstream_error"
             )[:240]
+        reported_error = error_message or error_reason or ""
+        if token_id and is_media_traffic_error(reported_error):
+            try:
+                await self._record_proxy_risk(int(token_id), reported_error)
+            except Exception as exc:
+                debug_logger.log_warning(
+                    f"[NativeCDP] unable to record reported proxy risk token={token_id}: {exc}"
+                )
         debug_logger.log_warning(
             f"[NativeCDP] upstream error project_id={project_id or '-'}, "
             f"token_id={token_id or '-'}, reason={(error_reason or error_message or 'unknown')[:160]}"
@@ -1291,6 +1656,7 @@ class BrowserCaptchaService:
 
     async def warmup_active_tokens(self) -> list[Dict[str, Any]]:
         active_tokens = await self.db.get_active_tokens()
+        await self.hydrate_proxy_risk_history(active_tokens)
         results = []
         for token in active_tokens[: self._browser_limit()]:
             worker = self._workers.get(int(token.id))
@@ -1325,12 +1691,28 @@ class BrowserCaptchaService:
             pass
 
     def get_status(self) -> Dict[str, Any]:
+        risk_groups = [
+            self._public_proxy_state(proxy_key, state)
+            for proxy_key, state in self._proxy_risk_states.items()
+        ]
+        for item in risk_groups:
+            item.pop("proxy_key", None)
+        risk_groups.sort(
+            key=lambda item: (
+                not item["available"],
+                item["failure_streak"],
+                item["last_failure_at"] or "",
+            ),
+            reverse=True,
+        )
         return {
             "mode": "native_cdp",
             "browser_limit": self._browser_limit(),
             "idle_ttl_seconds": self._idle_ttl(),
             "running": len(self._running_workers()),
             "queued": self._queued,
+            "proxy_risk_history_loaded": self._risk_history_loaded,
+            "video_proxy_risk_groups": risk_groups,
             "workers": [
                 worker.status()
                 for worker in sorted(self._workers.values(), key=lambda item: item.token_id)

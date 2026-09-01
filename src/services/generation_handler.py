@@ -1345,6 +1345,11 @@ class GenerationHandler:
         if not is_traffic_response and not is_media_traffic_error(error_message):
             return 0.0
 
+        if str(getattr(config, "captcha_method", "") or "").strip().lower() == "native_cdp":
+            # The native browser submit path already attributes this verdict to
+            # the selected proxy egress. Keep healthy proxy groups schedulable.
+            return 0.0
+
         activate = getattr(self.flow_client, "_activate_traffic_cooldown", None)
         if not callable(activate):
             return 0.0
@@ -1581,6 +1586,20 @@ class GenerationHandler:
         debug_logger.log_info(f"[GENERATION] 已选择Token: {token.id} ({token.email})")
         request_context["last_token_id"] = token.id
         pending_token_state["active"] = True
+        if generation_type == "video" and hasattr(
+            self.load_balancer,
+            "get_video_proxy_diagnostics",
+        ):
+            try:
+                proxy_diagnostics = await self.load_balancer.get_video_proxy_diagnostics(
+                    token
+                )
+                if proxy_diagnostics:
+                    perf_trace["proxy_route"] = proxy_diagnostics
+            except Exception as exc:
+                debug_logger.log_warning(
+                    f"[GENERATION] Unable to record proxy route diagnostics: {exc}"
+                )
         await self._update_request_log_progress(
             request_log_state,
             token_id=token.id,

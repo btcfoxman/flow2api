@@ -518,6 +518,22 @@ class FlowClientBrowserFetchTests(unittest.IsolatedAsyncioTestCase):
         client._notify_browser_captcha_error.assert_not_awaited()
         self.assertGreater(client._traffic_cooldown_remaining(), 0)
 
+    async def test_native_traffic_control_does_not_cool_healthy_proxy_groups(self):
+        config.set_captcha_method("native_cdp")
+        client = FlowClient(None)
+
+        should_retry = await client._handle_retryable_generation_error(
+            error=Exception("HTTP Error 429: Too Many Requests"),
+            retry_attempt=0,
+            max_retries=5,
+            browser_id="native:123",
+            project_id="project-1",
+            log_prefix="[VIDEO]",
+        )
+
+        self.assertFalse(should_retry)
+        self.assertEqual(client._traffic_cooldown_remaining(), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

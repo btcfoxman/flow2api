@@ -3493,6 +3493,15 @@ class FlowClient:
         """统一处理生成链路的重试判定与打码自愈通知。"""
         error_str = str(error)
         if is_media_traffic_error(error_str):
+            if str(getattr(config, "captcha_method", "") or "").strip().lower() == "native_cdp":
+                # Native CDP records and quarantines the selected proxy egress at
+                # the bound browser-submit layer.  A process-wide cooldown would
+                # unnecessarily stop unrelated healthy exits.
+                debug_logger.log_warning(
+                    f"{log_prefix}请求触发流量风控，停止重复提交；由 native_cdp "
+                    "按代理出口执行风险冷却。"
+                )
+                return False
             cooldown_seconds = self._activate_traffic_cooldown()
             debug_logger.log_warning(
                 f"{log_prefix}请求过于集中，停止当前请求的重复提交并进入"

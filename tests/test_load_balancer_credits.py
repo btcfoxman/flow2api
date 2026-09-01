@@ -8,9 +8,10 @@ from src.core.credits import (
 )
 from src.core.models import Token
 from src.services.load_balancer import LoadBalancer
+from src.services.browser_captcha_native_cdp import _proxy_egress_key
 
 
-def make_token(token_id: int, credits: int) -> Token:
+def make_token(token_id: int, credits: int, proxy_url: str = None) -> Token:
     return Token(
         id=token_id,
         st=f"st-{token_id}",
@@ -19,6 +20,7 @@ def make_token(token_id: int, credits: int) -> Token:
         credits=credits,
         image_enabled=True,
         video_enabled=True,
+        captcha_proxy_url=proxy_url,
     )
 
 
@@ -41,10 +43,12 @@ class FakeTokenManager:
 class LoadBalancerCreditsTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.original_minimum_credits = config.minimum_generation_credits
+        self.original_captcha_method = config.captcha_method
         config.set_minimum_generation_credits(DEFAULT_MIN_GENERATION_CREDITS)
 
     async def asyncTearDown(self):
         config.set_minimum_generation_credits(self.original_minimum_credits)
+        config.set_captcha_method(self.original_captcha_method)
 
     async def test_default_minimum_generation_credits_is_fifteen(self):
         self.assertEqual(DEFAULT_MIN_GENERATION_CREDITS, 15)
@@ -185,6 +189,59 @@ class LoadBalancerCreditsTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual({first.id, second.id}, {1, 2})
+
+    async def test_native_video_pending_is_serialized_by_proxy_egress(self):
+        config.set_captcha_method("native_cdp")
+        first_account = make_token(
+            1,
+            30,
+            "http://user:one@127.0.0.1:18080",
+        )
+        second_account = make_token(
+            2,
+            30,
+            "socks5://user:two@host.docker.internal:18080",
+        )
+        token_manager = FakeTokenManager([first_account, second_account])
+        balancer = LoadBalancer(token_manager)
+
+        async def proxy_state(token):
+            proxy_key = _proxy_egress_key(token.captcha_proxy_url)
+            return {
+                "proxy_key": proxy_key,
+                "proxy_fingerprint": proxy_key[:12],
+                "available": True,
+                "failure_streak": 0,
+                "cooldown_remaining_seconds": 0,
+            }
+
+        balancer._get_native_video_proxy_state = proxy_state
+
+        first = await balancer.select_token(
+            for_video_generation=True,
+            minimum_credits=6,
+            track_pending=True,
+        )
+        blocked = await balancer.select_token(
+            for_video_generation=True,
+            minimum_credits=6,
+            track_pending=True,
+        )
+
+        self.assertIsNotNone(first)
+        self.assertIsNone(blocked)
+
+        await balancer.release_pending(
+            first.id,
+            for_video_generation=True,
+            credit_cost=6,
+        )
+        available_again = await balancer.select_token(
+            for_video_generation=True,
+            minimum_credits=6,
+            track_pending=True,
+        )
+        self.assertIsNotNone(available_again)
 
     async def test_select_token_excludes_accounts_already_tried_by_request(self):
         first = make_token(1, get_minimum_generation_credits())
