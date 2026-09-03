@@ -20,6 +20,7 @@ from ..core.media_errors import (
     is_project_image_upload_invalid_argument_error,
     media_generation_failure_reason,
     media_generation_failure_response,
+    media_service_unavailable_message,
     project_image_upload_failure_response,
     sanitize_public_error_message,
 )
@@ -1551,16 +1552,19 @@ class GenerationHandler:
         perf_trace["token_select_ms"] = int((time.time() - token_select_started_at) * 1000)
 
         if not token:
-            error_msg = None
+            internal_error_msg = None
             if self.load_balancer and hasattr(self.load_balancer, "get_unavailable_reason"):
-                error_msg = await self.load_balancer.get_unavailable_reason(
+                internal_error_msg = await self.load_balancer.get_unavailable_reason(
                     for_image_generation=(generation_type == "image"),
                     for_video_generation=(generation_type == "video"),
                     model=model,
                     minimum_credits=required_credits,
                 )
-            if not error_msg:
-                error_msg = self._get_no_token_error_message(generation_type)
+            if internal_error_msg:
+                debug_logger.log_warning(
+                    f"[GENERATION] Internal availability reason: {internal_error_msg}"
+                )
+            error_msg = self._get_no_token_error_message(generation_type)
             debug_logger.log_error(f"[GENERATION] {error_msg}")
             duration = time.time() - start_time
             record_generation_result(generation_type, "no_token", duration)
@@ -1976,11 +1980,8 @@ class GenerationHandler:
 
 
     def _get_no_token_error_message(self, generation_type: str) -> str:
-        """获取无可用Token时的详细错误信息"""
-        if generation_type == "image":
-            return "当前没有额度充足的可用账号，暂无法生成图片。"
-        else:
-            return "当前没有额度充足的可用账号，暂无法生成视频。"
+        """Return a public message without exposing account inventory details."""
+        return media_service_unavailable_message(generation_type)
 
     async def _handle_image_generation(
         self,

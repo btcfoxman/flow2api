@@ -40,6 +40,9 @@ MEDIA_PROMINENT_PEOPLE_FAILURE_MESSAGE = (
 UPSTREAM_TRAFFIC_FAILURE_MESSAGE = (
     "媒体生成服务当前请求较多，请稍后重试"
 )
+IMAGE_SERVICE_UNAVAILABLE_MESSAGE = "图片生成服务暂时不可用，请稍后重试"
+VIDEO_SERVICE_UNAVAILABLE_MESSAGE = "视频生成服务暂时不可用，请稍后重试"
+MEDIA_SERVICE_UNAVAILABLE_MESSAGE = "媒体生成服务暂时不可用，请稍后重试"
 VIDEO_UPLOAD_INVALID_ARGUMENT_MESSAGE = (
     "参考图上传请求被拒绝，请更换或重新压缩参考图后重试；"
     "如仍失败，请重新创建该账号的生成项目"
@@ -75,6 +78,15 @@ def sanitize_public_error_message(error_message: Any) -> str:
     for pattern, replacement in _PUBLIC_UPSTREAM_PATTERNS:
         text = pattern.sub(replacement, text)
     return re.sub(r"(?:生成服务\s*){2,}", "生成服务", text).strip()
+
+
+def media_service_unavailable_message(media_type: str) -> str:
+    """Return a public availability message without exposing account routing."""
+    if media_type == "image":
+        return IMAGE_SERVICE_UNAVAILABLE_MESSAGE
+    if media_type == "video":
+        return VIDEO_SERVICE_UNAVAILABLE_MESSAGE
+    return MEDIA_SERVICE_UNAVAILABLE_MESSAGE
 
 
 def media_policy_reason(error_message: Any) -> Optional[str]:

@@ -145,6 +145,36 @@ class TrafficAccountSwitchingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(attempted, [1])
         self.assertEqual(json.loads(chunks[-1])["error"]["status_code"], 429)
 
+    async def test_no_token_response_hides_internal_proxy_cooldown(self):
+        handler, _, _ = self._make_handler(failing_token_ids=set())
+        handler.load_balancer.select_token = AsyncMock(return_value=None)
+        handler.load_balancer.get_unavailable_reason = AsyncMock(
+            return_value="当前可用账号的代理出口正在风险冷却，请约 4962 秒后重试。"
+        )
+
+        chunks = [
+            chunk
+            async for chunk in handler.handle_generation(
+                model="abra_t2v_10s",
+                prompt="hello",
+                stream=False,
+            )
+        ]
+
+        payload = json.loads(chunks[-1])
+        self.assertEqual(payload["error"]["status_code"], 503)
+        self.assertEqual(
+            payload["error"]["message"],
+            "视频生成服务暂时不可用，请稍后重试",
+        )
+        self.assertNotIn("4962", chunks[-1])
+        self.assertNotIn("代理", chunks[-1])
+        final_log = handler._log_request.await_args
+        self.assertEqual(
+            final_log.kwargs["response_data"]["error"],
+            "视频生成服务暂时不可用，请稍后重试",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

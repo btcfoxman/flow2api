@@ -9,6 +9,7 @@ from src.core.media_errors import (
     is_project_image_upload_invalid_argument_error,
     media_generation_failure_reason,
     media_generation_failure_response,
+    media_service_unavailable_message,
     project_image_upload_failure_response,
     sanitize_public_error_message,
     MEDIA_POLICY_REASON_PROMINENT_PEOPLE,
@@ -25,6 +26,17 @@ from src.services.generation_handler import GenerationHandler
 
 
 class MediaPolicyErrorTests(unittest.TestCase):
+    def test_service_unavailable_message_hides_internal_account_routing(self):
+        video_message = media_service_unavailable_message("video")
+        image_message = media_service_unavailable_message("image")
+
+        self.assertEqual(video_message, "视频生成服务暂时不可用，请稍后重试")
+        self.assertEqual(image_message, "图片生成服务暂时不可用，请稍后重试")
+        for message in (video_message, image_message):
+            self.assertNotIn("账号", message)
+            self.assertNotIn("代理", message)
+            self.assertNotIn("冷却", message)
+
     def test_image_policy_failure_uses_client_error_status(self):
         message, status_code = media_generation_failure_response(
             "image",

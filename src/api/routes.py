@@ -18,7 +18,10 @@ from pydantic import AliasChoices, BaseModel, Field
 
 from ..core.auth import AuthManager, verify_api_key_flexible
 from ..core.logger import debug_logger
-from ..core.media_errors import sanitize_public_error_message
+from ..core.media_errors import (
+    media_service_unavailable_message,
+    sanitize_public_error_message,
+)
 from ..core.model_resolver import extract_generation_params, get_base_model_aliases, resolve_model_name
 from ..core.models import (
     ChatCompletionRequest,
@@ -1142,15 +1145,19 @@ async def _create_deferred_async_video_task(
         track_pending=False,
     )
     if token is None:
-        message = None
+        internal_message = None
         if hasattr(handler.load_balancer, "get_unavailable_reason"):
-            message = await handler.load_balancer.get_unavailable_reason(
+            internal_message = await handler.load_balancer.get_unavailable_reason(
                 for_video_generation=True,
                 model=normalized.model,
             )
+        if internal_message:
+            debug_logger.log_warning(
+                f"[VIDEO TASK] Internal availability reason: {internal_message}"
+            )
         return {
             "error": {
-                "message": message or "当前没有额度充足的可用账号，暂无法生成视频。",
+                "message": media_service_unavailable_message("video"),
                 "type": "server_error",
                 "code": "generation_failed",
                 "status_code": 503,
