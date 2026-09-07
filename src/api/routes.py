@@ -17,9 +17,9 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import AliasChoices, BaseModel, Field
 
 from ..core.auth import AuthManager, verify_api_key_flexible
+from ..core.config import config
 from ..core.logger import debug_logger
 from ..core.media_errors import (
-    media_service_unavailable_message,
     sanitize_public_error_message,
 )
 from ..core.model_resolver import extract_generation_params, get_base_model_aliases, resolve_model_name
@@ -72,6 +72,9 @@ VIDEO_VIDEO_PAYLOAD_KEYS = [
 IMAGE_RESPONSE_TASKS: Dict[str, Dict[str, Any]] = {}
 IMAGE_RESPONSE_TASKS_LOCK = asyncio.Lock()
 ROUTE_BACKGROUND_TASKS: Set[asyncio.Task] = set()
+ASYNC_TASK_QUEUE_WORKER: Optional[asyncio.Task] = None
+ASYNC_TASK_QUEUE_WAKE_EVENT: Optional[asyncio.Event] = None
+ASYNC_TASK_QUEUE_RETRY_SECONDS = 2.0
 REMOTE_MEDIA_DOWNLOAD_MAX_ATTEMPTS = 3
 REMOTE_MEDIA_DOWNLOAD_RETRY_DELAYS = (0.5, 1.0)
 IMAGE_LOAD_FAILURE_MESSAGE = "参考图片下载失败，请确认素材链接有效且可公开访问，或稍后重试"
@@ -155,6 +158,48 @@ def set_generation_handler(handler: GenerationHandler):
     """Set generation handler instance."""
     global generation_handler
     generation_handler = handler
+
+
+async def start_async_task_queue() -> None:
+    """Start the single FIFO dispatcher and recover interrupted queue claims."""
+    global ASYNC_TASK_QUEUE_WORKER, ASYNC_TASK_QUEUE_WAKE_EVENT
+    if ASYNC_TASK_QUEUE_WORKER is not None and not ASYNC_TASK_QUEUE_WORKER.done():
+        if ASYNC_TASK_QUEUE_WAKE_EVENT is not None:
+            ASYNC_TASK_QUEUE_WAKE_EVENT.set()
+        return
+
+    handler = _ensure_generation_handler()
+    recovered = await handler.db.reset_submitting_async_tasks()
+    if recovered:
+        debug_logger.log_warning(
+            f"[ASYNC QUEUE] Recovered {recovered} interrupted submission(s)"
+        )
+    ASYNC_TASK_QUEUE_WAKE_EVENT = asyncio.Event()
+    ASYNC_TASK_QUEUE_WORKER = _spawn_route_background_task(
+        _run_async_task_queue_worker()
+    )
+
+
+async def stop_async_task_queue() -> None:
+    """Stop the FIFO dispatcher during application shutdown."""
+    global ASYNC_TASK_QUEUE_WORKER, ASYNC_TASK_QUEUE_WAKE_EVENT
+    worker = ASYNC_TASK_QUEUE_WORKER
+    ASYNC_TASK_QUEUE_WORKER = None
+    if ASYNC_TASK_QUEUE_WAKE_EVENT is not None:
+        ASYNC_TASK_QUEUE_WAKE_EVENT.set()
+    if worker is not None and not worker.done():
+        worker.cancel()
+        try:
+            await worker
+        except asyncio.CancelledError:
+            pass
+    ASYNC_TASK_QUEUE_WAKE_EVENT = None
+
+
+def _notify_async_task_queue() -> None:
+    event = ASYNC_TASK_QUEUE_WAKE_EVENT
+    if event is not None:
+        event.set()
 
 
 def _ensure_generation_handler() -> GenerationHandler:
@@ -980,6 +1025,8 @@ def _format_seedance_task_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         ("created_at", "created_at"),
         ("completed_at", "updated_at"),
         ("progress", "progress"),
+        ("queue_position", "queue_position"),
+        ("queue_capacity", "queue_capacity"),
     ):
         if payload.get(source_key) is not None:
             formatted[target_key] = payload[source_key]
@@ -1130,123 +1177,382 @@ def _video_task_validation_error(
     }
 
 
+def _serialize_normalized_generation_request(
+    normalized: NormalizedGenerationRequest,
+) -> str:
+    """Serialize downloaded media so queued work survives a process restart."""
+    payload = {
+        "model": normalized.model,
+        "prompt": normalized.prompt,
+        "images": [base64.b64encode(value).decode("ascii") for value in normalized.images],
+        "video_media_id": normalized.video_media_id,
+        "video_bytes": (
+            base64.b64encode(normalized.video_bytes).decode("ascii")
+            if normalized.video_bytes is not None
+            else None
+        ),
+        "video_mime_type": normalized.video_mime_type,
+        "video_file_name": normalized.video_file_name,
+        "aspect_ratio_override": normalized.aspect_ratio_override,
+        "watermark": bool(normalized.watermark),
+    }
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def _deserialize_normalized_generation_request(
+    request_payload: str,
+) -> NormalizedGenerationRequest:
+    payload = json.loads(request_payload)
+    if not isinstance(payload, dict):
+        raise ValueError("queued request payload is not an object")
+    encoded_images = payload.get("images") or []
+    if not isinstance(encoded_images, list):
+        raise ValueError("queued request images are invalid")
+    video_payload = payload.get("video_bytes")
+    return NormalizedGenerationRequest(
+        model=str(payload.get("model") or ""),
+        prompt=str(payload.get("prompt") or ""),
+        images=[
+            base64.b64decode(str(value), validate=True)
+            for value in encoded_images
+        ],
+        video_media_id=payload.get("video_media_id"),
+        video_bytes=(
+            base64.b64decode(str(video_payload), validate=True)
+            if video_payload is not None
+            else None
+        ),
+        video_mime_type=payload.get("video_mime_type"),
+        video_file_name=payload.get("video_file_name"),
+        aspect_ratio_override=payload.get("aspect_ratio_override"),
+        watermark=bool(payload.get("watermark", False)),
+    )
+
+
+async def _build_queued_video_task_payload(
+    queue_item: Dict[str, Any],
+) -> Dict[str, Any]:
+    handler = _ensure_generation_handler()
+    queue_status = str(queue_item.get("status") or "queued")
+    # "submitting" is an internal queue claim. Until an upstream task exists the
+    # public task is still queued, avoiding a processing/queued status flicker.
+    status = "queued" if queue_status == "submitting" else queue_status
+    payload: Dict[str, Any] = {
+        "id": queue_item["task_id"],
+        "object": "video",
+        "status": status,
+        "created_at": int(queue_item.get("created_at_epoch") or time.time()),
+        "model": _video_model_response_name(str(queue_item.get("model") or "")),
+        "progress": 100 if status == "failed" else 0,
+        "queue_capacity": config.async_task_queue_capacity,
+    }
+    if queue_status in {"queued", "submitting"}:
+        position = await handler.db.get_async_task_position(queue_item["task_id"])
+        if position is not None:
+            payload["queue_position"] = position
+    if queue_status == "failed":
+        payload["error"] = {
+            "code": "FAILED",
+            "message": sanitize_public_error_message(
+                queue_item.get("last_error") or "视频任务提交失败，请重新提交"
+            ),
+        }
+    return payload
+
+
 async def _create_deferred_async_video_task(
     normalized: NormalizedGenerationRequest,
     base_url_override: Optional[str] = None,
 ) -> Dict[str, Any]:
     handler = _ensure_generation_handler()
     local_task_id = _new_deferred_video_task_id()
-    model_name = _video_model_response_name(normalized.model)
+    enqueued = await handler.db.enqueue_async_task(
+        task_id=local_task_id,
+        task_type="video",
+        model=normalized.model,
+        prompt=normalized.prompt,
+        request_payload=_serialize_normalized_generation_request(normalized),
+        base_url_override=base_url_override,
+        capacity=config.async_task_queue_capacity,
+    )
+    if enqueued is None:
+        return {
+            "error": {
+                "message": "异步任务排队池已满，请稍后重试。",
+                "type": "rate_limit_error",
+                "code": "task_queue_full",
+                "status_code": 429,
+            }
+        }
+
+    _notify_async_task_queue()
+    return {
+        "id": local_task_id,
+        "object": "video",
+        "status": "queued",
+        "created_at": int(time.time()),
+        "model": _video_model_response_name(normalized.model),
+        "progress": 0,
+        "queue_position": enqueued["position"],
+        "queue_capacity": enqueued["capacity"],
+    }
+
+
+async def _run_async_task_queue_worker() -> None:
+    """Dispatch the persistent queue head in strict insertion order."""
+    handler = _ensure_generation_handler()
+    while True:
+        queue_item: Optional[Dict[str, Any]] = None
+        try:
+            event = ASYNC_TASK_QUEUE_WAKE_EVENT
+            if event is not None:
+                event.clear()
+            queue_item = await handler.db.claim_next_async_task("video")
+            if queue_item is None:
+                if event is None:
+                    await asyncio.sleep(ASYNC_TASK_QUEUE_RETRY_SECONDS)
+                else:
+                    try:
+                        await asyncio.wait_for(
+                            event.wait(),
+                            timeout=ASYNC_TASK_QUEUE_RETRY_SECONDS,
+                        )
+                    except asyncio.TimeoutError:
+                        pass
+                continue
+
+            retry_delay = await _process_async_video_queue_item(queue_item)
+            if retry_delay > 0:
+                await asyncio.sleep(retry_delay)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            debug_logger.log_error(f"[ASYNC QUEUE] Dispatcher error: {exc}")
+            if queue_item is not None:
+                try:
+                    await handler.db.update_async_task(
+                        queue_item["task_id"],
+                        status="queued",
+                        last_error=str(exc) or exc.__class__.__name__,
+                        increment_attempt=True,
+                    )
+                except Exception as recovery_exc:
+                    debug_logger.log_error(
+                        f"[ASYNC QUEUE] Unable to release queue claim "
+                        f"task={queue_item.get('task_id')}: {recovery_exc}"
+                    )
+            await asyncio.sleep(ASYNC_TASK_QUEUE_RETRY_SECONDS)
+
+
+async def _process_async_video_queue_item(queue_item: Dict[str, Any]) -> float:
+    """Try to submit one claimed video item; return a retry delay in seconds."""
+    handler = _ensure_generation_handler()
+    local_task_id = str(queue_item["task_id"])
+    try:
+        normalized = _deserialize_normalized_generation_request(
+            str(queue_item.get("request_payload") or "")
+        )
+    except Exception as exc:
+        error_message = f"排队任务数据损坏，无法继续提交：{exc}"
+        await handler.db.update_async_task(
+            local_task_id,
+            status="failed",
+            last_error=error_message,
+            request_payload="{}",
+        )
+        debug_logger.log_error(f"[ASYNC QUEUE] task={local_task_id}: {error_message}")
+        return 0.0
+
+    upstream_task_id = str(queue_item.get("upstream_task_id") or "").strip()
+    if upstream_task_id:
+        attached = await _attach_queued_video_task(
+            queue_item=queue_item,
+            normalized=normalized,
+            upstream_task_id=upstream_task_id,
+        )
+        if attached:
+            return 0.0
+        await handler.db.update_async_task(
+            local_task_id,
+            status="queued",
+            last_error="已提交的上游任务尚未写入本地任务表",
+        )
+        return ASYNC_TASK_QUEUE_RETRY_SECONDS
+
+    model_config = MODEL_CONFIG.get(normalized.model)
+    if not model_config or model_config.get("type") != "video":
+        await handler.db.update_async_task(
+            local_task_id,
+            status="failed",
+            last_error=f"排队任务使用了已失效的视频模型：{normalized.model}",
+            request_payload="{}",
+        )
+        return 0.0
+
+    required_credits = model_config.get("credit_cost")
     token = await handler.load_balancer.select_token(
         for_video_generation=True,
         model=normalized.model,
         reserve=False,
         enforce_concurrency_filter=False,
         track_pending=False,
+        minimum_credits=required_credits,
+        advance_polling_state=False,
     )
-    if token is None:
-        internal_message = None
+    if token is None or token.id is None:
+        unavailable_reason = "当前没有可执行该视频任务的账号"
         if hasattr(handler.load_balancer, "get_unavailable_reason"):
-            internal_message = await handler.load_balancer.get_unavailable_reason(
+            reason = await handler.load_balancer.get_unavailable_reason(
                 for_video_generation=True,
                 model=normalized.model,
+                minimum_credits=required_credits,
             )
-        if internal_message:
+            if reason:
+                unavailable_reason = str(reason)
+        if unavailable_reason != queue_item.get("last_error"):
             debug_logger.log_warning(
-                f"[VIDEO TASK] Internal availability reason: {internal_message}"
+                f"[ASYNC QUEUE] task={local_task_id} remains queued: "
+                f"{unavailable_reason}"
             )
-        return {
-            "error": {
-                "message": media_service_unavailable_message("video"),
-                "type": "server_error",
-                "code": "generation_failed",
-                "status_code": 503,
-            }
-        }
-    if token.id is None:
-        return {
-            "error": {
-                "message": "当前账号状态异常，暂无法生成视频。",
-                "type": "server_error",
-                "code": "generation_failed",
-                "status_code": 503,
-            }
-        }
-
-    await handler.db.create_task(
-        Task(
-            task_id=local_task_id,
-            token_id=token.id,
-            model=model_name,
-            prompt=normalized.prompt,
-            status="processing",
-            progress=1,
-            watermark=normalized.watermark,
+        await handler.db.update_async_task(
+            local_task_id,
+            status="queued",
+            last_error=unavailable_reason,
         )
+        return ASYNC_TASK_QUEUE_RETRY_SECONDS
+
+    result = await _collect_async_video_task_result(
+        normalized,
+        queue_item.get("base_url_override"),
     )
-    _spawn_route_background_task(
-        _run_deferred_async_video_task(
-            local_task_id=local_task_id,
-            normalized=normalized,
-            base_url_override=base_url_override,
-        )
-    )
-
-    return {
-        "id": local_task_id,
-        "object": "video",
-        "status": "processing",
-        "created_at": int(time.time()),
-        "model": model_name,
-        "progress": 1,
-    }
-
-
-async def _run_deferred_async_video_task(
-    *,
-    local_task_id: str,
-    normalized: NormalizedGenerationRequest,
-    base_url_override: Optional[str],
-) -> None:
-    handler = _ensure_generation_handler()
-    try:
-        result = await _collect_async_video_task_result(normalized, base_url_override)
-        if "error" in result:
-            await handler.db.update_task(
-                local_task_id,
-                status="failed",
-                progress=100,
-                error_message=_extract_error_message(result),
-                completed_at=time.time(),
+    if "error" in result:
+        status_code = _get_error_status_code(result)
+        error_message = _extract_error_message(result)
+        if status_code in {429, 503}:
+            attempt = int(queue_item.get("attempt_count") or 0) + 1
+            retry_delay = min(
+                30.0,
+                ASYNC_TASK_QUEUE_RETRY_SECONDS * (2 ** min(attempt - 1, 4)),
             )
-            return
-
-        upstream_task_id = _extract_upstream_video_task_id(result)
-        if not upstream_task_id:
-            await handler.db.update_task(
+            await handler.db.update_async_task(
                 local_task_id,
-                status="failed",
-                progress=100,
-                error_message="视频任务提交失败：生成服务未返回 task_id",
-                completed_at=time.time(),
+                status="queued",
+                last_error=error_message,
+                increment_attempt=True,
             )
-            return
+            debug_logger.log_warning(
+                f"[ASYNC QUEUE] transient submit failure task={local_task_id} "
+                f"status={status_code}; retry in {retry_delay:.0f}s"
+            )
+            return retry_delay
 
-        await _mirror_upstream_video_task(
-            local_task_id=local_task_id,
-            upstream_task_id=upstream_task_id,
-        )
-    except Exception as exc:
-        debug_logger.log_error(
-            f"[VIDEO DEFERRED] background submit failed task={local_task_id}: {exc}"
-        )
-        await handler.db.update_task(
+        await handler.db.update_async_task(
             local_task_id,
             status="failed",
-            progress=100,
-            error_message=sanitize_public_error_message(str(exc) or exc.__class__.__name__),
-            completed_at=time.time(),
+            last_error=error_message,
+            request_payload="{}",
+            increment_attempt=True,
         )
+        return 0.0
+
+    upstream_task_id = _extract_upstream_video_task_id(result)
+    if not upstream_task_id:
+        await handler.db.update_async_task(
+            local_task_id,
+            status="failed",
+            last_error="视频任务提交失败：生成服务未返回 task_id",
+            request_payload="{}",
+            increment_attempt=True,
+        )
+        return 0.0
+
+    # Persist the upstream id before creating the wrapper, so a restart does not
+    # submit the same queued request twice.
+    await handler.db.update_async_task(
+        local_task_id,
+        upstream_task_id=upstream_task_id,
+        last_error=None,
+        increment_attempt=True,
+    )
+    queue_item["upstream_task_id"] = upstream_task_id
+    attached = await _attach_queued_video_task(
+        queue_item=queue_item,
+        normalized=normalized,
+        upstream_task_id=upstream_task_id,
+    )
+    if not attached:
+        await handler.db.update_async_task(
+            local_task_id,
+            status="queued",
+            last_error="上游任务已提交，等待本地任务记录同步",
+        )
+        return ASYNC_TASK_QUEUE_RETRY_SECONDS
+    return 0.0
+
+
+async def _attach_queued_video_task(
+    *,
+    queue_item: Dict[str, Any],
+    normalized: NormalizedGenerationRequest,
+    upstream_task_id: str,
+) -> bool:
+    """Attach a submitted upstream task to the stable public queue task id."""
+    handler = _ensure_generation_handler()
+    upstream_task = await handler.db.get_task(upstream_task_id)
+    if upstream_task is None:
+        return False
+
+    local_task_id = str(queue_item["task_id"])
+    local_task = await handler.db.get_task(local_task_id)
+    operations = upstream_task.operations or [
+        {"operation": {"name": upstream_task_id}}
+    ]
+    if local_task is None:
+        await handler.db.create_task(
+            Task(
+                task_id=local_task_id,
+                token_id=upstream_task.token_id,
+                model=upstream_task.model,
+                prompt=normalized.prompt,
+                status=upstream_task.status,
+                progress=int(upstream_task.progress or 1),
+                scene_id=upstream_task.scene_id,
+                project_id=upstream_task.project_id,
+                operations=operations,
+                watermark=upstream_task.watermark,
+            )
+        )
+
+    update_fields: Dict[str, Any] = {
+        "token_id": upstream_task.token_id,
+        "model": upstream_task.model,
+        "status": upstream_task.status,
+        "progress": 100 if upstream_task.status in {"completed", "failed"} else int(upstream_task.progress or 1),
+        "scene_id": upstream_task.scene_id,
+        "project_id": upstream_task.project_id,
+        "operations": operations,
+        "watermark": upstream_task.watermark,
+    }
+    if upstream_task.result_urls:
+        update_fields["result_urls"] = upstream_task.result_urls
+    if upstream_task.error_message:
+        update_fields["error_message"] = upstream_task.error_message
+    if upstream_task.status in {"completed", "failed"}:
+        update_fields["completed_at"] = time.time()
+    await handler.db.update_task(local_task_id, **update_fields)
+    await handler.db.delete_async_task(local_task_id)
+
+    if upstream_task.status not in {"completed", "failed"}:
+        _spawn_route_background_task(
+            _mirror_upstream_video_task(
+                local_task_id=local_task_id,
+                upstream_task_id=upstream_task_id,
+            )
+        )
+    debug_logger.log_info(
+        f"[ASYNC QUEUE] submitted task={local_task_id} upstream={upstream_task_id}"
+    )
+    return True
 
 
 async def _mirror_upstream_video_task(
@@ -2159,7 +2465,12 @@ async def get_video_task(
     api_key: str = Depends(verify_api_key_flexible),
 ):
     handler = _ensure_generation_handler()
-    payload = await handler.get_video_task_payload(unquote(task_id))
+    decoded_task_id = unquote(task_id)
+    payload = await handler.get_video_task_payload(decoded_task_id)
+    if payload is None:
+        queue_item = await handler.db.get_async_task(decoded_task_id)
+        if queue_item is not None:
+            payload = await _build_queued_video_task_payload(queue_item)
     if payload is None:
         raise HTTPException(status_code=404, detail=f"Video task not found: {task_id}")
 

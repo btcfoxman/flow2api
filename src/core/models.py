@@ -144,6 +144,7 @@ class GenerationConfig(BaseModel):
     image_timeout: int = 300  # seconds
     video_timeout: int = 1500  # seconds
     max_retries: int = 3  # 请求最大重试次数
+    async_task_queue_capacity: int = 50  # 异步任务排队池容量
 
 
 class CallLogicConfig(BaseModel):

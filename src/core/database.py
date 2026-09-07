@@ -154,23 +154,43 @@ class Database:
             image_timeout = 300
             video_timeout = 1500
             max_retries = 3
+            async_task_queue_capacity = 50
 
             if config_dict:
                 generation_config = config_dict.get("generation", {})
                 flow_config = config_dict.get("flow", {})
                 image_timeout = generation_config.get("image_timeout", 300)
                 video_timeout = generation_config.get("video_timeout", 1500)
+                async_task_queue_capacity = generation_config.get(
+                    "async_task_queue_capacity",
+                    50,
+                )
                 max_retries = flow_config.get("max_retries", 3)
 
             try:
                 max_retries = max(1, int(max_retries))
             except Exception:
                 max_retries = 3
+            try:
+                async_task_queue_capacity = max(
+                    1,
+                    min(1000, int(async_task_queue_capacity)),
+                )
+            except Exception:
+                async_task_queue_capacity = 50
 
             await db.execute("""
-                INSERT INTO generation_config (id, image_timeout, video_timeout, max_retries)
-                VALUES (1, ?, ?, ?)
-            """, (image_timeout, video_timeout, max_retries))
+                INSERT INTO generation_config (
+                    id, image_timeout, video_timeout, max_retries,
+                    async_task_queue_capacity
+                )
+                VALUES (1, ?, ?, ?, ?)
+            """, (
+                image_timeout,
+                video_timeout,
+                max_retries,
+                async_task_queue_capacity,
+            ))
 
         # Ensure call_logic_config has a row
         cursor = await db.execute("SELECT COUNT(*) FROM call_logic_config")
@@ -546,6 +566,30 @@ class Database:
                     )
                 """)
 
+            if not await self._table_exists(db, "async_task_queue"):
+                print("  Creating missing table: async_task_queue")
+                await db.execute("""
+                    CREATE TABLE async_task_queue (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        task_id TEXT UNIQUE NOT NULL,
+                        task_type TEXT NOT NULL DEFAULT 'video',
+                        model TEXT NOT NULL,
+                        prompt TEXT NOT NULL,
+                        request_payload TEXT NOT NULL,
+                        base_url_override TEXT,
+                        status TEXT NOT NULL DEFAULT 'queued',
+                        upstream_task_id TEXT,
+                        attempt_count INTEGER NOT NULL DEFAULT 0,
+                        last_error TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                await db.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_async_task_queue_fifo
+                    ON async_task_queue (status, id)
+                """)
+
             # ========== Step 2: Add missing columns to existing tables ==========
             # Check and add missing columns to tokens table
             if await self._table_exists(db, "tokens"):
@@ -625,6 +669,7 @@ class Database:
             if await self._table_exists(db, "generation_config"):
                 generation_columns_to_add = [
                     ("max_retries", "INTEGER DEFAULT 3"),
+                    ("async_task_queue_capacity", "INTEGER DEFAULT 50"),
                 ]
 
                 for col_name, col_type in generation_columns_to_add:
@@ -844,6 +889,29 @@ class Database:
                 )
             """)
 
+            # Persistent queue for async submissions that do not have an account yet.
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS async_task_queue (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id TEXT UNIQUE NOT NULL,
+                    task_type TEXT NOT NULL DEFAULT 'video',
+                    model TEXT NOT NULL,
+                    prompt TEXT NOT NULL,
+                    request_payload TEXT NOT NULL,
+                    base_url_override TEXT,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    upstream_task_id TEXT,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            await db.execute("""
+                CREATE INDEX IF NOT EXISTS idx_async_task_queue_fifo
+                ON async_task_queue (status, id)
+            """)
+
             # Request logs table
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS request_logs (
@@ -903,6 +971,7 @@ class Database:
                     image_timeout INTEGER DEFAULT 300,
                     video_timeout INTEGER DEFAULT 1500,
                     max_retries INTEGER DEFAULT 3,
+                    async_task_queue_capacity INTEGER DEFAULT 50,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
@@ -1320,6 +1389,208 @@ class Database:
             await db.commit()
 
     # Task operations
+    async def enqueue_async_task(
+        self,
+        *,
+        task_id: str,
+        task_type: str,
+        model: str,
+        prompt: str,
+        request_payload: str,
+        base_url_override: Optional[str],
+        capacity: int,
+    ) -> Optional[Dict[str, Any]]:
+        """Atomically append an item to the bounded persistent FIFO queue."""
+        try:
+            normalized_capacity = max(1, min(1000, int(capacity)))
+        except (TypeError, ValueError):
+            normalized_capacity = 50
+
+        async with self._connect(write=True) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN IMMEDIATE")
+            cursor = await db.execute(
+                """
+                SELECT COUNT(*)
+                FROM async_task_queue
+                WHERE status IN ('queued', 'submitting')
+                """
+            )
+            active_count = int((await cursor.fetchone())[0] or 0)
+            if active_count >= normalized_capacity:
+                await db.rollback()
+                return None
+
+            cursor = await db.execute(
+                """
+                INSERT INTO async_task_queue (
+                    task_id, task_type, model, prompt, request_payload,
+                    base_url_override, status
+                )
+                VALUES (?, ?, ?, ?, ?, ?, 'queued')
+                """,
+                (
+                    task_id,
+                    task_type,
+                    model,
+                    prompt,
+                    request_payload,
+                    base_url_override,
+                ),
+            )
+            queue_id = int(cursor.lastrowid)
+            position = active_count + 1
+            await db.commit()
+            return {
+                "id": queue_id,
+                "task_id": task_id,
+                "position": position,
+                "capacity": normalized_capacity,
+            }
+
+    async def claim_next_async_task(self, task_type: str = "video") -> Optional[Dict[str, Any]]:
+        """Claim the global queue head without allowing later items to overtake it."""
+        async with self._connect(write=True) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN IMMEDIATE")
+            cursor = await db.execute(
+                """
+                SELECT *, CAST(strftime('%s', created_at) AS INTEGER) AS created_at_epoch
+                FROM async_task_queue
+                WHERE task_type = ? AND status IN ('queued', 'submitting')
+                ORDER BY id ASC
+                LIMIT 1
+                """,
+                (task_type,),
+            )
+            row = await cursor.fetchone()
+            if row is None or row["status"] != "queued":
+                await db.rollback()
+                return None
+
+            cursor = await db.execute(
+                """
+                UPDATE async_task_queue
+                SET status = 'submitting', updated_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND status = 'queued'
+                """,
+                (row["id"],),
+            )
+            if cursor.rowcount != 1:
+                await db.rollback()
+                return None
+            await db.commit()
+            item = dict(row)
+            item["status"] = "submitting"
+            return item
+
+    async def get_async_task(self, task_id: str) -> Optional[Dict[str, Any]]:
+        """Return one queued/submitting/failed async submission."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT *, CAST(strftime('%s', created_at) AS INTEGER) AS created_at_epoch
+                FROM async_task_queue
+                WHERE task_id = ?
+                """,
+                (task_id,),
+            )
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    async def get_async_task_position(self, task_id: str) -> Optional[int]:
+        """Return the one-based position among active FIFO entries."""
+        async with self._connect() as db:
+            cursor = await db.execute(
+                """
+                SELECT COUNT(*)
+                FROM async_task_queue
+                WHERE status IN ('queued', 'submitting')
+                  AND id <= (
+                      SELECT id FROM async_task_queue WHERE task_id = ?
+                  )
+                """,
+                (task_id,),
+            )
+            count = int((await cursor.fetchone())[0] or 0)
+            return count or None
+
+    async def update_async_task(self, task_id: str, **kwargs) -> bool:
+        """Update queue state using a small explicit column allowlist."""
+        allowed_columns = {
+            "status",
+            "upstream_task_id",
+            "last_error",
+            "request_payload",
+        }
+        updates: List[str] = []
+        params: List[Any] = []
+        for key, value in kwargs.items():
+            if key == "increment_attempt" and value:
+                updates.append("attempt_count = attempt_count + 1")
+            elif key in allowed_columns:
+                updates.append(f"{key} = ?")
+                params.append(value)
+        if not updates:
+            return False
+
+        updates.append("updated_at = CURRENT_TIMESTAMP")
+        params.append(task_id)
+        async with self._connect(write=True) as db:
+            cursor = await db.execute(
+                f"UPDATE async_task_queue SET {', '.join(updates)} WHERE task_id = ?",
+                params,
+            )
+            await db.commit()
+            return cursor.rowcount == 1
+
+    async def delete_async_task(self, task_id: str) -> bool:
+        """Remove an item after it has been attached to the normal task table."""
+        async with self._connect(write=True) as db:
+            cursor = await db.execute(
+                "DELETE FROM async_task_queue WHERE task_id = ?",
+                (task_id,),
+            )
+            await db.commit()
+            return cursor.rowcount == 1
+
+    async def reset_submitting_async_tasks(self) -> int:
+        """Recover queue claims interrupted by the previous process."""
+        async with self._connect(write=True) as db:
+            cursor = await db.execute(
+                """
+                UPDATE async_task_queue
+                SET status = 'queued', updated_at = CURRENT_TIMESTAMP
+                WHERE status = 'submitting'
+                """
+            )
+            await db.commit()
+            return cursor.rowcount or 0
+
+    async def get_async_task_queue_stats(self) -> Dict[str, Any]:
+        """Return lightweight queue metrics for the management API."""
+        async with self._connect() as db:
+            cursor = await db.execute(
+                "SELECT status, COUNT(*) FROM async_task_queue GROUP BY status"
+            )
+            counts = {str(row[0]): int(row[1]) for row in await cursor.fetchall()}
+            cursor = await db.execute(
+                """
+                SELECT CAST(strftime('%s', MIN(created_at)) AS INTEGER)
+                FROM async_task_queue
+                WHERE status IN ('queued', 'submitting')
+                """
+            )
+            oldest_created_at = (await cursor.fetchone())[0]
+        return {
+            "queued": counts.get("queued", 0),
+            "submitting": counts.get("submitting", 0),
+            "failed": counts.get("failed", 0),
+            "active": counts.get("queued", 0) + counts.get("submitting", 0),
+            "oldest_created_at": oldest_created_at,
+        }
+
     async def create_task(self, task: Task) -> int:
         """Create a new task"""
         async with self._connect(write=True) as db:
@@ -1891,6 +2162,7 @@ class Database:
         image_timeout: Optional[int] = None,
         video_timeout: Optional[int] = None,
         max_retries: Optional[int] = None,
+        async_task_queue_capacity: Optional[int] = None,
     ):
         """Update generation configuration"""
         async with self._connect(write=True) as db:
@@ -1917,18 +2189,43 @@ class Database:
                 )
             except Exception:
                 normalized_max_retries = 3
+            try:
+                normalized_async_task_queue_capacity = (
+                    max(1, min(1000, int(async_task_queue_capacity)))
+                    if async_task_queue_capacity is not None
+                    else max(
+                        1,
+                        min(1000, int(current.get("async_task_queue_capacity", 50))),
+                    )
+                )
+            except Exception:
+                normalized_async_task_queue_capacity = 50
 
             if row:
                 await db.execute("""
                     UPDATE generation_config
-                    SET image_timeout = ?, video_timeout = ?, max_retries = ?, updated_at = CURRENT_TIMESTAMP
+                    SET image_timeout = ?, video_timeout = ?, max_retries = ?,
+                        async_task_queue_capacity = ?, updated_at = CURRENT_TIMESTAMP
                     WHERE id = 1
-                """, (normalized_image_timeout, normalized_video_timeout, normalized_max_retries))
+                """, (
+                    normalized_image_timeout,
+                    normalized_video_timeout,
+                    normalized_max_retries,
+                    normalized_async_task_queue_capacity,
+                ))
             else:
                 await db.execute("""
-                    INSERT INTO generation_config (id, image_timeout, video_timeout, max_retries)
-                    VALUES (1, ?, ?, ?)
-                """, (normalized_image_timeout, normalized_video_timeout, normalized_max_retries))
+                    INSERT INTO generation_config (
+                        id, image_timeout, video_timeout, max_retries,
+                        async_task_queue_capacity
+                    )
+                    VALUES (1, ?, ?, ?, ?)
+                """, (
+                    normalized_image_timeout,
+                    normalized_video_timeout,
+                    normalized_max_retries,
+                    normalized_async_task_queue_capacity,
+                ))
             await db.commit()
 
     async def get_call_logic_config(self) -> CallLogicConfig:
@@ -2189,6 +2486,9 @@ class Database:
             config.set_image_timeout(generation_config.image_timeout)
             config.set_video_timeout(generation_config.video_timeout)
             config.set_flow_max_retries(generation_config.max_retries)
+            config.set_async_task_queue_capacity(
+                generation_config.async_task_queue_capacity
+            )
 
         # Reload call logic config
         call_logic_config = await self.get_call_logic_config()

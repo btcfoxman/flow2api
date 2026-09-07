@@ -629,6 +629,7 @@ class GenerationConfigRequest(BaseModel):
     image_timeout: Optional[int] = None
     video_timeout: Optional[int] = None
     max_retries: Optional[int] = None
+    async_task_queue_capacity: Optional[int] = None
 
 
 class CallLogicConfigRequest(BaseModel):
@@ -1294,14 +1295,18 @@ async def test_proxy_connectivity(
 @router.get("/api/config/generation")
 async def get_generation_config(token: str = Depends(verify_admin_token)):
     """Get generation timeout configuration"""
-    config = await db.get_generation_config()
+    generation_config = await db.get_generation_config()
+    queue_stats = await db.get_async_task_queue_stats()
+    queue_stats["capacity"] = generation_config.async_task_queue_capacity
     return {
         "success": True,
         "config": {
-            "image_timeout": config.image_timeout,
-            "video_timeout": config.video_timeout,
-            "max_retries": config.max_retries,
-        }
+            "image_timeout": generation_config.image_timeout,
+            "video_timeout": generation_config.video_timeout,
+            "max_retries": generation_config.max_retries,
+            "async_task_queue_capacity": generation_config.async_task_queue_capacity,
+        },
+        "async_task_queue": queue_stats,
     }
 
 
@@ -1315,6 +1320,7 @@ async def update_generation_config(
         image_timeout=request.image_timeout,
         video_timeout=request.video_timeout,
         max_retries=request.max_retries,
+        async_task_queue_capacity=request.async_task_queue_capacity,
     )
 
     # 🔥 Hot reload: sync database config to memory
@@ -1582,6 +1588,7 @@ async def update_generation_timeout(
         image_timeout=request.image_timeout,
         video_timeout=request.video_timeout,
         max_retries=request.max_retries,
+        async_task_queue_capacity=request.async_task_queue_capacity,
     )
 
     # 🔥 Hot reload: sync database config to memory

@@ -214,7 +214,13 @@ class LoadBalancer:
 
         return True
 
-    async def _select_round_robin(self, tokens: list[dict], scenario: str) -> Optional[dict]:
+    async def _select_round_robin(
+        self,
+        tokens: list[dict],
+        scenario: str,
+        *,
+        advance_state: bool = True,
+    ) -> Optional[dict]:
         """Select candidate in round-robin order for the given scenario."""
         if not tokens:
             return None
@@ -229,7 +235,8 @@ class LoadBalancer:
                         start_idx = (idx + 1) % len(tokens_sorted)
                         break
             selected = tokens_sorted[start_idx]
-            self._round_robin_state[scenario] = selected["token"].id
+            if advance_state:
+                self._round_robin_state[scenario] = selected["token"].id
         return selected
 
     async def _check_extension_route(self, token: Token) -> tuple[bool, str]:
@@ -262,6 +269,7 @@ class LoadBalancer:
         track_pending: bool = False,
         exclude_token_ids: Optional[Collection[int]] = None,
         minimum_credits: Optional[int] = None,
+        advance_polling_state: bool = True,
     ) -> Optional[Token]:
         """
         Select a token using load-aware balancing
@@ -284,6 +292,9 @@ class LoadBalancer:
             minimum_credits:
                 Exact credits required by the resolved model. When omitted, use the
                 administrator-configured fallback threshold.
+            advance_polling_state:
+                Whether a successful polling-mode selection advances its cursor.
+                Availability probes should set this to False.
 
         Returns:
             Selected token or None if no available tokens
@@ -433,7 +444,11 @@ class LoadBalancer:
                 scenario = "video"
 
             ordered_candidates = []
-            first_candidate = await self._select_round_robin(available_tokens, scenario)
+            first_candidate = await self._select_round_robin(
+                available_tokens,
+                scenario,
+                advance_state=advance_polling_state,
+            )
             if first_candidate is not None:
                 ordered_candidates.append(first_candidate)
                 ordered_candidates.extend(

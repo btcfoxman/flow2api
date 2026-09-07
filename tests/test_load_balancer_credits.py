@@ -44,11 +44,13 @@ class LoadBalancerCreditsTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.original_minimum_credits = config.minimum_generation_credits
         self.original_captcha_method = config.captcha_method
+        self.original_call_logic_mode = config.call_logic_mode
         config.set_minimum_generation_credits(DEFAULT_MIN_GENERATION_CREDITS)
 
     async def asyncTearDown(self):
         config.set_minimum_generation_credits(self.original_minimum_credits)
         config.set_captcha_method(self.original_captcha_method)
+        config.set_call_logic_mode(self.original_call_logic_mode)
 
     async def test_default_minimum_generation_credits_is_fifteen(self):
         self.assertEqual(DEFAULT_MIN_GENERATION_CREDITS, 15)
@@ -189,6 +191,22 @@ class LoadBalancerCreditsTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual({first.id, second.id}, {1, 2})
+
+    async def test_availability_probe_does_not_advance_polling_cursor(self):
+        config.set_call_logic_mode("polling")
+        token_manager = FakeTokenManager([make_token(1, 30), make_token(2, 30)])
+        balancer = LoadBalancer(token_manager)
+
+        probe = await balancer.select_token(
+            for_video_generation=True,
+            advance_polling_state=False,
+        )
+        first_submission = await balancer.select_token(for_video_generation=True)
+        second_submission = await balancer.select_token(for_video_generation=True)
+
+        self.assertEqual(probe.id, 1)
+        self.assertEqual(first_submission.id, 1)
+        self.assertEqual(second_submission.id, 2)
 
     async def test_native_video_pending_is_serialized_by_proxy_egress(self):
         config.set_captcha_method("native_cdp")

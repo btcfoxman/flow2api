@@ -179,6 +179,8 @@ async def lifespan(app: FastAPI):
 
     auto_unban_task_handle = asyncio.create_task(auto_unban_task())
     credits_refresh_started = token_manager.start_periodic_credits_refresh()
+    # Start persisted submissions only after all account/browser services are ready.
+    await routes.start_async_task_queue()
 
     print(f"✓ Database initialized")
     print(f"✓ Total tokens: {len(tokens)}")
@@ -203,6 +205,7 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     print("Flow2API Shutting down...")
+    await routes.stop_async_task_queue()
     # Stop file cache cleanup task
     await generation_handler.file_cache.stop_cleanup_task()
     # Stop auto-unban task
@@ -218,6 +221,7 @@ async def lifespan(app: FastAPI):
         await browser_service.close()
         print("✓ Browser captcha service closed")
     print("✓ File cache cleanup task stopped")
+    print("✓ Async task queue stopped")
     print("✓ 429 auto-unban task stopped")
     print("✓ Periodic credits refresh task stopped")
 

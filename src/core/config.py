@@ -372,6 +372,28 @@ class Config:
         self._config["generation"]["video_timeout"] = timeout
 
     @property
+    def async_task_queue_capacity(self) -> int:
+        """Maximum number of async submissions waiting for an account."""
+        value = self._config.get("generation", {}).get(
+            "async_task_queue_capacity",
+            50,
+        )
+        try:
+            return max(1, min(1000, int(value)))
+        except (TypeError, ValueError):
+            return 50
+
+    def set_async_task_queue_capacity(self, capacity: int):
+        """Hot-reload the bounded async task queue capacity."""
+        if "generation" not in self._config:
+            self._config["generation"] = {}
+        try:
+            normalized = max(1, min(1000, int(capacity)))
+        except (TypeError, ValueError):
+            normalized = 50
+        self._config["generation"]["async_task_queue_capacity"] = normalized
+
+    @property
     def polling_mode_enabled(self) -> bool:
         """Get polling mode enabled status."""
         return self.call_logic_mode == "polling"
