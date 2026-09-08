@@ -1758,24 +1758,35 @@ class GenerationHandler:
                 return
 
             is_video = (generation_type == "video")
-            await self.token_manager.record_usage(token.id, is_video=is_video)
+            is_async_video_task = is_video and bool(response_state.get("async_task_id"))
+            if not is_async_video_task:
+                await self.token_manager.record_usage(token.id, is_video=is_video)
 
-            # 重置错误计数 (请求成功时清空连续错误计数)
-            await self.token_manager.record_success(token.id)
+                # 重置错误计数 (请求成功时清空连续错误计数)
+                await self.token_manager.record_success(token.id)
+            else:
+                debug_logger.log_info(
+                    "[GENERATION] Async video accepted; defer success accounting "
+                    f"until task completion: {response_state.get('async_task_id')}"
+                )
 
-            debug_logger.log_info(f"[GENERATION] ✅ 生成成功完成")
-
-            # 7. 记录成功日志
             duration = time.time() - start_time
-            record_generation_result(generation_type, "success", duration)
-            perf_trace["status"] = "success"
+            if is_async_video_task:
+                debug_logger.log_info("[GENERATION] 异步视频任务已提交，等待最终结果")
+                perf_trace["status"] = "submitted"
+            else:
+                debug_logger.log_info(f"[GENERATION] ✅ 生成成功完成")
+                record_generation_result(generation_type, "success", duration)
+                perf_trace["status"] = "success"
+
+            # 7. 记录成功或已提交日志
             perf_trace["total_ms"] = int(duration * 1000)
             # 日志中保留更完整的 prompt，避免管理页只看到过短内容
             prompt_for_log = prompt if len(prompt) <= 2000 else f"{prompt[:2000]}...(truncated)"
 
             # 构建响应数据，包含生成的URL
             response_data = {
-                "status": "success",
+                "status": "processing" if is_async_video_task else "success",
                 "model": model,
                 "prompt": prompt_for_log,
                 "performance": perf_trace
@@ -1800,7 +1811,6 @@ class GenerationHandler:
                 f"video_slot_wait={video_perf.get('slot_wait_ms', 0)}ms"
             )
 
-            is_async_video_task = bool(response_state.get("async_task_id"))
             await self._log_request(
                 token.id,
                 request_operation,
@@ -2739,6 +2749,7 @@ class GenerationHandler:
                         request_log_state=async_result_log_state,
                         extend_source_media_id=video_media_id if video_type == "extend" else None,
                         watermark=bool(watermark),
+                        record_usage_on_success=True,
                         release_pending_on_finish=transfer_pending_reservation,
                         pending_credit_cost=model_config.get("credit_cost"),
                     )
@@ -2839,6 +2850,9 @@ class GenerationHandler:
         pending_credit_cost: Optional[int] = None,
     ) -> None:
         generation_result = self._create_generation_result()
+        terminal_started_at = float(
+            (request_log_state or {}).get("started_at") or time.time()
+        )
         try:
             async for _ in self._poll_video_result(
                 token,
@@ -2856,9 +2870,20 @@ class GenerationHandler:
             if generation_result.get("success") and record_usage_on_success:
                 await self.token_manager.record_usage(token.id, is_video=True)
                 await self.token_manager.record_success(token.id)
-            if not generation_result.get("success"):
+            if generation_result.get("success"):
+                record_generation_result(
+                    "video",
+                    "success",
+                    max(0.0, time.time() - terminal_started_at),
+                )
+            else:
                 error_msg = generation_result.get("error_message") or "video task failed"
                 status_code = int(generation_result.get("status_code") or 500)
+                record_generation_result(
+                    "video",
+                    "failed",
+                    max(0.0, time.time() - terminal_started_at),
+                )
                 if self._should_record_token_error(error_msg, status_code):
                     await self.token_manager.record_error(token.id)
                 else:
@@ -2867,6 +2892,11 @@ class GenerationHandler:
                     )
         except Exception as exc:
             error_msg = self._normalize_error_message(exc)
+            record_generation_result(
+                "video",
+                "failed",
+                max(0.0, time.time() - terminal_started_at),
+            )
             debug_logger.log_error(f"[VIDEO ASYNC] background task failed: {error_msg}")
             await self._fail_video_task(operations, error_msg)
             await self._finalize_async_video_result_log(

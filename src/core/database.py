@@ -580,6 +580,7 @@ class Database:
                         status TEXT NOT NULL DEFAULT 'queued',
                         upstream_task_id TEXT,
                         attempt_count INTEGER NOT NULL DEFAULT 0,
+                        next_attempt_at REAL NOT NULL DEFAULT 0,
                         last_error TEXT,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -588,6 +589,17 @@ class Database:
                 await db.execute("""
                     CREATE INDEX IF NOT EXISTS idx_async_task_queue_fifo
                     ON async_task_queue (status, id)
+                """)
+
+            if not await self._table_exists(db, "generation_outcomes"):
+                print("  Creating missing table: generation_outcomes")
+                await db.execute("""
+                    CREATE TABLE generation_outcomes (
+                        request_log_id INTEGER PRIMARY KEY,
+                        generation_type TEXT NOT NULL,
+                        outcome TEXT NOT NULL,
+                        completed_at REAL NOT NULL
+                    )
                 """)
 
             # ========== Step 2: Add missing columns to existing tables ==========
@@ -631,6 +643,23 @@ class Database:
                             print(f"  Added column '{col_name}' to tasks table")
                         except Exception as e:
                             print(f"  Failed to add column '{col_name}' to tasks table: {e}")
+
+            if await self._table_exists(db, "async_task_queue"):
+                queue_columns_to_add = [
+                    ("next_attempt_at", "REAL NOT NULL DEFAULT 0"),
+                ]
+                for col_name, col_type in queue_columns_to_add:
+                    if not await self._column_exists(db, "async_task_queue", col_name):
+                        try:
+                            await db.execute(
+                                f"ALTER TABLE async_task_queue ADD COLUMN {col_name} {col_type}"
+                            )
+                            print(f"  Added column '{col_name}' to async_task_queue table")
+                        except Exception as e:
+                            print(
+                                f"  Failed to add column '{col_name}' "
+                                f"to async_task_queue table: {e}"
+                            )
 
             # Check and add missing columns to admin_config table
             if await self._table_exists(db, "admin_config"):
@@ -902,6 +931,7 @@ class Database:
                     status TEXT NOT NULL DEFAULT 'queued',
                     upstream_task_id TEXT,
                     attempt_count INTEGER NOT NULL DEFAULT 0,
+                    next_attempt_at REAL NOT NULL DEFAULT 0,
                     last_error TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -927,6 +957,17 @@ class Database:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (token_id) REFERENCES tokens(id)
+                )
+            """)
+
+            # Durable terminal generation outcomes. These remain available when
+            # verbose request logs are cleared from the management page.
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS generation_outcomes (
+                    request_log_id INTEGER PRIMARY KEY,
+                    generation_type TEXT NOT NULL,
+                    outcome TEXT NOT NULL,
+                    completed_at REAL NOT NULL
                 )
             """)
 
@@ -1097,6 +1138,15 @@ class Database:
             # Request logs query indexes (列表按 created_at 排序 / token 过滤)
             await db.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_created_at ON request_logs(created_at DESC)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_token_id_created_at ON request_logs(token_id, created_at DESC)")
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_request_logs_generation_outcome "
+                "ON request_logs(operation, status_text, updated_at)"
+            )
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_generation_outcomes_completed_at "
+                "ON generation_outcomes(completed_at)"
+            )
+            await self._backfill_generation_outcomes(db)
 
             # Token stats lookup index
             await db.execute("CREATE INDEX IF NOT EXISTS idx_token_stats_token_id ON token_stats(token_id)")
@@ -1167,6 +1217,103 @@ class Database:
         except Exception as e:
             print(f"?? request_logs?????: {e}")
             # Continue even if migration fails
+
+    async def _backfill_generation_outcomes(self, db) -> None:
+        """Seed the durable outcome ledger from existing terminal request logs."""
+        await db.execute(
+            """
+            INSERT OR IGNORE INTO generation_outcomes (
+                request_log_id, generation_type, outcome, completed_at
+            )
+            SELECT
+                id,
+                CASE
+                    WHEN operation = 'generate_image' THEN 'image'
+                    ELSE 'video'
+                END,
+                CASE
+                    WHEN LOWER(TRIM(COALESCE(status_text, ''))) = 'completed'
+                        THEN 'completed'
+                    ELSE 'failed'
+                END,
+                COALESCE(
+                    CASE
+                        WHEN typeof(COALESCE(updated_at, created_at)) IN ('integer', 'real')
+                            THEN CAST(COALESCE(updated_at, created_at) AS REAL)
+                        ELSE CAST(strftime('%s', COALESCE(updated_at, created_at)) AS REAL)
+                    END,
+                    CAST(strftime('%s', 'now') AS REAL)
+                )
+            FROM request_logs
+            WHERE operation IN (
+                'generate_image',
+                'generate_video',
+                'extend_video',
+                'generate_video_async_result'
+            )
+              AND (
+                LOWER(TRIM(COALESCE(status_text, ''))) = 'failed'
+                OR (
+                    LOWER(TRIM(COALESCE(status_text, ''))) = 'completed'
+                    AND COALESCE(status_code, 0) BETWEEN 200 AND 299
+                    AND COALESCE(progress, 0) >= 100
+                )
+              )
+            """
+        )
+
+    @staticmethod
+    def _generation_type_for_operation(operation: Any) -> Optional[str]:
+        normalized = str(operation or "").strip()
+        if normalized == "generate_image":
+            return "image"
+        if normalized in {
+            "generate_video",
+            "extend_video",
+            "generate_video_async_result",
+        }:
+            return "video"
+        return None
+
+    async def _upsert_generation_outcome_from_log(self, db, log_id: int) -> None:
+        """Persist one terminal log outcome without retaining its payload."""
+        cursor = await db.execute(
+            """
+            SELECT operation, status_text, status_code, progress,
+                   created_at, updated_at
+            FROM request_logs
+            WHERE id = ?
+            """,
+            (log_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return
+
+        generation_type = self._generation_type_for_operation(row[0])
+        final_status = str(row[1] or "").strip().lower()
+        status_code = int(row[2] or 0)
+        progress = int(row[3] or 0)
+        if generation_type is None:
+            return
+        if final_status == "completed" and 200 <= status_code < 300 and progress >= 100:
+            outcome = "completed"
+        elif final_status == "failed":
+            outcome = "failed"
+        else:
+            return
+
+        completed_at = self._timestamp_seconds(row[5] or row[4])
+        if completed_at is None:
+            completed_at = datetime.now(timezone.utc).timestamp()
+        await db.execute(
+            """
+            INSERT OR REPLACE INTO generation_outcomes (
+                request_log_id, generation_type, outcome, completed_at
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (log_id, generation_type, outcome, completed_at),
+        )
 
     # Token operations
     async def add_token(self, token: Token) -> int:
@@ -1294,6 +1441,64 @@ class Database:
                 "today_images": int(stats_data.get("today_images") or 0),
                 "today_videos": int(stats_data.get("today_videos") or 0),
                 "today_errors": int(stats_data.get("today_errors") or 0)
+            }
+
+    async def get_generation_outcome_stats(self) -> Dict[str, int]:
+        """Count only terminal generation outcomes from the durable ledger.
+
+        Async video submission logs stop at ``video_submitted`` and therefore do
+        not qualify as successes here. Their separate async-result log is counted
+        only after it reaches ``completed`` or ``failed``.
+        """
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            today = self._current_stats_date()
+            cursor = await db.execute(
+                """
+                SELECT
+                    COALESCE(SUM(CASE
+                        WHEN generation_type = 'image'
+                         AND outcome = 'completed' THEN 1 ELSE 0 END), 0) AS total_images,
+                    COALESCE(SUM(CASE
+                        WHEN generation_type = 'video'
+                         AND outcome = 'completed' THEN 1 ELSE 0 END), 0) AS total_videos,
+                    COALESCE(SUM(CASE
+                        WHEN outcome = 'completed' THEN 1 ELSE 0 END), 0) AS total_successes,
+                    COALESCE(SUM(CASE
+                        WHEN outcome = 'failed' THEN 1 ELSE 0 END), 0) AS total_failed_tasks,
+                    COALESCE(SUM(CASE
+                        WHEN generation_type = 'image'
+                         AND outcome = 'completed'
+                         AND DATE(completed_at, 'unixepoch', 'localtime') = ?
+                        THEN 1 ELSE 0 END), 0) AS today_images,
+                    COALESCE(SUM(CASE
+                        WHEN generation_type = 'video'
+                         AND outcome = 'completed'
+                         AND DATE(completed_at, 'unixepoch', 'localtime') = ?
+                        THEN 1 ELSE 0 END), 0) AS today_videos,
+                    COALESCE(SUM(CASE
+                        WHEN outcome = 'completed'
+                         AND DATE(completed_at, 'unixepoch', 'localtime') = ?
+                        THEN 1 ELSE 0 END), 0) AS today_successes,
+                    COALESCE(SUM(CASE
+                        WHEN outcome = 'failed'
+                         AND DATE(completed_at, 'unixepoch', 'localtime') = ?
+                        THEN 1 ELSE 0 END), 0) AS today_failed_tasks
+                FROM generation_outcomes
+                """,
+                (today, today, today, today),
+            )
+            row = await cursor.fetchone()
+            data = dict(row) if row else {}
+            return {
+                "total_images": int(data.get("total_images") or 0),
+                "total_videos": int(data.get("total_videos") or 0),
+                "total_successes": int(data.get("total_successes") or 0),
+                "total_failed_tasks": int(data.get("total_failed_tasks") or 0),
+                "today_images": int(data.get("today_images") or 0),
+                "today_videos": int(data.get("today_videos") or 0),
+                "today_successes": int(data.get("today_successes") or 0),
+                "today_failed_tasks": int(data.get("today_failed_tasks") or 0),
             }
 
     async def get_system_info_stats(self) -> Dict[str, int]:
@@ -1448,30 +1653,59 @@ class Database:
                 "capacity": normalized_capacity,
             }
 
-    async def claim_next_async_task(self, task_type: str = "video") -> Optional[Dict[str, Any]]:
-        """Claim the global queue head without allowing later items to overtake it."""
+    async def claim_next_async_task(
+        self,
+        task_type: str = "video",
+        max_submitting: int = 1,
+    ) -> Optional[Dict[str, Any]]:
+        """Claim the next FIFO item within a bounded parallel dispatch window."""
+        try:
+            submitting_limit = max(1, min(16, int(max_submitting)))
+        except (TypeError, ValueError):
+            submitting_limit = 1
+
         async with self._connect(write=True) as db:
             db.row_factory = aiosqlite.Row
             await db.execute("BEGIN IMMEDIATE")
             cursor = await db.execute(
                 """
+                SELECT COUNT(*)
+                FROM async_task_queue
+                WHERE task_type = ? AND status = 'submitting'
+                """,
+                (task_type,),
+            )
+            submitting_count = int((await cursor.fetchone())[0] or 0)
+            if submitting_count >= submitting_limit:
+                await db.rollback()
+                return None
+
+            cursor = await db.execute(
+                """
                 SELECT *, CAST(strftime('%s', created_at) AS INTEGER) AS created_at_epoch
                 FROM async_task_queue
-                WHERE task_type = ? AND status IN ('queued', 'submitting')
+                WHERE task_type = ? AND status = 'queued'
                 ORDER BY id ASC
                 LIMIT 1
                 """,
                 (task_type,),
             )
             row = await cursor.fetchone()
-            if row is None or row["status"] != "queued":
+            if row is None:
+                await db.rollback()
+                return None
+
+            retry_not_before = float(row["next_attempt_at"] or 0)
+            if retry_not_before > datetime.now(timezone.utc).timestamp():
                 await db.rollback()
                 return None
 
             cursor = await db.execute(
                 """
                 UPDATE async_task_queue
-                SET status = 'submitting', updated_at = CURRENT_TIMESTAMP
+                SET status = 'submitting',
+                    next_attempt_at = 0,
+                    updated_at = CURRENT_TIMESTAMP
                 WHERE id = ? AND status = 'queued'
                 """,
                 (row["id"],),
@@ -1523,12 +1757,20 @@ class Database:
             "upstream_task_id",
             "last_error",
             "request_payload",
+            "next_attempt_at",
         }
         updates: List[str] = []
         params: List[Any] = []
         for key, value in kwargs.items():
             if key == "increment_attempt" and value:
                 updates.append("attempt_count = attempt_count + 1")
+            elif key == "retry_after_seconds":
+                try:
+                    retry_delay = max(0.0, float(value or 0))
+                except (TypeError, ValueError):
+                    retry_delay = 0.0
+                updates.append("next_attempt_at = ?")
+                params.append(datetime.now(timezone.utc).timestamp() + retry_delay)
             elif key in allowed_columns:
                 updates.append(f"{key} = ?")
                 params.append(value)
@@ -1561,7 +1803,9 @@ class Database:
             cursor = await db.execute(
                 """
                 UPDATE async_task_queue
-                SET status = 'queued', updated_at = CURRENT_TIMESTAMP
+                SET status = 'queued',
+                    next_attempt_at = 0,
+                    updated_at = CURRENT_TIMESTAMP
                 WHERE status = 'submitting'
                 """
             )
@@ -2270,8 +2514,11 @@ class Database:
                 log.status_text or "",
                 log.progress,
             ))
+            log_id = int(cursor.lastrowid)
+            if str(log.status_text or "").strip().lower() in {"completed", "failed"}:
+                await self._upsert_generation_outcome_from_log(db, log_id)
             await db.commit()
-            return cursor.lastrowid
+            return log_id
 
     async def update_request_log(self, log_id: int, **kwargs):
         """Update an existing request log row."""
@@ -2305,6 +2552,11 @@ class Database:
                 f"UPDATE request_logs SET {', '.join(clauses)} WHERE id = ?",
                 values,
             )
+            if str(update_fields.get("status_text") or "").strip().lower() in {
+                "completed",
+                "failed",
+            }:
+                await self._upsert_generation_outcome_from_log(db, log_id)
             await db.commit()
 
     async def get_logs(self, limit: int = 100, token_id: Optional[int] = None, include_payload: bool = False):

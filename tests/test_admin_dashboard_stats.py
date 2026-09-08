@@ -24,8 +24,19 @@ class AdminDashboardStatsTests(unittest.IsolatedAsyncioTestCase):
             "active": 5,
             "oldest_created_at": 1788740000,
         }
+        outcome_stats = {
+            "total_images": 9,
+            "total_videos": 4,
+            "total_successes": 13,
+            "total_failed_tasks": 6,
+            "today_images": 2,
+            "today_videos": 1,
+            "today_successes": 3,
+            "today_failed_tasks": 2,
+        }
         fake_db = SimpleNamespace(
             get_dashboard_stats=AsyncMock(return_value=dashboard_stats),
+            get_generation_outcome_stats=AsyncMock(return_value=outcome_stats),
             get_async_task_queue_stats=AsyncMock(return_value=queue_stats),
             get_generation_config=AsyncMock(
                 return_value=SimpleNamespace(async_task_queue_capacity=75)
@@ -35,8 +46,11 @@ class AdminDashboardStatsTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(admin, "db", fake_db):
             result = await admin.get_stats(token="admin-session")
 
-        self.assertEqual(result["today_successes"], 5)
-        self.assertEqual(result["total_successes"], 18)
+        self.assertEqual(result["today_successes"], 3)
+        self.assertEqual(result["total_successes"], 13)
+        self.assertEqual(result["today_failed_tasks"], 2)
+        self.assertEqual(result["total_failed_tasks"], 6)
+        self.assertEqual(result["total_videos"], 4)
         self.assertEqual(
             result["async_task_queue"],
             {

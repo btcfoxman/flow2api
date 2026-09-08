@@ -68,15 +68,9 @@
                 <div class="grid grid-cols-2 gap-3 md:grid-cols-4">
                     <div class="relative overflow-hidden rounded-lg border border-border bg-background p-4 shadow-sm">
                         <span class="absolute inset-x-0 top-0 h-0.5 bg-slate-400"></span>
-                        <p class="text-xs font-medium text-muted-foreground">Token 总数</p>
-                        <h3 class="mt-2 text-2xl font-bold tabular-nums" id="statTotal">-</h3>
-                        <p class="mt-1 text-[11px] text-muted-foreground">当前账号规模</p>
-                    </div>
-                    <div class="relative overflow-hidden rounded-lg border border-border bg-background p-4 shadow-sm">
-                        <span class="absolute inset-x-0 top-0 h-0.5 bg-emerald-500"></span>
-                        <p class="text-xs font-medium text-muted-foreground">活跃 Token</p>
-                        <h3 class="mt-2 text-2xl font-bold tabular-nums text-emerald-600" id="statActive">-</h3>
-                        <p class="mt-1 text-[11px] text-muted-foreground">当前可参与调度</p>
+                        <p class="text-xs font-medium text-muted-foreground">Token 活跃 / 总数</p>
+                        <h3 class="mt-2 text-2xl font-bold tabular-nums" id="statTokens">-</h3>
+                        <p class="mt-1 text-[11px] text-muted-foreground">可调度 / 全部账号</p>
                     </div>
                     <div class="relative overflow-hidden rounded-lg border border-emerald-200 bg-emerald-50/40 p-4 shadow-sm">
                         <span class="absolute inset-x-0 top-0 h-0.5 bg-emerald-500"></span>
@@ -84,9 +78,15 @@
                         <h3 class="mt-2 text-2xl font-bold tabular-nums text-emerald-700" id="statSuccesses">-</h3>
                         <p class="mt-1 text-[11px] text-emerald-700/70">今日 / 累计</p>
                     </div>
+                    <div class="relative overflow-hidden rounded-lg border border-rose-200 bg-rose-50/40 p-4 shadow-sm">
+                        <span class="absolute inset-x-0 top-0 h-0.5 bg-rose-500"></span>
+                        <p class="text-xs font-medium text-rose-800">失败任务</p>
+                        <h3 class="mt-2 text-2xl font-bold tabular-nums text-rose-700" id="statFailures">-</h3>
+                        <p class="mt-1 text-[11px] text-rose-700/70">今日 / 累计</p>
+                    </div>
                     <div class="relative overflow-hidden rounded-lg border border-border bg-background p-4 shadow-sm">
                         <span class="absolute inset-x-0 top-0 h-0.5 bg-red-500"></span>
-                        <p class="text-xs font-medium text-muted-foreground">错误记录</p>
+                        <p class="text-xs font-medium text-muted-foreground">账号错误</p>
                         <h3 class="mt-2 text-2xl font-bold tabular-nums text-destructive" id="statErrors">-</h3>
                         <p class="mt-1 text-[11px] text-muted-foreground">今日 / 累计</p>
                     </div>
@@ -1076,7 +1076,7 @@
         checkAuth=()=>{const t=localStorage.getItem('adminToken');return t||(location.href='/login',null),t},
         apiRequest=async(url,opts={})=>{const t=checkAuth();if(!t)return null;const r=await fetch(url,{...opts,headers:{...opts.headers,Authorization:`Bearer ${t}`,'Content-Type':'application/json'}});return r.status===401?(localStorage.removeItem('adminToken'),location.href='/login',null):r},
         formatStatCount=value=>(Number(value)||0).toLocaleString('zh-CN'),
-        loadStats=async()=>{try{const r=await apiRequest('/api/stats');if(!r)return;const d=await r.json(),q=d.async_task_queue||{},todaySuccesses=d.today_successes??((Number(d.today_images)||0)+(Number(d.today_videos)||0)),totalSuccesses=d.total_successes??((Number(d.total_images)||0)+(Number(d.total_videos)||0)),queueActive=Math.max(0,Number(q.active)||0),queueCapacity=Math.max(1,Number(q.capacity)||50);$('statTotal').textContent=formatStatCount(d.total_tokens);$('statActive').textContent=formatStatCount(d.active_tokens);$('statSuccesses').textContent=`${formatStatCount(todaySuccesses)} / ${formatStatCount(totalSuccesses)}`;$('statImages').textContent=`${formatStatCount(d.today_images)} / ${formatStatCount(d.total_images)}`;$('statVideos').textContent=`${formatStatCount(d.today_videos)} / ${formatStatCount(d.total_videos)}`;$('statErrors').textContent=`${formatStatCount(d.today_errors)} / ${formatStatCount(d.total_errors)}`;$('statTaskPool').textContent=`${formatStatCount(queueActive)} / ${formatStatCount(queueCapacity)}`;$('statQueued').textContent=formatStatCount(q.queued);$('statSubmitting').textContent=formatStatCount(q.submitting);$('statTaskPoolBar').style.width=`${Math.min(100,(queueActive/queueCapacity)*100)}%`}catch(e){console.error('加载统计失败:',e)}},
+        loadStats=async()=>{try{const r=await apiRequest('/api/stats');if(!r)return;const d=await r.json(),q=d.async_task_queue||{},todaySuccesses=d.today_successes??((Number(d.today_images)||0)+(Number(d.today_videos)||0)),totalSuccesses=d.total_successes??((Number(d.total_images)||0)+(Number(d.total_videos)||0)),queueActive=Math.max(0,Number(q.active)||0),queueCapacity=Math.max(1,Number(q.capacity)||50);$('statTokens').textContent=`${formatStatCount(d.active_tokens)} / ${formatStatCount(d.total_tokens)}`;$('statSuccesses').textContent=`${formatStatCount(todaySuccesses)} / ${formatStatCount(totalSuccesses)}`;$('statFailures').textContent=`${formatStatCount(d.today_failed_tasks)} / ${formatStatCount(d.total_failed_tasks)}`;$('statImages').textContent=`${formatStatCount(d.today_images)} / ${formatStatCount(d.total_images)}`;$('statVideos').textContent=`${formatStatCount(d.today_videos)} / ${formatStatCount(d.total_videos)}`;$('statErrors').textContent=`${formatStatCount(d.today_errors)} / ${formatStatCount(d.total_errors)}`;$('statTaskPool').textContent=`${formatStatCount(queueActive)} / ${formatStatCount(queueCapacity)}`;$('statQueued').textContent=formatStatCount(q.queued);$('statSubmitting').textContent=formatStatCount(q.submitting);$('statTaskPoolBar').style.width=`${Math.min(100,(queueActive/queueCapacity)*100)}%`}catch(e){console.error('加载统计失败:',e)}},
         startStatsAutoRefresh=()=>{stopStatsAutoRefresh();window.statsAutoRefreshTimer=setInterval(loadStats,5000)},
         stopStatsAutoRefresh=()=>{if(window.statsAutoRefreshTimer){clearInterval(window.statsAutoRefreshTimer);window.statsAutoRefreshTimer=null}},
         loadTokens=async()=>{try{const r=await apiRequest('/api/tokens');if(!r)return;allTokens=await r.json();renderTokens()}catch(e){console.error('加载Token失败:',e)}},

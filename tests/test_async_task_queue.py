@@ -53,6 +53,39 @@ class AsyncTaskQueueTests(unittest.IsolatedAsyncioTestCase):
         second = await self.db.claim_next_async_task()
         self.assertEqual(second["task_id"], "second")
 
+    async def test_parallel_claim_window_preserves_fifo_order(self):
+        await self._enqueue("first")
+        await self._enqueue("second")
+        await self._enqueue("third")
+
+        first = await self.db.claim_next_async_task(max_submitting=2)
+        second = await self.db.claim_next_async_task(max_submitting=2)
+        blocked = await self.db.claim_next_async_task(max_submitting=2)
+
+        self.assertEqual(first["task_id"], "first")
+        self.assertEqual(second["task_id"], "second")
+        self.assertIsNone(blocked)
+
+        await self.db.delete_async_task("first")
+        third = await self.db.claim_next_async_task(max_submitting=2)
+        self.assertEqual(third["task_id"], "third")
+
+    async def test_retry_backoff_keeps_queue_head_from_being_overtaken(self):
+        await self._enqueue("first")
+        await self._enqueue("second")
+        first = await self.db.claim_next_async_task(max_submitting=2)
+        await self.db.update_async_task(
+            first["task_id"],
+            status="queued",
+            retry_after_seconds=60,
+        )
+
+        blocked = await self.db.claim_next_async_task(max_submitting=2)
+
+        self.assertIsNone(blocked)
+        self.assertEqual(await self.db.get_async_task_position("first"), 1)
+        self.assertEqual(await self.db.get_async_task_position("second"), 2)
+
     async def test_interrupted_submission_is_recovered(self):
         await self._enqueue("recover-me")
         claimed = await self.db.claim_next_async_task()

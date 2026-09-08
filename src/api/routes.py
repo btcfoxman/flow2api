@@ -161,7 +161,7 @@ def set_generation_handler(handler: GenerationHandler):
 
 
 async def start_async_task_queue() -> None:
-    """Start the single FIFO dispatcher and recover interrupted queue claims."""
+    """Start bounded FIFO dispatchers and recover interrupted queue claims."""
     global ASYNC_TASK_QUEUE_WORKER, ASYNC_TASK_QUEUE_WAKE_EVENT
     if ASYNC_TASK_QUEUE_WORKER is not None and not ASYNC_TASK_QUEUE_WORKER.done():
         if ASYNC_TASK_QUEUE_WAKE_EVENT is not None:
@@ -175,8 +175,12 @@ async def start_async_task_queue() -> None:
             f"[ASYNC QUEUE] Recovered {recovered} interrupted submission(s)"
         )
     ASYNC_TASK_QUEUE_WAKE_EVENT = asyncio.Event()
+    worker_count = _async_task_queue_dispatch_concurrency()
+    debug_logger.log_info(
+        f"[ASYNC QUEUE] Starting {worker_count} ordered dispatcher(s)"
+    )
     ASYNC_TASK_QUEUE_WORKER = _spawn_route_background_task(
-        _run_async_task_queue_worker()
+        _run_async_task_queue_workers(worker_count)
     )
 
 
@@ -200,6 +204,17 @@ def _notify_async_task_queue() -> None:
     event = ASYNC_TASK_QUEUE_WAKE_EVENT
     if event is not None:
         event.set()
+
+
+def _async_task_queue_dispatch_concurrency() -> int:
+    """Reuse the existing global video launch limit as the queue safety cap."""
+    try:
+        configured_limit = int(config.flow_video_launch_soft_limit)
+    except (TypeError, ValueError):
+        configured_limit = 1
+    if configured_limit <= 0:
+        configured_limit = 2
+    return max(1, min(4, configured_limit))
 
 
 def _ensure_generation_handler() -> GenerationHandler:
@@ -1298,8 +1313,33 @@ async def _create_deferred_async_video_task(
     }
 
 
-async def _run_async_task_queue_worker() -> None:
-    """Dispatch the persistent queue head in strict insertion order."""
+async def _run_async_task_queue_workers(worker_count: int) -> None:
+    """Run a small dispatcher group while retaining FIFO claim order."""
+    normalized_count = max(1, min(4, int(worker_count or 1)))
+    workers = [
+        asyncio.create_task(
+            _run_async_task_queue_worker(
+                max_submitting=normalized_count,
+                worker_id=index + 1,
+            )
+        )
+        for index in range(normalized_count)
+    ]
+    try:
+        await asyncio.gather(*workers)
+    finally:
+        for worker in workers:
+            if not worker.done():
+                worker.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
+
+
+async def _run_async_task_queue_worker(
+    *,
+    max_submitting: int = 1,
+    worker_id: int = 1,
+) -> None:
+    """Dispatch persistent queue items in FIFO claim order."""
     handler = _ensure_generation_handler()
     while True:
         queue_item: Optional[Dict[str, Any]] = None
@@ -1307,7 +1347,10 @@ async def _run_async_task_queue_worker() -> None:
             event = ASYNC_TASK_QUEUE_WAKE_EVENT
             if event is not None:
                 event.clear()
-            queue_item = await handler.db.claim_next_async_task("video")
+            queue_item = await handler.db.claim_next_async_task(
+                "video",
+                max_submitting=max_submitting,
+            )
             if queue_item is None:
                 if event is None:
                     await asyncio.sleep(ASYNC_TASK_QUEUE_RETRY_SECONDS)
@@ -1327,13 +1370,16 @@ async def _run_async_task_queue_worker() -> None:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            debug_logger.log_error(f"[ASYNC QUEUE] Dispatcher error: {exc}")
+            debug_logger.log_error(
+                f"[ASYNC QUEUE] Dispatcher {worker_id} error: {exc}"
+            )
             if queue_item is not None:
                 try:
                     await handler.db.update_async_task(
                         queue_item["task_id"],
                         status="queued",
                         last_error=str(exc) or exc.__class__.__name__,
+                        retry_after_seconds=ASYNC_TASK_QUEUE_RETRY_SECONDS,
                         increment_attempt=True,
                     )
                 except Exception as recovery_exc:
@@ -1376,6 +1422,7 @@ async def _process_async_video_queue_item(queue_item: Dict[str, Any]) -> float:
             local_task_id,
             status="queued",
             last_error="已提交的上游任务尚未写入本地任务表",
+            retry_after_seconds=ASYNC_TASK_QUEUE_RETRY_SECONDS,
         )
         return ASYNC_TASK_QUEUE_RETRY_SECONDS
 
@@ -1418,6 +1465,7 @@ async def _process_async_video_queue_item(queue_item: Dict[str, Any]) -> float:
             local_task_id,
             status="queued",
             last_error=unavailable_reason,
+            retry_after_seconds=ASYNC_TASK_QUEUE_RETRY_SECONDS,
         )
         return ASYNC_TASK_QUEUE_RETRY_SECONDS
 
@@ -1438,6 +1486,7 @@ async def _process_async_video_queue_item(queue_item: Dict[str, Any]) -> float:
                 local_task_id,
                 status="queued",
                 last_error=error_message,
+                retry_after_seconds=retry_delay,
                 increment_attempt=True,
             )
             debug_logger.log_warning(
@@ -1485,6 +1534,7 @@ async def _process_async_video_queue_item(queue_item: Dict[str, Any]) -> float:
             local_task_id,
             status="queued",
             last_error="上游任务已提交，等待本地任务记录同步",
+            retry_after_seconds=ASYNC_TASK_QUEUE_RETRY_SECONDS,
         )
         return ASYNC_TASK_QUEUE_RETRY_SECONDS
     return 0.0
