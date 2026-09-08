@@ -1,6 +1,6 @@
 """Data models for Flow2API"""
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from typing import Optional, List, Union, Any, Literal
 from datetime import datetime
 
@@ -42,6 +42,7 @@ class Token(BaseModel):
 
     # 打码代理（token 级，可覆盖全局浏览器打码代理）
     captcha_proxy_url: Optional[str] = None
+    google_cookies: Optional[str] = Field(default=None, exclude=True, repr=False)
     extension_route_key: Optional[str] = None
 
     # 429禁用相关

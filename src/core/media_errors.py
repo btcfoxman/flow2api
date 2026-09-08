@@ -74,6 +74,10 @@ _PUBLIC_UPSTREAM_PATTERNS = (
 def sanitize_public_error_message(error_message: Any) -> str:
     """Remove provider names, endpoints, and upstream terminology from public errors."""
     text = str(error_message or "").strip() or "生成服务暂时不可用，请稍后重试"
+    if "automatic resubmission is disabled" in text.lower():
+        return "生成结果暂未确认，请勿立即重复提交，请稍后检查结果。"
+    if "flow account session is unavailable" in text.lower():
+        return "生成服务暂时不可用，请稍后重试。"
     text = text.replace("上游", "生成服务")
     for pattern, replacement in _PUBLIC_UPSTREAM_PATTERNS:
         text = pattern.sub(replacement, text)

@@ -606,6 +606,7 @@ class Database:
             # Check and add missing columns to tokens table
             if await self._table_exists(db, "tokens"):
                 columns_to_add = [
+                    ("google_cookies", "TEXT"),
                     ("at", "TEXT"),  # Access Token
                     ("at_expires", "TIMESTAMP"),  # AT expiration time
                     ("credits", "INTEGER DEFAULT 0"),  # Balance
@@ -856,6 +857,7 @@ class Database:
                     image_concurrency INTEGER DEFAULT -1,
                     video_concurrency INTEGER DEFAULT -1,
                     captcha_proxy_url TEXT,
+                    google_cookies TEXT,
                     extension_route_key TEXT,
                     ban_reason TEXT,
                     banned_at TIMESTAMP
@@ -1323,14 +1325,14 @@ class Database:
                 INSERT INTO tokens (st, at, at_expires, email, name, remark, is_active,
                                    credits, user_paygate_tier, current_project_id, current_project_name,
                                    image_enabled, video_enabled, image_concurrency, video_concurrency,
-                                   captcha_proxy_url, extension_route_key)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                   captcha_proxy_url, extension_route_key, google_cookies)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (token.st, token.at, token.at_expires, token.email, token.name, token.remark,
                   token.is_active, token.credits, token.user_paygate_tier,
                   token.current_project_id, token.current_project_name,
                   token.image_enabled, token.video_enabled,
                   token.image_concurrency, token.video_concurrency,
-                  token.captcha_proxy_url, token.extension_route_key))
+                  token.captcha_proxy_url, token.extension_route_key, token.google_cookies))
             await db.commit()
             token_id = cursor.lastrowid
 

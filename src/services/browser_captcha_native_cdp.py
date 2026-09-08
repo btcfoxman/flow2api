@@ -18,11 +18,13 @@ from typing import Any, Awaitable, Callable, Dict, Optional
 from urllib.parse import quote, unquote, urlparse
 
 from ..core.config import config
+from ..core.flow_cookies import normalize_google_cookies
 from ..core.logger import debug_logger
 from ..core.media_errors import is_media_traffic_error
+from .flow_angular import AngularProtocolError, AngularSubmissionUncertain, parse_rpc_response, rpc_fetch_expression
 
 
-FLOW_PROJECT_BASE_URL = "https://labs.google/fx/zh/tools/flow"
+FLOW_PROJECT_BASE_URL = "https://flow.google.com"
 FLOW_WEBSITE_KEY = "6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV"
 DEFAULT_PROFILE_ROOT = Path("tmp") / "native_cdp_profiles"
 DEFAULT_IDLE_TTL_SECONDS = 600
@@ -428,6 +430,7 @@ class NativeCdpAccountBrowser:
         self.profile_reset_count = 0
         self._profile_reset_pending = False
         self._profile_reset_reason = ""
+        self._requires_flow_login = False
         if self.profile_dir.exists():
             try:
                 profile_version = (
@@ -439,6 +442,8 @@ class NativeCdpAccountBrowser:
                 self._profile_reset_pending = True
                 self._profile_reset_reason = "profile_baseline_upgrade"
         self._project_sessions: Dict[str, tuple[str, str]] = {}
+        self._session_auth_signatures: Dict[str, str] = {}
+        self._cookie_seed_signature = ""
         self._video_submit_reservations: list[float] = []
 
     @property
@@ -500,6 +505,8 @@ class NativeCdpAccountBrowser:
         normalized_reason = str(reason or "scheduled")[:160]
         await self.stop(reason=f"profile_reset:{normalized_reason}")
         shutil.rmtree(self.profile_dir, ignore_errors=True)
+        self._cookie_seed_signature = ""
+        self._session_auth_signatures.clear()
         self.profile_solve_count = 0
         self.profile_reset_count += 1
         self._profile_reset_pending = False
@@ -519,7 +526,17 @@ class NativeCdpAccountBrowser:
             if threshold > 0 and self.profile_solve_count >= threshold:
                 reset_reason = f"solve_threshold_{threshold}"
         if reset_reason:
-            await self._reset_profile(reason=reset_reason)
+            token = await self.db.get_token(self.token_id)
+            if getattr(token, "google_cookies", None):
+                # A signed-in Google profile can contain device-bound sessions
+                # and locally rotated credentials that cookie export cannot restore.
+                # Routine/risk recovery may restart it, but must not erase it.
+                await self.stop(reason=f"authenticated_profile_restart:{reset_reason}")
+                self.profile_solve_count = 0
+                self._profile_reset_pending = False
+                self._profile_reset_reason = ""
+            else:
+                await self._reset_profile(reason=reset_reason)
         await self.start()
 
     async def _resolve_proxy(self) -> ProxyBinding:
@@ -658,6 +675,7 @@ class NativeCdpAccountBrowser:
         self.connection = None
         self.process = None
         self._project_sessions.clear()
+        self._session_auth_signatures.clear()
         self._video_submit_reservations.clear()
         if connection:
             try:
@@ -755,35 +773,55 @@ class NativeCdpAccountBrowser:
             raise CdpProtocolError(str(description))
         return (result.get("result") or {}).get("value")
 
-    async def _seed_session_cookie(self, session_id: str) -> None:
+    async def _seed_session_cookie(self, session_id: str) -> bool:
         if not self.connection:
-            return
+            return False
         token = await self.db.get_token(self.token_id)
         session_token = str(getattr(token, "st", "") or "").strip() if token else ""
-        if not session_token:
-            return
-        cookie_names = [
-            "__Secure-next-auth.session-token",
-            "__Secure-next-auth.session-token.0",
-        ]
-        for cookie_name in cookie_names:
+        raw_cookies = str(getattr(token, "google_cookies", "") or "") if token else ""
+        self._requires_flow_login = bool(raw_cookies)
+        signature = hashlib.sha256((session_token + "\0" + raw_cookies).encode()).hexdigest()
+        marker = self.profile_dir / ".flow2api-cookie-seed"
+        if not self._cookie_seed_signature:
             try:
-                await self.connection.send(
-                    "Network.setCookie",
-                    {
-                        "name": cookie_name,
-                        "value": session_token,
-                        "domain": ".google",
-                        "path": "/",
-                        "secure": True,
-                        "httpOnly": True,
-                        "sameSite": "None",
-                    },
-                    session_id=session_id,
-                    timeout=5,
-                )
-            except Exception:
+                self._cookie_seed_signature = marker.read_text(encoding="utf-8").strip()
+            except OSError:
                 pass
+        if signature != self._cookie_seed_signature:
+            google_signature = hashlib.sha256(raw_cookies.encode()).hexdigest()
+            google_marker = self.profile_dir / ".flow2api-google-cookie-seed"
+            try:
+                imported_google_signature = google_marker.read_text(encoding="utf-8").strip()
+            except OSError:
+                imported_google_signature = ""
+            cookies = (json.loads(normalize_google_cookies(raw_cookies))
+                       if raw_cookies and google_signature != imported_google_signature else [])
+            if session_token:
+                # Remove stale chunked NextAuth cookies before replacing the session.
+                current = await self.connection.send("Network.getCookies", {"urls": ["https://labs.google/"]}, session_id=session_id, timeout=5)
+                for cookie in current.get("cookies", []):
+                    if cookie.get("name", "").startswith("__Secure-next-auth.session-token"):
+                        await self.connection.send("Network.deleteCookies", {key: cookie[key] for key in ("name", "domain", "path")}, session_id=session_id, timeout=5)
+                chunks = [session_token[i:i + 3800] for i in range(0, len(session_token), 3800)]
+                cookies.extend({"name": "__Secure-next-auth.session-token" + (f".{i}" if len(chunks) > 1 else ""),
+                                "value": value, "domain": "labs.google", "path": "/", "secure": True,
+                                "httpOnly": True, "sameSite": "Lax"} for i, value in enumerate(chunks))
+            for cookie in cookies:
+                params = dict(cookie)
+                if not params["domain"].startswith("."):
+                    params["url"] = "https://" + params.pop("domain") + params["path"]
+                result = await self.connection.send("Network.setCookie", params, session_id=session_id, timeout=5)
+                if result.get("success") is False:
+                    raise RuntimeError("Browser rejected a synchronized authentication cookie")
+            self._cookie_seed_signature = signature
+            # Hash only. Reopening the persistent browser must not restore an old
+            # snapshot over Google cookies that it has already rotated locally.
+            self.profile_dir.mkdir(parents=True, exist_ok=True)
+            marker.write_text(signature, encoding="utf-8")
+            google_marker.write_text(google_signature, encoding="utf-8")
+        changed = self._session_auth_signatures.get(session_id) != signature
+        self._session_auth_signatures[session_id] = signature
+        return changed
 
     @staticmethod
     def _project_page_url(project_id: Optional[str]) -> str:
@@ -831,10 +869,17 @@ class NativeCdpAccountBrowser:
             await self._evaluate(session_id, "window.location.href", timeout=5) or ""
         )
         normalized_project_id = str(project_id or "").strip()
-        if normalized_project_id and f"/project/{normalized_project_id}" not in current_url:
+        parsed_url = urlparse(current_url)
+        if (parsed_url.scheme != "https" or parsed_url.hostname != "flow.google.com"
+                or (normalized_project_id and parsed_url.path.rstrip("/") != f"/project/{quote(normalized_project_id, safe='')}")):
             raise RuntimeError(
                 "real Flow project page did not retain the requested project context"
             )
+        if self._requires_flow_login:
+            authenticated = await self._evaluate(session_id,
+                "!!window.WIZ_global_data?.SNlM0e", timeout=5)
+            if not authenticated:
+                raise AngularProtocolError("Flow account session is unavailable; complete login in the destination profile")
 
     async def _get_or_create_project_session(
         self,
@@ -846,7 +891,8 @@ class NativeCdpAccountBrowser:
             target_id, session_id = cached
             try:
                 await self._evaluate(session_id, "document.readyState", timeout=3)
-                await self._seed_session_cookie(session_id)
+                if await self._seed_session_cookie(session_id):
+                    await self._open_real_project_page(session_id, normalized_project_id)
                 return target_id, session_id
             except Exception:
                 self._project_sessions.pop(normalized_project_id, None)
@@ -875,7 +921,8 @@ class NativeCdpAccountBrowser:
         cached = self._project_sessions.pop(normalized_project_id, None)
         if not cached or not self.connection or self.connection.closed:
             return
-        target_id, _ = cached
+        target_id, session_id = cached
+        self._session_auth_signatures.pop(session_id, None)
         try:
             await self.connection.send(
                 "Target.closeTarget",
@@ -971,6 +1018,52 @@ class NativeCdpAccountBrowser:
                 reason = f"{reason}: {body[:300]}"
         return reason
 
+    async def _upload_flow_video(self, session_id, url, data, timeout):
+        args = json.dumps({"url": url, "base64": data["video_base64"], "filename": data.get("filename", "upload.mp4"),
+                           "mime": data.get("mime", "video/mp4"), "timeout": timeout * 1000}, ensure_ascii=True)
+        expression = """(async () => {
+          const args = ARGS;
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), args.timeout);
+          try {
+            if (location.origin !== 'https://flow.google.com') return {error: 'Flow upload requires an authenticated project page'};
+            const bytes = Uint8Array.from(atob(args.base64), c => c.charCodeAt(0));
+            const start = await fetch(args.url, {method:'POST', credentials:'include', redirect:'error', signal:controller.signal,
+              headers:{'slug':encodeURIComponent(args.filename), 'x-goog-upload-command':'start',
+                'x-goog-upload-header-content-length':String(bytes.length), 'x-goog-upload-header-content-type':args.mime,
+                'x-goog-upload-protocol':'resumable'}});
+            if (!start.ok) return {error:'Flow upload start rejected', status:start.status};
+            const sessionLocation = start.headers.get('x-goog-upload-url');
+            if (!sessionLocation) return {error:'Flow upload session is missing'};
+            const session = new URL(sessionLocation, args.url);
+            if (session.origin !== 'https://flow.google.com' || !session.pathname.startsWith('/upload/v1/flow/upload/video/'))
+              return {error:'Flow upload session has an unexpected origin'};
+            const granularity = Number(start.headers.get('x-goog-upload-chunk-granularity')) || 1048576;
+            if (!Number.isSafeInteger(granularity) || granularity < 1) return {error:'Invalid Flow upload granularity'};
+            const chunkSize = Math.ceil(1048576 / granularity) * granularity;
+            let final = null;
+            for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+              const chunk = bytes.subarray(offset, Math.min(offset + chunkSize, bytes.length));
+              const last = offset + chunk.length === bytes.length;
+              const response = await fetch(session.href, {method:'POST', credentials:'include', redirect:'error', signal:controller.signal,
+                headers:{'x-goog-upload-command':last ? 'upload, finalize' : 'upload', 'x-goog-upload-offset':String(offset)}, body:chunk});
+              if (!response.ok) return {error:'Flow video upload rejected', status:response.status};
+              if (last) final = await response.json();
+            }
+            return {payload:final};
+          } catch (_) { return {error:'Flow video upload interrupted'}; }
+          finally { clearTimeout(timer); }
+        })()""".replace("ARGS", args)
+        result = await self._evaluate(session_id, expression, await_promise=True, timeout=timeout + 5)
+        if not isinstance(result, dict):
+            raise RuntimeError("Invalid Flow upload response")
+        if result.get("error"):
+            raise RuntimeError(f"{result['error']} (HTTP {result.get('status', 0)})")
+        payload = result.get("payload") or {}
+        if not isinstance(payload, dict) or not payload.get("mediaId"):
+            raise RuntimeError("Flow upload final response is missing mediaId")
+        return {**payload, "mediaServerId": payload["mediaId"], "workflowServerId": (payload.get("workflow") or {}).get("name"), "transport": "angular"}
+
     async def fetch_json(
         self,
         *,
@@ -987,6 +1080,37 @@ class NativeCdpAccountBrowser:
             try:
                 await self._prepare_profile(for_solve=False)
                 _, session_id = await self._get_or_create_project_session(project_id)
+                if url == "https://flow.google.com/_/AiSandboxAngularFrontend/data/batchexecute":
+                    rpc_id = (json_data or {}).get("rpc_id")
+                    is_submit = rpc_id in {"MZZa6b", "jIps6", "ogiZ0b"}
+                    try:
+                        rpc_result = await self._evaluate(session_id, rpc_fetch_expression(rpc_id, json_data["payload"], timeout), await_promise=True, timeout=timeout + 5)
+                        if not isinstance(rpc_result, dict):
+                            raise AngularProtocolError("Invalid browser RPC result")
+                        if rpc_result.get("preflightError"):
+                            raise AngularProtocolError(rpc_result["preflightError"])
+                        if rpc_result.get("fetchError"):
+                            raise AngularSubmissionUncertain("Flow launch result is unconfirmed; automatic resubmission is disabled")
+                        if int(rpc_result.get("status", 0)) >= 400:
+                            raise AngularProtocolError(f"Flow RPC rejected: HTTP {rpc_result['status']}")
+                        try:
+                            parsed = parse_rpc_response(rpc_result.get("text", ""), rpc_id)
+                            self.last_error = None
+                            self.last_upstream_error = None
+                            return {"rpc_payload": parsed}
+                        except AngularProtocolError:
+                            if is_submit:
+                                raise AngularSubmissionUncertain("Flow launch response is unrecognized; automatic resubmission is disabled") from None
+                            raise
+                    except (asyncio.TimeoutError, CdpProtocolError, ConnectionError):
+                        if is_submit:
+                            raise AngularSubmissionUncertain("Flow launch result is unconfirmed; automatic resubmission is disabled") from None
+                        raise
+                if url == f"https://flow.google.com/upload/v1/flow/upload/video/{quote(str(project_id), safe='')}":
+                    uploaded = await self._upload_flow_video(session_id, url, json_data or {}, timeout)
+                    self.last_error = None
+                    self.last_upstream_error = None
+                    return uploaded
                 payload = {
                     "url": str(url),
                     "method": str(method or "POST").upper(),

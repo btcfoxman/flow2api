@@ -86,6 +86,20 @@ class Config:
 
     # Flow2API specific properties
     @property
+    def flow_angular_video_models(self) -> list[str]:
+        value = self._config.get("flow", {}).get("angular_video_models", [])
+        return [str(item) for item in value] if isinstance(value, list) else []
+
+    @property
+    def flow_angular_video_families(self) -> list[str]:
+        value = self._config.get("flow", {}).get("angular_video_families", [])
+        return [str(item) for item in value] if isinstance(value, list) else []
+
+    @property
+    def flow_native_video_upload(self) -> bool:
+        return bool(self._config.get("flow", {}).get("native_video_upload", True))
+
+    @property
     def flow_labs_base_url(self) -> str:
         """Google Labs base URL for project management"""
         return self._config["flow"]["labs_base_url"]

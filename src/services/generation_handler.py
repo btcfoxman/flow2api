@@ -2528,6 +2528,7 @@ class GenerationHandler:
                     if stream:
                         yield self._create_stream_chunk("上传参考视频...\n")
                     video_upload = await self.flow_client.upload_video_with_metadata(
+                        token_id=token.id,
                         st=token.st,
                         project_id=project_id,
                         video_bytes=video_bytes,
@@ -2540,20 +2541,23 @@ class GenerationHandler:
                         raise RuntimeError(f"upload-video final response missing mediaServerId: {video_upload}")
                     if stream:
                         yield self._create_stream_chunk("设置参考视频截取区间...\n")
-                    await self.flow_client.update_video_offset(
-                        st=token.st,
-                        media_id=video_media_id,
-                        start_offset="0s",
-                        end_offset=_video_offset_end_from_duration(video_duration_seconds),
-                    )
+                    if video_upload.get("transport") != "angular":
+                        await self.flow_client.update_video_offset(
+                            st=token.st,
+                            media_id=video_media_id,
+                            start_offset="0s",
+                            end_offset=_video_offset_end_from_duration(video_duration_seconds),
+                        )
                     if stream:
                         yield self._create_stream_chunk("等待参考视频处理完成...\n")
                     await self.flow_client.wait_uploaded_video_ready(
+                        token_id=token.id,
+                        transport=video_upload.get("transport"),
                         at=token.at,
                         project_id=project_id,
                         media_id=video_media_id,
                     )
-                    if video_workflow_id:
+                    if video_workflow_id and video_upload.get("transport") != "angular":
                         await self.flow_client.update_flow_workflow_primary_media(
                             at=token.at,
                             project_id=project_id,

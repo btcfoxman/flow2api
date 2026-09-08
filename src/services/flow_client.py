@@ -18,6 +18,7 @@ from ..core.config import config, get_yescaptcha_min_score
 from ..core.credits import is_quota_exhausted_error
 from ..core.media_errors import is_media_policy_error, is_media_traffic_error
 from .browser_cookie_utils import serialize_cookie_header
+from .flow_angular import AngularProtocolError, AngularSubmissionUncertain, build_video_rpc, use_angular_video, video_operations
 
 try:
     import httpx
@@ -584,6 +585,21 @@ class FlowClient:
                 from .browser_captcha_native_cdp import BrowserCaptchaService
 
                 service = await BrowserCaptchaService.get_instance(self.db)
+                requests = json_data.get("requests") or []
+                model = requests[0].get("videoModelKey") if len(requests) == 1 else None
+                if use_angular_video(model, models=config.flow_angular_video_models,
+                                     families=config.flow_angular_video_families):
+                    rpc_id, payload = build_video_rpc(json_data)
+                    response = await service.fetch_json(
+                        token_id=int(native_token_id), project_id=project_id,
+                        url="https://flow.google.com/_/AiSandboxAngularFrontend/data/batchexecute",
+                        json_data={"rpc_id": rpc_id, "payload": payload}, timeout=timeout,
+                        consume_video_reservation=True,
+                    )
+                    try:
+                        return video_operations(response["rpc_payload"], token_id=int(native_token_id), project_id=project_id)
+                    except AngularProtocolError:
+                        raise AngularSubmissionUncertain("Flow launch media is unrecognized; automatic resubmission is disabled") from None
                 return await asyncio.wait_for(
                     service.fetch_json(
                         token_id=int(native_token_id),
@@ -600,6 +616,8 @@ class FlowClient:
                     ),
                     timeout=timeout + 5,
                 )
+            except AngularProtocolError:
+                raise
             except asyncio.TimeoutError as exc:
                 raise Exception(
                     f"Flow native browser video API request timed out after {timeout}s"
@@ -855,6 +873,15 @@ class FlowClient:
         # 否则在首跳改走媒体代理时，容易触发 reCAPTCHA 校验失败并放大长尾。
         fingerprint = self._request_fingerprint_ctx.get()
         has_fingerprint_context = bool(isinstance(fingerprint, dict) and fingerprint)
+        if config.captcha_method == "native_cdp" and has_fingerprint_context and fingerprint.get("native_token_id"):
+            from .browser_captcha_native_cdp import BrowserCaptchaService
+            service = await BrowserCaptchaService.get_instance(self.db)
+            return await service.fetch_json(
+                token_id=int(fingerprint["native_token_id"]),
+                project_id=str((json_data.get("clientContext") or {}).get("projectId") or ""),
+                url=url, headers={"authorization": f"Bearer {at}", "content-type": "text/plain;charset=UTF-8"},
+                json_data=json_data, timeout=request_timeout,
+            )
 
         has_media_proxy = False
         if (
@@ -1574,12 +1601,23 @@ class FlowClient:
         video_bytes: bytes,
         mime_type: str = "video/mp4",
         file_name: str = "upload.mp4",
+        token_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         normalized_project_id = str(project_id or "").strip()
         if not normalized_project_id:
             raise RuntimeError("project_id is required for video upload")
         if not video_bytes:
             raise RuntimeError("video_bytes is required for video upload")
+        if config.captcha_method == "native_cdp" and config.flow_native_video_upload and token_id and self.db:
+            token = await self.db.get_token(token_id)
+            from ..core.flow_cookies import google_cookie_status
+            if google_cookie_status(getattr(token, "google_cookies", None))["flow_cookies_configured"]:
+                from .browser_captcha_native_cdp import BrowserCaptchaService
+                service = await BrowserCaptchaService.get_instance(self.db)
+                return await service.fetch_json(token_id=token_id, project_id=normalized_project_id,
+                    url=f"https://flow.google.com/upload/v1/flow/upload/video/{quote(normalized_project_id, safe='')}",
+                    json_data={"video_base64": base64.b64encode(video_bytes).decode("ascii"), "filename": file_name, "mime": mime_type},
+                    timeout=max(self._get_video_submit_timeout(), 120))
 
         proxy_url = await self._resolve_request_proxy()
         base_headers = self._build_labs_browser_headers(st, normalized_project_id)
@@ -1691,6 +1729,8 @@ class FlowClient:
         *,
         max_attempts: int = 12,
         poll_interval_seconds: float = 10.0,
+        token_id: Optional[int] = None,
+        transport: Optional[str] = None,
     ) -> Dict[str, Any]:
         normalized_media_id = str(media_id or "").strip()
         normalized_project_id = str(project_id or "").strip()
@@ -1702,6 +1742,8 @@ class FlowClient:
             "projectId": normalized_project_id,
             "operation": {"name": normalized_media_id},
         }]
+        if transport == "angular":
+            operations[0].update(transport="angular", tokenId=token_id)
         last_result: Dict[str, Any] = {}
         attempts = max(1, int(max_attempts or 1))
         for attempt in range(attempts):
@@ -3287,6 +3329,38 @@ class FlowClient:
                 }]
             }
         """
+        if operations and any(op.get("transport") == "angular" for op in operations):
+            if not all(op.get("transport") == "angular" for op in operations):
+                raise AngularProtocolError("Cannot mix Flow transports in one polling batch")
+            account = operations[0].get("tokenId")
+            project = operations[0].get("projectId")
+            if not account or not project or any(op.get("tokenId") != account or op.get("projectId") != project for op in operations):
+                raise AngularProtocolError("Flow polling account/project binding mismatch")
+            from .browser_captcha_native_cdp import BrowserCaptchaService
+            service = await BrowserCaptchaService.get_instance(self.db)
+            ids = [op["mediaName"] for op in operations]
+            response = await service.fetch_json(token_id=account, project_id=project,
+                url="https://flow.google.com/_/AiSandboxAngularFrontend/data/batchexecute",
+                json_data={"rpc_id": "jwpduf", "payload": [None, None, [[media_id] for media_id in ids]]},
+                timeout=self._get_video_poll_timeout())
+            result = video_operations(response["rpc_payload"], token_id=account, project_id=project, expected_ids=ids)
+            for index, operation in enumerate(result["operations"]):
+                if operation["status"] != "MEDIA_GENERATION_STATUS_SUCCESSFUL":
+                    continue
+                if operation["operation"].get("metadata", {}).get("video", {}).get("fifeUrl"):
+                    continue
+                # Some status responses omit renditions. Resolve their signed URL
+                # through the same account, without legacy transport or resubmission.
+                response = await service.fetch_json(token_id=account, project_id=project,
+                    url="https://flow.google.com/_/AiSandboxAngularFrontend/data/batchexecute",
+                    json_data={"rpc_id": "as29s", "payload": [operation["mediaName"]]},
+                    timeout=self._get_video_poll_timeout())
+                resolved = video_operations(response["rpc_payload"], token_id=account, project_id=project,
+                                            expected_ids=[operation["mediaName"]])["operations"][0]
+                if not resolved["operation"].get("metadata", {}).get("video", {}).get("fifeUrl"):
+                    raise AngularProtocolError("Flow media download URL is not ready")
+                result["operations"][index] = resolved
+            return result
         url = f"{self.api_base_url}/video:batchCheckAsyncVideoGenerationStatus"
 
         media_refs = self._operations_to_media_refs(operations)
@@ -3492,6 +3566,8 @@ class FlowClient:
     ) -> bool:
         """统一处理生成链路的重试判定与打码自愈通知。"""
         error_str = str(error)
+        if isinstance(error, AngularSubmissionUncertain):
+            return False
         if is_media_traffic_error(error_str):
             if str(getattr(config, "captcha_method", "") or "").strip().lower() == "native_cdp":
                 # Native CDP records and quarantines the selected proxy egress at
@@ -4145,7 +4221,7 @@ class FlowClient:
             return None
 
         website_key = "6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV"
-        website_url = f"https://labs.google/fx/tools/flow/project/{project_id}"
+        website_url = f"https://flow.google.com/project/{quote(str(project_id), safe='')}"
         page_action = action
 
         try:

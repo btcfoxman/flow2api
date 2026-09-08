@@ -1,0 +1,273 @@
+{
+  "captured_at": "2026-09-08T22:50:12+08:00",
+  "capture_completed_at": "2026-09-08T23:18:00+08:00",
+  "browser": {
+    "version": "Chrome 152.0.7977.66",
+    "profile": "D:/tmp/g-41",
+    "proxy_endpoint": "socks5://127.0.0.1:20001"
+  },
+  "site": {
+    "legacy_entry": "https://labs.google/fx/zh/tools/flow",
+    "effective_project_url": "https://flow.google.com/project/{project_id}",
+    "content_origin": "https://flow-content.google"
+  },
+  "transport": {
+    "method": "POST",
+    "url": "https://flow.google.com/_/AiSandboxAngularFrontend/data/batchexecute",
+    "content_type": "application/x-www-form-urlencoded;charset=UTF-8",
+    "query": {
+      "rpcids": "{rpc_id}",
+      "source-path": "/project/{project_id}",
+      "bl": "{dynamic_boq_build_id}",
+      "f.sid": "{dynamic_page_session_id}",
+      "hl": "zh-CN",
+      "_reqid": "{dynamic_monotonic_request_id}",
+      "rt": "c"
+    },
+    "form": {
+      "f.req": "{serialized_positional_rpc}",
+      "at": "{dynamic_page_anti_csrf_token}"
+    },
+    "selected_headers": {
+      "Origin": "https://flow.google.com",
+      "Referer": "https://flow.google.com/",
+      "X-Same-Domain": "1"
+    },
+    "response_framing": "XSSI prefix + decimal byte length + JSON frame; wrb.fr payload is another JSON string"
+  },
+  "rpc_counts": {
+    "jwpduf": 30,
+    "as29s": 21,
+    "WuwhI": 14,
+    "UpteDb": 3,
+    "MZZa6b": 2,
+    "ogiZ0b": 2,
+    "ngNC2": 1,
+    "jIps6": 1
+  },
+  "rpc_map": {
+    "MZZa6b": "reference-images-to-video submit (Abra and Veo observed)",
+    "jIps6": "video edit submit",
+    "ogiZ0b": "image edit/generation (GEM_PIX_2 observed)",
+    "jwpduf": "poll one or more media IDs",
+    "as29s": "get media metadata",
+    "UpteDb": "list projects",
+    "ngNC2": "load PINHOLE project",
+    "WuwhI": "client analytics/telemetry"
+  },
+  "request_shapes": {
+    "project_context": [
+      null,
+      22,
+      null,
+      null,
+      null,
+      "{project_id}",
+      null,
+      null,
+      null,
+      null,
+      ["{recaptcha_token}", 1]
+    ],
+    "MZZa6b_abra_r2v": [
+      [
+        [
+          [null, null, [[["{prompt}"]]]],
+          [[null, "{reference_media_id}"]],
+          "abra_r2v_4s_360p",
+          1,
+          null,
+          [null, null, null, null, "{client_uuid_1}", "{client_uuid_2}"],
+          null,
+          null,
+          null,
+          null,
+          null,
+          [4]
+        ]
+      ],
+      "{project_context}",
+      ["{request_uuid}", 2]
+    ],
+    "MZZa6b_veo_r2v": [
+      [
+        [
+          [null, null, [[["{prompt}"]]]],
+          [
+            [null, "{reference_media_id_1}"],
+            [null, "{reference_media_id_2}"]
+          ],
+          "veo_3_1_r2v_fast_portrait",
+          1,
+          null,
+          [null, null, null, null, "{client_uuid_1}", "{client_uuid_2}"]
+        ]
+      ],
+      "{project_context}",
+      ["{request_uuid}", 2]
+    ],
+    "jIps6_abra_edit": [
+      [
+        [
+          [null, "{input_video_media_id}", 0, 178],
+          [null, null, [[["{prompt}"]]]],
+          "abra_edit_360p",
+          1,
+          [null, null, null, null, "{client_uuid_1}", "{client_uuid_2}"],
+          null,
+          null,
+          null,
+          [[null, "{reference_image_media_id}"]],
+          null,
+          null,
+          null,
+          [4]
+        ]
+      ],
+      "{project_context}",
+      ["{request_uuid}", 2]
+    ],
+    "ogiZ0b_image_edit": [
+      null,
+      [
+        [
+          null,
+          null,
+          [["{input_image_media_id}", null, null, null, 1]],
+          "{random_seed}",
+          3,
+          "GEM_PIX_2",
+          null,
+          "{project_context}",
+          [[["{prompt}"]]],
+          null,
+          null,
+          null,
+          "{client_uuid_1}",
+          "{client_uuid_2}"
+        ]
+      ],
+      1,
+      "{project_context}",
+      [["{request_uuid}"]]
+    ],
+    "jwpduf": [null, null, [["{media_id}"]]],
+    "as29s": ["{media_id}"],
+    "ngNC2": ["tools/PINHOLE/projects/{project_id}"]
+  },
+  "positional_status_inference": {
+    "6": "accepted_or_queued",
+    "2": "processing",
+    "3": "successful_terminal",
+    "1": "ready_user_upload",
+    "confidence": "inferred from same-media transitions and UI results; failure/cancel codes not captured"
+  },
+  "video_upload": {
+    "start": {
+      "method": "POST",
+      "path": "/upload/v1/flow/upload/video/{project_id}",
+      "headers": {
+        "Slug": "{percent_encoded_filename}",
+        "X-Goog-Upload-Command": "start",
+        "X-Goog-Upload-Header-Content-Length": "{byte_length}",
+        "X-Goog-Upload-Protocol": "resumable"
+      },
+      "response_headers": [
+        "x-goog-upload-url",
+        "x-goog-upload-control-url",
+        "x-goog-upload-status",
+        "x-goog-upload-chunk-granularity"
+      ]
+    },
+    "finalize": {
+      "method": "POST",
+      "url": "{x-goog-upload-url}",
+      "headers": {
+        "X-Goog-Upload-Command": "upload, finalize",
+        "X-Goog-Upload-Offset": "0"
+      },
+      "body": "binary video bytes",
+      "response_id_field": "mediaId"
+    }
+  },
+  "auth_state": {
+    "flow_host_cookies": ["OSID", "__Secure-OSID"],
+    "google_cookie_families": [
+      "SID",
+      "SSID",
+      "HSID",
+      "APISID",
+      "SAPISID",
+      "SIDCC",
+      "__Secure-1P*",
+      "__Secure-3P*"
+    ],
+    "page_values": ["at", "f.sid", "bl", "_reqid"],
+    "recaptcha_storage": ["_grecaptcha", "rc::a", "rc::f", "rc::c"],
+    "legacy_nextauth_cookie_present_but_not_sent_to_flow_origin": true,
+    "same_profile_and_proxy_required": true
+  },
+  "live_validations": [
+    {
+      "model": "abra_r2v_4s_360p",
+      "rpc": "MZZa6b",
+      "reference_image_count": 1,
+      "terminal_positional_status": 3,
+      "elapsed_seconds": 29.5,
+      "remaining_credits": 46
+    },
+    {
+      "model": "abra_edit_360p",
+      "rpc": "jIps6",
+      "input_video_present": true,
+      "reference_image_count": 1,
+      "terminal_positional_status": 3,
+      "elapsed_seconds": 64.2,
+      "remaining_credits": 36
+    },
+    {
+      "model": "GEM_PIX_2",
+      "rpc": "ogiZ0b",
+      "input_image_count": 1,
+      "synchronous_success_count": 2,
+      "response_seconds": [20.1, 35.0]
+    },
+    {
+      "model": "veo_3_1_r2v_fast_portrait",
+      "rpc": "MZZa6b",
+      "reference_image_count": 2,
+      "terminal_positional_status": 3,
+      "elapsed_seconds": 39.5,
+      "remaining_credits": 16
+    }
+  ],
+  "http_observation": {
+    "requests": 203,
+    "responses": 205,
+    "statuses": {"200": 162, "204": 39, "206": 4},
+    "browser_aborts": {
+      "total": 48,
+      "error": "net::ERR_ABORTED",
+      "analytics": 39,
+      "recaptcha_auxiliary": 7,
+      "media_navigation_or_playback": 2
+    },
+    "generation_http_4xx_or_5xx": 0
+  },
+  "compatibility": {
+    "model_keys_observed_are_already_present_in_flow2api": true,
+    "legacy_rest_and_new_angular_transport_should_be_separate_adapters": true,
+    "flow2api_extension_needs_flow_google_host_permission": true,
+    "token_updater_session_token_only_payload_is_insufficient_for_full_angular_replay": true,
+    "current_legacy_upload_protocol_differs_from_new_web_upload": true
+  },
+  "open_samples": [
+    "failed and cancelled media positional statuses",
+    "text-to-video",
+    "start-image and start/end-image video",
+    "720p variants",
+    "multiple output submission",
+    "zero-credit response",
+    "large initialization RPC request bodies"
+  ]
+}

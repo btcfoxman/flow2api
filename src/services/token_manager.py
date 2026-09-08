@@ -236,6 +236,7 @@ class TokenManager:
         video_concurrency: int = -1,
         captcha_proxy_url: Optional[str] = None,
         extension_route_key: Optional[str] = None,
+        google_cookies: Optional[str] = None,
     ) -> Token:
         """Add a new token and prepare its pooled projects."""
         existing_token = await self.db.get_token_by_st(st)
@@ -312,6 +313,7 @@ class TokenManager:
             video_concurrency=video_concurrency,
             captcha_proxy_url=captcha_proxy_url,
             extension_route_key=extension_route_key,
+            google_cookies=google_cookies,
         )
 
         token_id = await self.db.add_token(token)
@@ -343,12 +345,15 @@ class TokenManager:
         video_concurrency: Optional[int] = None,
         captcha_proxy_url: Optional[str] = None,
         extension_route_key: Optional[str] = None,
+        google_cookies: Optional[str] = None,
     ):
         """Update token (支持修改project_id和project_name)
 
         当用户编辑保存token时，如果token未过期，自动清空429禁用状态
         """
         update_fields = {}
+        if google_cookies is not None:
+            update_fields["google_cookies"] = google_cookies
 
         if st is not None:
             update_fields["st"] = st

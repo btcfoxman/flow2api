@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 from curl_cffi.requests import AsyncSession
 from ..core.auth import AuthManager
 from ..core.database import Database
+from ..core.flow_cookies import normalize_google_cookies, google_cookie_status
 from ..core.config import config, get_yescaptcha_min_score, normalize_yescaptcha_task_type
 from ..core.monitoring import build_public_health_snapshot
 from ..services.token_manager import TokenManager
@@ -83,6 +84,9 @@ def _normalize_plugin_captcha_proxy_url(request: Dict[str, Any]) -> tuple[Option
         or not parsed.hostname
         or port is None
         or not 1 <= port <= 65535
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
     ):
         raise HTTPException(status_code=400, detail="Invalid captcha_proxy_url")
     return normalized, True
@@ -814,6 +818,7 @@ async def get_tokens(token: str = Depends(verify_admin_token)):
         "current_project_id": row.get("current_project_id"),  # 🆕 项目ID
         "current_project_name": row.get("current_project_name"),  # 🆕 项目名称
         "captcha_proxy_url": row.get("captcha_proxy_url") or "",
+        **google_cookie_status(row.get("google_cookies")),
         "extension_route_key": row.get("extension_route_key") or "",
         "image_enabled": bool(row.get("image_enabled")),
         "video_enabled": bool(row.get("video_enabled")),
@@ -2466,6 +2471,13 @@ async def plugin_update_token(request: dict, authorization: Optional[str] = Head
         raise HTTPException(status_code=401, detail="Invalid connection token")
 
     captcha_proxy_url, proxy_provided = _normalize_plugin_captcha_proxy_url(request)
+    cookies_provided = "google_cookies" in request
+    google_cookies = None
+    if cookies_provided:
+        try:
+            google_cookies = normalize_google_cookies(request["google_cookies"])
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
 
     # Extract session token from request
     session_token = request.get("session_token")
@@ -2511,12 +2523,16 @@ async def plugin_update_token(request: dict, authorization: Optional[str] = Head
             )
             if proxy_provided:
                 update_fields["captcha_proxy_url"] = captcha_proxy_url
+            if cookies_provided:
+                update_fields["google_cookies"] = google_cookies
             await token_manager.update_token(**update_fields)
 
             response = {
                 "success": True,
                 "message": f"Token updated for {email}",
                 "action": "updated",
+                "cookies_updated": cookies_provided,
+                **google_cookie_status(google_cookies if cookies_provided else getattr(existing_token, "google_cookies", None)),
                 "proxy_updated": proxy_provided,
                 "proxy_configured": bool(
                     captcha_proxy_url
@@ -2540,12 +2556,15 @@ async def plugin_update_token(request: dict, authorization: Optional[str] = Head
                 st=session_token,
                 remark="Added by Chrome Extension",
                 captcha_proxy_url=captcha_proxy_url if proxy_provided else None,
+                google_cookies=google_cookies,
             )
 
             return {
                 "success": True,
                 "message": f"Token added for {new_token.email}",
                 "action": "added",
+                "cookies_updated": cookies_provided,
+                **google_cookie_status(google_cookies),
                 "token_id": new_token.id,
                 "proxy_updated": proxy_provided,
                 "proxy_configured": bool(captcha_proxy_url),

@@ -89,7 +89,7 @@ async function connectWS() {
     ws = new WebSocket(url.toString());
 
     ws.onopen = () => {
-        console.log("[Flow2API] Background connected to WebSocket", url.toString());
+        console.log("[Flow2API] Background connected to WebSocket", url.origin + url.pathname);
         ws.send(JSON.stringify({
             type: "register",
             route_key: settings.routeKey,
@@ -141,8 +141,9 @@ async function connectWS() {
 async function handleGetToken(data) {
     let newTabId = null;
     try {
-        console.log("[Flow2API] Auto-opening fresh Google Labs tab to avoid token expiry...");
-        const newTab = await chrome.tabs.create({ url: "https://labs.google/fx/tools/flow", active: false });
+        console.log("[Flow2API] Opening the account's Flow project tab...");
+        const projectUrl = data.project_id ? "https://flow.google.com/project/" + encodeURIComponent(data.project_id) : "https://flow.google.com/";
+        const newTab = await chrome.tabs.create({ url: projectUrl, active: false });
         newTabId = newTab.id;
 
         await waitForTabReady(newTabId);
