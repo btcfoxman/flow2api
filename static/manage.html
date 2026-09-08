@@ -53,29 +53,72 @@
 
         <!-- Token 管理面板 -->
         <div id="panelTokens">
-            <!-- 统计卡片 -->
-            <div class="grid gap-4 grid-cols-2 md:grid-cols-5 mb-6">
-                <div class="rounded-lg border border-border bg-background p-4">
-                    <p class="text-sm font-medium text-muted-foreground mb-2">Token 总数</p>
-                    <h3 class="text-xl font-bold" id="statTotal">-</h3>
+            <!-- 运行统计 -->
+            <section class="mb-6" aria-labelledby="runtimeStatsTitle">
+                <div class="mb-3 flex items-end justify-between gap-4">
+                    <div>
+                        <p class="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Operations</p>
+                        <h2 id="runtimeStatsTitle" class="text-base font-semibold">运行概览</h2>
+                    </div>
+                    <p class="flex items-center gap-2 text-xs text-muted-foreground">
+                        <span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>
+                        每 5 秒自动更新
+                    </p>
                 </div>
-                <div class="rounded-lg border border-border bg-background p-4">
-                    <p class="text-sm font-medium text-muted-foreground mb-2">活跃 Token</p>
-                    <h3 class="text-xl font-bold text-green-600" id="statActive">-</h3>
+                <div class="grid grid-cols-2 gap-3 md:grid-cols-4">
+                    <div class="relative overflow-hidden rounded-lg border border-border bg-background p-4 shadow-sm">
+                        <span class="absolute inset-x-0 top-0 h-0.5 bg-slate-400"></span>
+                        <p class="text-xs font-medium text-muted-foreground">Token 总数</p>
+                        <h3 class="mt-2 text-2xl font-bold tabular-nums" id="statTotal">-</h3>
+                        <p class="mt-1 text-[11px] text-muted-foreground">当前账号规模</p>
+                    </div>
+                    <div class="relative overflow-hidden rounded-lg border border-border bg-background p-4 shadow-sm">
+                        <span class="absolute inset-x-0 top-0 h-0.5 bg-emerald-500"></span>
+                        <p class="text-xs font-medium text-muted-foreground">活跃 Token</p>
+                        <h3 class="mt-2 text-2xl font-bold tabular-nums text-emerald-600" id="statActive">-</h3>
+                        <p class="mt-1 text-[11px] text-muted-foreground">当前可参与调度</p>
+                    </div>
+                    <div class="relative overflow-hidden rounded-lg border border-emerald-200 bg-emerald-50/40 p-4 shadow-sm">
+                        <span class="absolute inset-x-0 top-0 h-0.5 bg-emerald-500"></span>
+                        <p class="text-xs font-medium text-emerald-800">成功任务</p>
+                        <h3 class="mt-2 text-2xl font-bold tabular-nums text-emerald-700" id="statSuccesses">-</h3>
+                        <p class="mt-1 text-[11px] text-emerald-700/70">今日 / 累计</p>
+                    </div>
+                    <div class="relative overflow-hidden rounded-lg border border-border bg-background p-4 shadow-sm">
+                        <span class="absolute inset-x-0 top-0 h-0.5 bg-red-500"></span>
+                        <p class="text-xs font-medium text-muted-foreground">错误记录</p>
+                        <h3 class="mt-2 text-2xl font-bold tabular-nums text-destructive" id="statErrors">-</h3>
+                        <p class="mt-1 text-[11px] text-muted-foreground">今日 / 累计</p>
+                    </div>
+                    <div class="relative overflow-hidden rounded-lg border border-border bg-background p-4 shadow-sm">
+                        <span class="absolute inset-x-0 top-0 h-0.5 bg-blue-500"></span>
+                        <p class="text-xs font-medium text-muted-foreground">图片成功</p>
+                        <h3 class="mt-2 text-2xl font-bold tabular-nums text-blue-600" id="statImages">-</h3>
+                        <p class="mt-1 text-[11px] text-muted-foreground">今日 / 累计</p>
+                    </div>
+                    <div class="relative overflow-hidden rounded-lg border border-border bg-background p-4 shadow-sm">
+                        <span class="absolute inset-x-0 top-0 h-0.5 bg-violet-500"></span>
+                        <p class="text-xs font-medium text-muted-foreground">视频成功</p>
+                        <h3 class="mt-2 text-2xl font-bold tabular-nums text-violet-600" id="statVideos">-</h3>
+                        <p class="mt-1 text-[11px] text-muted-foreground">今日 / 累计</p>
+                    </div>
+                    <div class="relative overflow-hidden rounded-lg border border-cyan-200 bg-cyan-50/40 p-4 shadow-sm">
+                        <span class="absolute inset-x-0 top-0 h-0.5 bg-cyan-500"></span>
+                        <p class="text-xs font-medium text-cyan-800">异步任务池</p>
+                        <h3 class="mt-2 text-2xl font-bold tabular-nums text-cyan-700" id="statTaskPool">-</h3>
+                        <div class="mt-2 h-1 overflow-hidden rounded-full bg-cyan-100" aria-hidden="true">
+                            <div id="statTaskPoolBar" class="h-full rounded-full bg-cyan-500 transition-all duration-300" style="width:0%"></div>
+                        </div>
+                        <p class="mt-1 text-[11px] text-cyan-700/70">占用 / 容量</p>
+                    </div>
+                    <div class="relative overflow-hidden rounded-lg border border-amber-200 bg-amber-50/40 p-4 shadow-sm">
+                        <span class="absolute inset-x-0 top-0 h-0.5 bg-amber-500"></span>
+                        <p class="text-xs font-medium text-amber-800">等待排队</p>
+                        <h3 class="mt-2 text-2xl font-bold tabular-nums text-amber-700" id="statQueued">-</h3>
+                        <p class="mt-1 text-[11px] text-amber-700/70">提交中 <span id="statSubmitting">-</span></p>
+                    </div>
                 </div>
-                <div class="rounded-lg border border-border bg-background p-4">
-                    <p class="text-sm font-medium text-muted-foreground mb-2">今日图片/总图片</p>
-                    <h3 class="text-xl font-bold text-blue-600" id="statImages">-</h3>
-                </div>
-                <div class="rounded-lg border border-border bg-background p-4">
-                    <p class="text-sm font-medium text-muted-foreground mb-2">今日视频/总视频</p>
-                    <h3 class="text-xl font-bold text-purple-600" id="statVideos">-</h3>
-                </div>
-                <div class="rounded-lg border border-border bg-background p-4">
-                    <p class="text-sm font-medium text-muted-foreground mb-2">今日错误/总错误</p>
-                    <h3 class="text-xl font-bold text-destructive" id="statErrors">-</h3>
-                </div>
-            </div>
+            </section>
 
             <!-- Token 列表 -->
             <div class="rounded-lg border border-border bg-background">
@@ -1032,7 +1075,10 @@
         const $=(id)=>document.getElementById(id),
         checkAuth=()=>{const t=localStorage.getItem('adminToken');return t||(location.href='/login',null),t},
         apiRequest=async(url,opts={})=>{const t=checkAuth();if(!t)return null;const r=await fetch(url,{...opts,headers:{...opts.headers,Authorization:`Bearer ${t}`,'Content-Type':'application/json'}});return r.status===401?(localStorage.removeItem('adminToken'),location.href='/login',null):r},
-        loadStats=async()=>{try{const r=await apiRequest('/api/stats');if(!r)return;const d=await r.json();$('statTotal').textContent=d.total_tokens||0;$('statActive').textContent=d.active_tokens||0;$('statImages').textContent=(d.today_images||0)+'/'+(d.total_images||0);$('statVideos').textContent=(d.today_videos||0)+'/'+(d.total_videos||0);$('statErrors').textContent=(d.today_errors||0)+'/'+(d.total_errors||0)}catch(e){console.error('加载统计失败:',e)}},
+        formatStatCount=value=>(Number(value)||0).toLocaleString('zh-CN'),
+        loadStats=async()=>{try{const r=await apiRequest('/api/stats');if(!r)return;const d=await r.json(),q=d.async_task_queue||{},todaySuccesses=d.today_successes??((Number(d.today_images)||0)+(Number(d.today_videos)||0)),totalSuccesses=d.total_successes??((Number(d.total_images)||0)+(Number(d.total_videos)||0)),queueActive=Math.max(0,Number(q.active)||0),queueCapacity=Math.max(1,Number(q.capacity)||50);$('statTotal').textContent=formatStatCount(d.total_tokens);$('statActive').textContent=formatStatCount(d.active_tokens);$('statSuccesses').textContent=`${formatStatCount(todaySuccesses)} / ${formatStatCount(totalSuccesses)}`;$('statImages').textContent=`${formatStatCount(d.today_images)} / ${formatStatCount(d.total_images)}`;$('statVideos').textContent=`${formatStatCount(d.today_videos)} / ${formatStatCount(d.total_videos)}`;$('statErrors').textContent=`${formatStatCount(d.today_errors)} / ${formatStatCount(d.total_errors)}`;$('statTaskPool').textContent=`${formatStatCount(queueActive)} / ${formatStatCount(queueCapacity)}`;$('statQueued').textContent=formatStatCount(q.queued);$('statSubmitting').textContent=formatStatCount(q.submitting);$('statTaskPoolBar').style.width=`${Math.min(100,(queueActive/queueCapacity)*100)}%`}catch(e){console.error('加载统计失败:',e)}},
+        startStatsAutoRefresh=()=>{stopStatsAutoRefresh();window.statsAutoRefreshTimer=setInterval(loadStats,5000)},
+        stopStatsAutoRefresh=()=>{if(window.statsAutoRefreshTimer){clearInterval(window.statsAutoRefreshTimer);window.statsAutoRefreshTimer=null}},
         loadTokens=async()=>{try{const r=await apiRequest('/api/tokens');if(!r)return;allTokens=await r.json();renderTokens()}catch(e){console.error('加载Token失败:',e)}},
         formatExpiry=exp=>{if(!exp)return'<span class="text-muted-foreground">-</span>';const d=new Date(exp),now=new Date(),diff=d-now;const dateStr=d.toLocaleDateString('zh-CN',{year:'numeric',month:'2-digit',day:'2-digit'}).replace(/\//g,'-');const timeStr=d.toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',hour12:false});const hours=Math.floor(diff/36e5);if(diff<0)return`<span class="text-red-600 font-medium" title="已过期">已过期</span>`;if(hours<1)return`<span class="text-red-600 font-medium" title="${dateStr} ${timeStr}">${Math.floor(diff/6e4)}分钟</span>`;if(hours<24)return`<span class="text-orange-600 font-medium" title="${dateStr} ${timeStr}">${hours}小时</span>`;const days=Math.floor(diff/864e5);if(days<7)return`<span class="text-orange-600" title="${dateStr} ${timeStr}">${days}天</span>`;return`<span class="text-muted-foreground" title="${dateStr} ${timeStr}">${days}天</span>`},
         formatPlanType=type=>{if(!type)return'-';const typeMap={'chatgpt_team':'Team','chatgpt_plus':'Plus','chatgpt_pro':'Pro','chatgpt_free':'Free'};return typeMap[type]||type},
@@ -1118,7 +1164,7 @@
         closeLogDetailModal=()=>{window.activeLogDetailId=null;resetLogMediaCache();$('logDetailModal').classList.add('hidden')},
         showToast=(m,t='info')=>{const d=document.createElement('div'),bc={success:'bg-green-600',error:'bg-destructive',info:'bg-primary'};d.className=`fixed bottom-4 right-4 ${bc[t]||bc.info} text-white px-4 py-2.5 rounded-lg shadow-lg text-sm font-medium z-50 animate-slide-up`;d.textContent=m;document.body.appendChild(d);setTimeout(()=>{d.style.opacity='0';d.style.transition='opacity .3s';setTimeout(()=>d.parentNode&&document.body.removeChild(d),300)},2000)},
         logout=()=>{if(!confirm('确定要退出登录吗?'))return;localStorage.removeItem('adminToken');location.href='/login'},
-        switchTab=t=>{const cap=n=>n.charAt(0).toUpperCase()+n.slice(1);['tokens','settings','logs'].forEach(n=>{const active=n===t;$(`panel${cap(n)}`).classList.toggle('hidden',!active);$(`tab${cap(n)}`).classList.toggle('border-primary',active);$(`tab${cap(n)}`).classList.toggle('text-primary',active);$(`tab${cap(n)}`).classList.toggle('border-transparent',!active);$(`tab${cap(n)}`).classList.toggle('text-muted-foreground',!active)});if(t==='settings'){stopLogsAutoRefresh();loadAdminConfig();loadProxyConfig();loadCacheConfig();loadWatermarkConfig();loadGenerationTimeout();loadCallLogicConfig();loadCaptchaConfigWithNative();loadPluginConfig();loadATAutoRefreshConfig()}else if(t==='logs'){startLogsAutoRefresh();loadLogs()}else{stopLogsAutoRefresh()}};
+        switchTab=t=>{const cap=n=>n.charAt(0).toUpperCase()+n.slice(1);['tokens','settings','logs'].forEach(n=>{const active=n===t;$(`panel${cap(n)}`).classList.toggle('hidden',!active);$(`tab${cap(n)}`).classList.toggle('border-primary',active);$(`tab${cap(n)}`).classList.toggle('text-primary',active);$(`tab${cap(n)}`).classList.toggle('border-transparent',!active);$(`tab${cap(n)}`).classList.toggle('text-muted-foreground',!active)});if(t==='settings'){stopStatsAutoRefresh();stopLogsAutoRefresh();loadAdminConfig();loadProxyConfig();loadCacheConfig();loadWatermarkConfig();loadGenerationTimeout();loadCallLogicConfig();loadCaptchaConfigWithNative();loadPluginConfig();loadATAutoRefreshConfig()}else if(t==='logs'){stopStatsAutoRefresh();startLogsAutoRefresh();loadLogs()}else{stopLogsAutoRefresh();loadStats();startStatsAutoRefresh()}};
 
         function escapeLogHtml(text){
             if(text===null||text===undefined) return '';
@@ -1397,7 +1443,7 @@
             const detailContent=$('logDetailContent');detailContent.dataset.logId=String(log.id??'');detailContent.innerHTML=detailHtml;syncLogDetailViewState();
         }
 
-        window.addEventListener('DOMContentLoaded',()=>{checkAuth();refreshTokens();loadATAutoRefreshConfig()});
+        window.addEventListener('DOMContentLoaded',()=>{checkAuth();refreshTokens();startStatsAutoRefresh();loadATAutoRefreshConfig()});
     </script>
 </body>
 </html>

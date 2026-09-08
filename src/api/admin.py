@@ -1412,7 +1412,31 @@ async def health_check():
 @router.get("/api/stats")
 async def get_stats(token: str = Depends(verify_admin_token)):
     """Get statistics for dashboard"""
-    return await db.get_dashboard_stats()
+    dashboard_stats, queue_stats, generation_config = await asyncio.gather(
+        db.get_dashboard_stats(),
+        db.get_async_task_queue_stats(),
+        db.get_generation_config(),
+    )
+
+    total_images = int(dashboard_stats.get("total_images") or 0)
+    total_videos = int(dashboard_stats.get("total_videos") or 0)
+    today_images = int(dashboard_stats.get("today_images") or 0)
+    today_videos = int(dashboard_stats.get("today_videos") or 0)
+    queue_capacity = int(
+        getattr(generation_config, "async_task_queue_capacity", 50) or 50
+    )
+
+    return {
+        **dashboard_stats,
+        # Image/video usage counters are incremented only after a generation has
+        # completed successfully, so their sum is the dashboard success count.
+        "total_successes": total_images + total_videos,
+        "today_successes": today_images + today_videos,
+        "async_task_queue": {
+            **queue_stats,
+            "capacity": queue_capacity,
+        },
+    }
 
 
 @router.get("/api/logs")
