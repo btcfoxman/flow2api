@@ -142,6 +142,17 @@ class FlowClient:
         self._set_request_fingerprint(None)
 
     @asynccontextmanager
+    async def credential_proxy_context(self, proxy_url: str):
+        """Bind an incoming account sync before its token id is known."""
+        if not proxy_url:
+            raise ValueError("Account credential proxy must not be empty")
+        previous = self._request_fingerprint_ctx.set({'proxy_url': proxy_url})
+        try:
+            yield
+        finally:
+            self._request_fingerprint_ctx.reset(previous)
+
+    @asynccontextmanager
     async def native_account_proxy_context(self, token_id: int):
         """Keep credential refresh on the same route as this account's browser."""
         from .browser_captcha_native_cdp import NativeCdpAccountBrowser

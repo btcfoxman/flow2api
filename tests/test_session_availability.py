@@ -47,6 +47,25 @@ class SessionAvailabilityTests(unittest.TestCase):
 
 
 class SessionSchedulingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_incomplete_import_is_skipped_without_consuming_slots(self):
+        manager = SimpleNamespace(native_sessions=SessionAvailability(), get_active_tokens=AsyncMock(return_value=[token()]))
+        balancer = LoadBalancer(manager)
+        with patch('src.services.load_balancer.config', SimpleNamespace(captcha_method='native_cdp')), \
+             patch('src.services.load_balancer.local_session_state',return_value=None):
+            selected=await balancer.select_token(for_image_generation=True,minimum_credits=4,track_pending=True)
+        self.assertIsNone(selected)
+        self.assertFalse(balancer._pending_credits)
+
+    async def test_incomplete_external_snapshot_does_not_block_independent_profile(self):
+        manager = SimpleNamespace(native_sessions=SessionAvailability(), get_active_tokens=AsyncMock(return_value=[token()]),
+                                  needs_at_refresh=lambda value: False, ensure_valid_token=AsyncMock(side_effect=lambda value:value))
+        balancer = LoadBalancer(manager)
+        balancer._check_extension_route=AsyncMock(return_value=(True,''))
+        with patch('src.services.load_balancer.config', SimpleNamespace(captcha_method='native_cdp',call_logic_mode='random')), \
+             patch('src.services.load_balancer.local_session_state',return_value={'version':1}):
+            selected=await balancer.select_token(for_image_generation=True,minimum_credits=4)
+        self.assertEqual(selected.id,1)
+
     async def test_known_invalid_session_is_skipped_before_reserving_credits(self):
         state = SessionAvailability()
         state.reject(token())

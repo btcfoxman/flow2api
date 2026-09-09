@@ -80,7 +80,7 @@ class CookieIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_api_preserves_omitted_cookie_and_syncs_supplied_jar(self):
         db = SimpleNamespace(get_plugin_config=AsyncMock(return_value=SimpleNamespace(connection_token="test-key", auto_enable_on_update=False)),
             get_token_by_email=AsyncMock(return_value=SimpleNamespace(id=1, google_cookies=normalize_google_cookies(JAR), captcha_proxy_url="socks5://localhost:20001", is_active=True)))
-        manager = SimpleNamespace(flow_client=SimpleNamespace(st_to_at=AsyncMock(return_value={"access_token":"at", "user":{"email":"test@example.com"}})), update_token=AsyncMock())
+        manager = SimpleNamespace(flow_client=SimpleNamespace(st_to_at=AsyncMock(return_value={"access_token":"at", "expires":"2099-01-01T00:00:00Z", "user":{"email":"test@example.com"}}), get_credits=AsyncMock(return_value={"credits":100})), update_token=AsyncMock())
         with patch("src.api.admin.db", db), patch("src.api.admin.token_manager", manager):
             old = await plugin_update_token({"session_token":"st"}, "Bearer test-key")
             self.assertFalse(old["cookies_updated"])

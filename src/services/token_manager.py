@@ -349,12 +349,18 @@ class TokenManager:
         captcha_proxy_url: Optional[str] = None,
         extension_route_key: Optional[str] = None,
         google_cookies: Optional[str] = None,
+        credits: Optional[int] = None,
+        user_paygate_tier: Optional[str] = None,
     ):
         """Update token (支持修改project_id和project_name)
 
         当用户编辑保存token时，如果token未过期，自动清空429禁用状态
         """
         update_fields = {}
+        if credits is not None:
+            update_fields["credits"] = credits
+        if user_paygate_tier is not None:
+            update_fields["user_paygate_tier"] = user_paygate_tier
         if google_cookies is not None:
             update_fields["google_cookies"] = google_cookies
 

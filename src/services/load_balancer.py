@@ -4,6 +4,9 @@ import random
 from typing import Collection, Optional, Dict
 from ..core.models import Token
 from ..core.config import config
+from ..core.flow_cookies import has_complete_flow_cookies
+from ..core.native_session_state import local_session_state
+from ..core.generation_errors import NativeSessionError
 from ..core.credits import (
     get_minimum_generation_credits,
     has_minimum_generation_credits,
@@ -329,6 +332,19 @@ class LoadBalancer:
 
         for token in active_tokens:
             video_proxy_state = None
+            if config.captcha_method == "native_cdp":
+                raw_cookies = getattr(token, "google_cookies", None)
+                if raw_cookies and not has_complete_flow_cookies(raw_cookies):
+                    try:
+                        locally_owned = bool(local_session_state(token.id))
+                    except NativeSessionError:
+                        locally_owned = False
+                    if not locally_owned:
+                        # The browser seed rejects this exact snapshot too. Do not
+                        # repeatedly launch browsers and log failed user generations
+                        # while waiting for the source to supply complete credentials.
+                        filtered_reasons[token.id] = "incomplete Google session; waiting for source synchronization"
+                        continue
             sessions = getattr(self.token_manager, "native_sessions", None)
             if (config.captcha_method == "native_cdp" and sessions is not None
                     and not sessions.available(token)):

@@ -3,6 +3,7 @@ import json
 import subprocess
 import tempfile
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -116,9 +117,11 @@ class NativeLocalSessionTests(unittest.IsolatedAsyncioTestCase):
     async def test_sync_cannot_overwrite_or_auto_enable_local_account(self):
         database = SimpleNamespace(
             get_plugin_config=AsyncMock(return_value=SimpleNamespace(connection_token='test-key',auto_enable_on_update=True)),
-            get_token_by_email=AsyncMock(return_value=SimpleNamespace(id=43,is_active=False)))
+            get_token_by_email=AsyncMock(return_value=SimpleNamespace(id=43,is_active=False)),
+            get_token_by_st=AsyncMock(return_value=SimpleNamespace(id=43)))
         manager=SimpleNamespace(flow_client=SimpleNamespace(st_to_at=AsyncMock(return_value={
-            'access_token':'external-at','user':{'email':'local@example.test'}})),
+            'access_token':'external-at','expires':'2099-01-01T00:00:00Z','user':{'email':'local@example.test'}}),
+            native_account_proxy_context=lambda token_id: nullcontext()),
             update_token=AsyncMock(),enable_token=AsyncMock())
         previous=config.captcha_method
         config.set_captcha_method('native_cdp')

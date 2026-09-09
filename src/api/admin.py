@@ -1,6 +1,7 @@
 """Admin API routes"""
 import asyncio
 import json
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Header, Request
 from fastapi.responses import JSONResponse
@@ -2488,6 +2489,27 @@ async def plugin_update_token(request: dict, authorization: Optional[str] = Head
     if not session_token:
         raise HTTPException(status_code=400, detail="Missing session_token")
 
+    # A sync does not know the account email until ST exchange. Explicit profile
+    # routes must therefore be bound before that exchange, not only saved after it.
+    scope = nullcontext()
+    if proxy_provided:
+        scope = token_manager.flow_client.credential_proxy_context(captcha_proxy_url)
+    elif config.captcha_method == "native_cdp":
+        known = await db.get_token_by_st(session_token)
+        if known is None:
+            raise HTTPException(status_code=400, detail="首次同步或 session token 已变更，请提供与源 Profile 同出口的 captcha_proxy_url")
+        scope = token_manager.flow_client.native_account_proxy_context(known.id)
+    async with scope:
+        return await _sync_plugin_token_on_bound_proxy(
+            session_token, plugin_config, captcha_proxy_url, proxy_provided,
+            google_cookies, cookies_provided,
+        )
+
+
+async def _sync_plugin_token_on_bound_proxy(
+    session_token, plugin_config, captcha_proxy_url, proxy_provided,
+    google_cookies, cookies_provided,
+):
     # Step 1: Convert ST to AT to get user info (including email)
     try:
         result = await token_manager.flow_client.st_to_at(session_token)
@@ -2500,23 +2522,49 @@ async def plugin_update_token(request: dict, authorization: Optional[str] = Head
             raise HTTPException(status_code=400, detail="Failed to get email from session token")
 
         # Parse expiration time
-        from datetime import datetime
         at_expires = None
+        if not expires:
+            raise HTTPException(status_code=400, detail="Invalid session token: missing Labs authorization expiration")
         if expires:
             try:
                 at_expires = datetime.fromisoformat(expires.replace('Z', '+00:00'))
-            except:
-                pass
+            except (ValueError, TypeError):
+                raise HTTPException(status_code=400, detail="Invalid session token expiration; renew Labs authorization") from None
+            if at_expires.tzinfo is None:
+                at_expires = at_expires.replace(tzinfo=timezone.utc)
+            if at_expires <= datetime.now(timezone.utc):
+                raise HTTPException(status_code=400, detail="Expired Labs session token authorization; renew Labs sign-in before syncing")
+        if not isinstance(at, str) or not at.strip():
+            raise HTTPException(status_code=400, detail="Invalid session token: missing access token")
 
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Invalid session token: {str(e)}")
+    except HTTPException:
+        raise
+    except Exception:
+        # Upstream exceptions can contain credentials or internal URLs.
+        raise HTTPException(status_code=400, detail="Invalid session token or account proxy unavailable; verify Labs sign-in and profile proxy") from None
 
     # Step 2: Check if token with this email exists
     existing_token = await db.get_token_by_email(email)
 
+    if (existing_token and config.captcha_method == 'native_cdp'
+            and local_session_state(existing_token.id)):
+        raise HTTPException(status_code=409, detail="该账号采用服务器独立登录，请在目标 Native Profile 更新会话；同步端不能覆盖本地登录态")
+
+    # A successful /auth/session response may still contain a revoked OAuth AT.
+    # Validate without charging or writing credentials before any auto-enable.
+    try:
+        credits_result = await token_manager.flow_client.get_credits(at)
+        credits = credits_result["credits"]
+        if isinstance(credits, bool) or not isinstance(credits, (int, float)) or credits < 0:
+            raise ValueError("Invalid balance response")
+        credits = int(credits)
+    except Exception as exc:
+        from ..core.generation_errors import is_upstream_authentication_error
+        if is_upstream_authentication_error(exc):
+            raise HTTPException(status_code=400, detail="Invalid session token: Labs access token rejected; renew Labs authorization") from None
+        raise HTTPException(status_code=503, detail="Account verification temporarily unavailable; credentials were not updated") from None
+
     if existing_token:
-        if config.captcha_method == 'native_cdp' and local_session_state(existing_token.id):
-            raise HTTPException(status_code=409, detail="该账号采用服务器独立登录，请在目标 Native Profile 更新会话；同步端不能覆盖本地登录态")
         # Update existing token
         try:
             # Update token
@@ -2524,7 +2572,9 @@ async def plugin_update_token(request: dict, authorization: Optional[str] = Head
                 token_id=existing_token.id,
                 st=session_token,
                 at=at,
-                at_expires=at_expires
+                at_expires=at_expires,
+                credits=credits,
+                user_paygate_tier=credits_result.get("userPaygateTier"),
             )
             if proxy_provided:
                 update_fields["captcha_proxy_url"] = captcha_proxy_url
@@ -2536,6 +2586,9 @@ async def plugin_update_token(request: dict, authorization: Optional[str] = Head
                 "success": True,
                 "message": f"Token updated for {email}",
                 "action": "updated",
+                "token_id": existing_token.id,
+                "account_active": bool(existing_token.is_active),
+                "oauth_verified": True,
                 "cookies_updated": cookies_provided,
                 **google_cookie_status(google_cookies if cookies_provided else getattr(existing_token, "google_cookies", None)),
                 "proxy_updated": proxy_provided,
@@ -2550,6 +2603,7 @@ async def plugin_update_token(request: dict, authorization: Optional[str] = Head
                 await token_manager.enable_token(existing_token.id)
                 response["message"] = f"Token updated and auto-enabled for {email}"
                 response["auto_enabled"] = True
+                response["account_active"] = True
 
             return response
         except Exception as e:
@@ -2568,6 +2622,8 @@ async def plugin_update_token(request: dict, authorization: Optional[str] = Head
                 "success": True,
                 "message": f"Token added for {new_token.email}",
                 "action": "added",
+                "account_active": bool(new_token.is_active),
+                "oauth_verified": True,
                 "cookies_updated": cookies_provided,
                 **google_cookie_status(google_cookies),
                 "token_id": new_token.id,
