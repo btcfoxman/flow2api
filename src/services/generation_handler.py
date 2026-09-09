@@ -3093,10 +3093,11 @@ class GenerationHandler:
                 status = operation.get("status")
 
                 # Keep progress reporting near 20 seconds when poll_interval changes.
-                if stream and attempt % progress_update_interval == 0:
+                if attempt % progress_update_interval == 0:
                     progress = min(int((attempt / max_attempts) * 100), 95)
                     await self._update_request_log_progress(request_log_state, token_id=token.id, status_text="video_polling", progress=max(45, progress), response_extra={"upstream_status": status})
-                    yield self._create_stream_chunk(f"生成进度: {progress}%\n")
+                    if stream:
+                        yield self._create_stream_chunk(f"生成进度: {progress}%\n")
 
                 # 检查状态
                 if status == "MEDIA_GENERATION_STATUS_SUCCESSFUL":
@@ -3256,6 +3257,11 @@ class GenerationHandler:
                             # 拼接失败不影响返回，继续使用 extend 片段的 URL
 
                     # 缓存视频 (如果启用)
+                    await self._update_request_log_progress(
+                        request_log_state, token_id=token.id,
+                        status_text="video_postprocessing", progress=90,
+                        response_extra={"upstream_status": status},
+                    )
                     original_video_url = video_url
                     local_url = await self.watermark_processor.apply_policy(
                         url=video_url,

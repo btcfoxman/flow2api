@@ -84,3 +84,24 @@ class VideoPollAuthRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('authentication', public['message'])
         self.assertFalse(handler._should_record_token_error(result['error_message'], 503))
         self.assertEqual(handler._fail_video_task.await_args.args[0], operations)
+
+    async def test_non_streaming_task_reports_poll_and_postprocessing_stages(self):
+        handler = self.handler()
+        handler.flow_client.check_video_status.return_value = {
+            'operations': [{'operation': {'name': 'task', 'metadata': {
+                'video': {'fifeUrl': 'https://example.test/source'}}},
+                'status': 'MEDIA_GENERATION_STATUS_SUCCESSFUL'}]}
+        async def postprocess(**kwargs):
+            self.assertEqual(handler._update_request_log_progress.await_args.kwargs['status_text'],
+                             'video_postprocessing')
+            return 'https://example.test/processed'
+        handler.watermark_processor.apply_policy.side_effect = postprocess
+        result = {}
+        with patch('src.services.generation_handler.asyncio.sleep', AsyncMock()):
+            chunks = [chunk async for chunk in handler._poll_video_result(
+                SimpleNamespace(id=7, at='at', st='st'), 'project',
+                [{'operation': {'name': 'task'}}], False, generation_result=result)]
+        stages = [call.kwargs['status_text'] for call in handler._update_request_log_progress.await_args_list]
+        self.assertEqual(stages, ['video_polling', 'video_postprocessing'])
+        self.assertTrue(result['success'])
+        self.assertEqual(len(chunks), 1)

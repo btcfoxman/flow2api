@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import time
 import mimetypes
+import uuid
 from pathlib import Path
 from typing import Optional, Dict, Any
 from datetime import datetime, timedelta
@@ -177,6 +178,40 @@ class FileCache:
                 except Exception:
                     pass
 
+    @staticmethod
+    async def _run_download_command(command, *, env=None, timeout=90):
+        """Keep fallback downloads off the event loop and reap on cancellation."""
+        process = await asyncio.create_subprocess_exec(
+            *command, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE, env=env,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout)
+            return process.returncode, stdout, stderr
+        except BaseException:
+            if process.returncode is None:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+            await process.communicate()
+            raise
+
+    async def _download_with_command(self, command, file_path, *, env):
+        # Command-line tools must never expose an incomplete final cache file.
+        staging = file_path.with_name(file_path.name + "." + uuid.uuid4().hex + ".download")
+        try:
+            command = [str(staging) if arg == str(file_path) else arg for arg in command]
+            code, _, _ = await self._run_download_command(command, env=env)
+            if code != 0:
+                # Do not include argv/stderr: both may contain signed URLs.
+                raise RuntimeError(f"Media download command failed (exit {code})")
+            if not staging.exists() or staging.stat().st_size <= 0:
+                raise RuntimeError("Downloaded file is empty")
+            staging.replace(file_path)
+        finally:
+            staging.unlink(missing_ok=True)
+
     async def start_cleanup_task(self):
         """Start background cleanup task"""
         if self._is_cleanup_disabled():
@@ -314,7 +349,7 @@ class FileCache:
 
             # Try method 1: curl_cffi with browser impersonation
             try:
-                async with AsyncSession() as session:
+                async with AsyncSession(trust_env=False) as session:
                     response = await session.get(
                         url,
                         timeout=60,
@@ -337,9 +372,17 @@ class FileCache:
             except Exception as e:
                 debug_logger.log_warning(f"curl_cffi failed: {str(e)}, trying wget...")
 
-            # Try method 2: wget command
+            # Ignore process-wide proxy variables; use this request's binding.
+            download_env = {key: value for key, value in os.environ.items()
+                            if key.lower() not in {"http_proxy", "https_proxy", "all_proxy", "no_proxy"}}
+            if proxy_url:
+                download_env["http_proxy"] = proxy_url
+                download_env["https_proxy"] = proxy_url
+
+            # Try method 2: wget command (GNU wget does not support SOCKS).
             try:
-                import subprocess
+                if proxy_url and urlparse(proxy_url).scheme.lower().startswith("socks"):
+                    raise RuntimeError("SOCKS download requires curl")
 
                 wget_cmd = [
                     "wget",
@@ -361,25 +404,10 @@ class FileCache:
                 if "sec-ch-ua-platform" in headers:
                     wget_cmd.append(f"--header=sec-ch-ua-platform: {headers['sec-ch-ua-platform']}")
 
-                if proxy_url:
-                    env = os.environ.copy()
-                    env["http_proxy"] = proxy_url
-                    env["https_proxy"] = proxy_url
-                else:
-                    env = None
-
                 wget_cmd.append(url)
-                result = subprocess.run(wget_cmd, capture_output=True, timeout=90, env=env)
-
-                if result.returncode == 0 and file_path.exists():
-                    file_size = file_path.stat().st_size
-                    if file_size > 0:
-                        debug_logger.log_info(f"File cached (wget): {filename} ({file_size} bytes)")
-                        return filename
-                    raise Exception("Downloaded file is empty")
-
-                error_msg = result.stderr.decode("utf-8", errors="ignore") if result.stderr else "Unknown error"
-                debug_logger.log_warning(f"wget failed: {error_msg}, trying curl...")
+                await self._download_with_command(wget_cmd, file_path, env=download_env)
+                debug_logger.log_info(f"File cached (wget): {filename} ({file_path.stat().st_size} bytes)")
+                return filename
 
             except FileNotFoundError:
                 debug_logger.log_warning("wget not found, trying curl...")
@@ -388,10 +416,9 @@ class FileCache:
 
             # Try method 3: system curl command
             try:
-                import subprocess
-
                 curl_cmd = [
                     "curl",
+                    "--fail",
                     "-L",
                     "-s",
                     "-o", str(file_path),
@@ -413,17 +440,9 @@ class FileCache:
                     curl_cmd.extend(["-x", proxy_url])
 
                 curl_cmd.append(url)
-                result = subprocess.run(curl_cmd, capture_output=True, timeout=90)
-
-                if result.returncode == 0 and file_path.exists():
-                    file_size = file_path.stat().st_size
-                    if file_size > 0:
-                        debug_logger.log_info(f"File cached (curl): {filename} ({file_size} bytes)")
-                        return filename
-                    raise Exception("Downloaded file is empty")
-
-                error_msg = result.stderr.decode("utf-8", errors="ignore") if result.stderr else "Unknown error"
-                raise Exception(f"curl command failed: {error_msg}")
+                await self._download_with_command(curl_cmd, file_path, env=download_env)
+                debug_logger.log_info(f"File cached (curl): {filename} ({file_path.stat().st_size} bytes)")
+                return filename
 
             except FileNotFoundError as e:
                 normalized_error = self._normalize_cache_error(e)
