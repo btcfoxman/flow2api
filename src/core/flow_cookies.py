@@ -73,7 +73,9 @@ def google_cookie_status(raw: Any) -> dict:
     return {
         "cookies_configured": bool(cookies),
         "flow_cookies_configured": any(c["domain"].lstrip(".") == "flow.google.com" and c["name"] in {"OSID", "__Secure-OSID"} for c in cookies),
-        "google_session_cookies_configured": any(c["domain"] == ".google.com" and c["name"] in {"SID", "__Secure-1PSID", "__Secure-3PSID"} and c["value"] for c in cookies),
+        # HTTPS-only extension permissions expose Secure PSID but silently omit
+        # SID. That partial snapshot passes OAuth yet redirects Flow to /about.
+        "google_session_cookies_configured": any(c["domain"] == ".google.com" and c["path"] == "/" and c["name"] == "SID" and c["value"] for c in cookies),
         "cookie_count": len(cookies),
     }
 

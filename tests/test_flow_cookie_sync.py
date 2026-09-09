@@ -18,6 +18,12 @@ JAR = [{"name": "SID", "value": "test-google", "domain": ".google.com", "path": 
 
 
 class CookieTests(unittest.TestCase):
+    def test_secure_psid_does_not_hide_a_missing_nonsecure_root_sid(self):
+        partial = [{**JAR[0], "name": "__Secure-1PSID"}, JAR[1]]
+        self.assertFalse(google_cookie_status(partial)["google_session_cookies_configured"])
+        self.assertTrue(google_cookie_status(JAR)["google_session_cookies_configured"])
+        self.assertFalse(google_cookie_status([{**JAR[0], "path": "/other"}, JAR[1]])["google_session_cookies_configured"])
+
     def test_preserves_scope_and_expiry(self):
         cookies = json.loads(normalize_google_cookies(JAR + [{**JAR[0], "value": "new", "expirationDate": 4102444800}]))
         self.assertEqual(len(cookies), 2)

@@ -999,6 +999,19 @@ class NativeCdpAccountBrowser:
         self._project_sessions[cache_key] = (target_id, session_id)
         return target_id, session_id
 
+    async def verify_session(self, project_id: str) -> None:
+        """Non-charging Flow page preflight, serialized with this account's work."""
+        async with self.solve_lock:
+            try:
+                await self._prepare_profile(for_solve=False)
+                await self._get_or_create_project_session(project_id, "angular")
+                self.last_error = None
+            except Exception as exc:
+                self.last_error = f"{type(exc).__name__}: {str(exc)[:240]}"
+                if isinstance(exc, NativeSessionError):
+                    debug_logger.log_runtime_event("native_sync_preflight_failed", token_id=self.token_id, **exc.diagnostic())
+                raise
+
     async def _discard_project_session(self, project_id: Optional[str], page_protocol: str = "labs") -> None:
         if page_protocol == "labs" and self._legacy_migrated:
             page_protocol = "angular"
@@ -1735,6 +1748,24 @@ class BrowserCaptchaService:
         finally:
             if queued:
                 self._queued = max(0, self._queued - 1)
+
+    async def verify_session(self, token_id: int, project_id: str) -> None:
+        """Use the production profile and proxy without solving or generating."""
+        if self._closed:
+            raise RuntimeError("native_cdp service is closed")
+        worker = self._workers.get(int(token_id))
+        if worker is None:
+            worker = NativeCdpAccountBrowser(int(token_id), self.db)
+            self._workers[int(token_id)] = worker
+        worker.busy_count += 1
+        try:
+            await self._ensure_capacity(worker)
+            await worker.verify_session(project_id)
+        finally:
+            worker.busy_count = max(0, worker.busy_count - 1)
+            worker.last_used_at = time.monotonic()
+            async with self._capacity_condition:
+                self._capacity_condition.notify_all()
 
     async def get_token(
         self,

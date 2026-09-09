@@ -2479,7 +2479,7 @@ async def plugin_update_token(request: dict, authorization: Optional[str] = Head
         try:
             google_cookies = normalize_google_cookies(request["google_cookies"])
             if not has_complete_flow_cookies(google_cookies):
-                raise ValueError("Google/Flow 会话 Cookie 不完整：需同时包含 .google.com 登录 Cookie 和 Flow OSID；请升级并重新加载同步插件、批准 Google 主域权限后重新同步")
+                raise ValueError("Google/Flow 会话 Cookie 不完整：需同时包含 .google.com SID 和 Flow OSID，只有 Secure PSID 不足；请升级并重新加载同步插件、批准 Google HTTP/HTTPS 域权限后重新同步")
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
 
@@ -2582,6 +2582,10 @@ async def _sync_plugin_token_on_bound_proxy(
                 update_fields["google_cookies"] = google_cookies
             await token_manager.update_token(**update_fields)
 
+            native_verified = None
+            if config.captcha_method == "native_cdp" and cookies_provided:
+                native_verified = await token_manager.verify_native_session(existing_token.id)
+
             response = {
                 "success": True,
                 "message": f"Token updated for {email}",
@@ -2589,6 +2593,7 @@ async def _sync_plugin_token_on_bound_proxy(
                 "token_id": existing_token.id,
                 "account_active": bool(existing_token.is_active),
                 "oauth_verified": True,
+                "native_session_verified": native_verified,
                 "cookies_updated": cookies_provided,
                 **google_cookie_status(google_cookies if cookies_provided else getattr(existing_token, "google_cookies", None)),
                 "proxy_updated": proxy_provided,
@@ -2599,7 +2604,7 @@ async def _sync_plugin_token_on_bound_proxy(
             }
 
             # Check if auto-enable is enabled and token is disabled
-            if plugin_config.auto_enable_on_update and not existing_token.is_active:
+            if plugin_config.auto_enable_on_update and not existing_token.is_active and native_verified is not False:
                 await token_manager.enable_token(existing_token.id)
                 response["message"] = f"Token updated and auto-enabled for {email}"
                 response["auto_enabled"] = True
@@ -2618,12 +2623,17 @@ async def _sync_plugin_token_on_bound_proxy(
                 google_cookies=google_cookies,
             )
 
+            native_verified = None
+            if config.captcha_method == "native_cdp" and cookies_provided:
+                native_verified = await token_manager.verify_native_session(new_token.id)
+
             return {
                 "success": True,
                 "message": f"Token added for {new_token.email}",
                 "action": "added",
                 "account_active": bool(new_token.is_active),
                 "oauth_verified": True,
+                "native_session_verified": native_verified,
                 "cookies_updated": cookies_provided,
                 **google_cookie_status(google_cookies),
                 "token_id": new_token.id,

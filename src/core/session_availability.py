@@ -19,8 +19,22 @@ class SessionAvailability:
                   for key in ("st", "google_cookies", "captcha_proxy_url")]
         return hashlib.sha256(json.dumps(values).encode()).digest()
 
-    def reject(self, token):
-        self._blocked[int(token.id)] = (self._revision(token), time.monotonic() + self.RETRY_SECONDS)
+    def reject(self, token, error=None):
+        # A confirmed signed-out imported session is not a transient transport
+        # failure. Retrying it with user jobs every five minutes cannot repair it.
+        # Explicit sync verification can still probe without submitting media.
+        from .generation_errors import NativeSessionError
+        from .native_session_state import local_session_state
+        signed_out = isinstance(error, NativeSessionError) and (
+            error.reason in {"google_session_cookies_incomplete", "flow_login_unavailable", "upstream_authentication_rejected"}
+            or (error.reason == "project_context_unavailable" and error.page_path.rstrip("/") == "/about")
+        )
+        try:
+            locally_owned = bool(local_session_state(token.id)) if signed_out else False
+        except NativeSessionError:
+            locally_owned = False
+        until = float("inf") if signed_out and not locally_owned else time.monotonic() + self.RETRY_SECONDS
+        self._blocked[int(token.id)] = (self._revision(token), until)
 
     def available(self, token):
         entry = self._blocked.get(int(token.id))

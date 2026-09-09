@@ -159,6 +159,31 @@ class TokenManager:
         """Get token by ID"""
         return await self.db.get_token(token_id)
 
+    async def verify_native_session(self, token_id: int) -> bool:
+        """A sync receipt is not a target-browser authentication verdict."""
+        from .browser_captcha_native_cdp import BrowserCaptchaService
+        from ..core.generation_errors import NativeSessionError
+        token = await self.db.get_token(token_id)
+        if token is None:
+            return False
+        revision = self.native_sessions._revision(token)
+        self.native_sessions.reject(token)
+        try:
+            service = await BrowserCaptchaService.get_instance(self.db)
+            await asyncio.wait_for(service.verify_session(token.id, token.current_project_id or ""), timeout=45)
+        except Exception as exc:
+            current = await self.db.get_token(token_id)
+            if current is not None and self.native_sessions._revision(current) == revision:
+                self.native_sessions.reject(token, exc)
+            debug_logger.log_runtime_event("sync_session_unverified", token_id=token_id,
+                stage="browser_preflight", reason=exc.reason if isinstance(exc, NativeSessionError) else "verification_unavailable")
+            return False
+        current = await self.db.get_token(token_id)
+        if current is None or self.native_sessions._revision(current) != revision:
+            return False
+        self.native_sessions.discard(token_id)
+        return True
+
     async def delete_token(self, token_id: int):
         """Delete token"""
         token = await self.db.get_token(token_id)

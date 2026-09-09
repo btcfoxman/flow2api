@@ -15,6 +15,25 @@ def token(token_id=1, **changes):
 
 
 class SessionAvailabilityTests(unittest.TestCase):
+    def test_imported_about_page_requires_new_credentials_not_timer_expiry(self):
+        from src.core.generation_errors import NativeSessionError
+        state = SessionAvailability()
+        error = NativeSessionError("project_context_unavailable", page_url="https://flow.google.com/about")
+        with patch("src.core.native_session_state.local_session_state", return_value=None):
+            state.reject(token(), error)
+        with patch("src.core.session_availability.time.monotonic", return_value=10**12):
+            self.assertFalse(state.available(token()))
+            self.assertTrue(state.available(token(google_cookies="new-snapshot")))
+
+    def test_independent_local_login_still_allows_bounded_health_recheck(self):
+        from src.core.generation_errors import NativeSessionError
+        state = SessionAvailability()
+        with patch("src.core.native_session_state.local_session_state", return_value={"version":1}), \
+             patch("src.core.session_availability.time.monotonic", return_value=100):
+            state.reject(token(), NativeSessionError("flow_login_unavailable"))
+        with patch("src.core.session_availability.time.monotonic", return_value=401):
+            self.assertTrue(state.available(token()))
+
     def test_rejected_session_is_account_local_and_keeps_no_credentials(self):
         state = SessionAvailability()
         state.reject(token())

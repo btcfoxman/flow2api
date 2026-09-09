@@ -1938,7 +1938,7 @@ class GenerationHandler:
                 if isinstance(e, NativeSessionError):
                     sessions = getattr(self.token_manager, "native_sessions", None)
                     if token and sessions is not None:
-                        sessions.reject(token)
+                        sessions.reject(token, e)
                     debug_logger.log_runtime_event("generation_preflight_failed", request_id=request_id,
                                                    token_id=getattr(token, "id", None), **e.diagnostic())
             elif generation_type == "video" and is_project_image_upload_error(raw_error_msg):
