@@ -6,7 +6,7 @@ admin_password = "admin"
 [flow]
 angular_video_models = [] # exact opt-in; supports 720p aliases, preserves 360p-only selections
 angular_video_families = [] # opt-in ["abra_r2v", "abra_edit"] for both 360p/720p; r2v supports 4/6/8/10s
-native_video_upload = true # new resumable upload when native_cdp account has Flow cookies
+native_video_upload = true # new upload only for an opted-in Angular model; cookie presence does not switch protocols
 labs_base_url = "https://labs.google/fx/api"
 api_base_url = "https://aisandbox-pa.googleapis.com/v1"
 timeout = 120

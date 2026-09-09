@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 from typing import Optional, AsyncGenerator, List, Dict, Any, Set
 from ..core.logger import debug_logger
+from ..core.generation_errors import NativeSessionError, is_native_session_error, is_upstream_authentication_error
 from ..core.config import config
 from ..core.credits import (
     is_quota_exhausted_error,
@@ -1319,6 +1320,8 @@ class GenerationHandler:
 
         if numeric_status_code is not None and numeric_status_code < 500:
             return False
+        if is_native_session_error(error_message) or is_upstream_authentication_error(error_message):
+            return False
         if is_quota_exhausted_error(text):
             return False
         if is_media_traffic_error(text):
@@ -1929,6 +1932,15 @@ class GenerationHandler:
                     return
                 error_msg = quota_exhausted_message(required_credits)
                 response_status_code = 503
+            elif is_native_session_error(e):
+                error_msg = media_service_unavailable_message(generation_type)
+                response_status_code = 503
+                if isinstance(e, NativeSessionError):
+                    sessions = getattr(self.token_manager, "native_sessions", None)
+                    if token and sessions is not None:
+                        sessions.reject(token)
+                    debug_logger.log_runtime_event("generation_preflight_failed", request_id=request_id,
+                                                   token_id=getattr(token, "id", None), **e.diagnostic())
             elif generation_type == "video" and is_project_image_upload_error(raw_error_msg):
                 error_msg, response_status_code = project_image_upload_failure_response(
                     raw_error_msg
@@ -1949,7 +1961,7 @@ class GenerationHandler:
                 response_status_code,
             )
             debug_logger.log_error(f"[GENERATION] ❌ {error_msg}")
-            if token and self._should_record_token_error(error_msg, response_status_code):
+            if token and self._should_record_token_error(raw_error_msg, response_status_code):
                 # 记录错误（所有错误统一处理，不再特殊处理429）
                 await self.token_manager.record_error(token.id)
             elif token:
@@ -1968,7 +1980,8 @@ class GenerationHandler:
                 token.id if token else None,
                 request_operation if generation_type else "generate_unknown",
                 request_payload if 'request_payload' in locals() else {"model": model},
-                {"error": error_msg, "performance": perf_trace},
+                {"error": error_msg, "performance": perf_trace,
+                 **({"internal_failure": e.diagnostic()} if isinstance(e, NativeSessionError) else {})},
                 response_status_code,
                 duration,
                 log_id=request_log_state.get("id"),
@@ -2429,6 +2442,7 @@ class GenerationHandler:
                         project_id=active_project_id,
                         st=token.st,
                         token_id=token.id,
+                        model_key=model_key,
                     )
                     if image_count == 2:
                         uploaded_end_media_id = await self.flow_client.upload_image(
@@ -2438,6 +2452,7 @@ class GenerationHandler:
                             project_id=active_project_id,
                             st=token.st,
                             token_id=token.id,
+                            model_key=model_key,
                         )
                 elif video_type in {"r2v", "v2v"} and images:
                     for img in images:
@@ -2448,6 +2463,7 @@ class GenerationHandler:
                             project_id=active_project_id,
                             st=token.st,
                             token_id=token.id,
+                            model_key=model_key,
                         )
                         uploaded_reference_images.append({
                             "imageUsageType": "IMAGE_USAGE_TYPE_ASSET",
@@ -2529,6 +2545,7 @@ class GenerationHandler:
                         yield self._create_stream_chunk("上传参考视频...\n")
                     video_upload = await self.flow_client.upload_video_with_metadata(
                         token_id=token.id,
+                        model_key=model_key,
                         st=token.st,
                         project_id=project_id,
                         video_bytes=video_bytes,
@@ -2915,7 +2932,7 @@ class GenerationHandler:
                 status_text="failed",
                 progress=100,
             )
-            if self._should_record_token_error(error_msg, 500):
+            if self._should_record_token_error(exc, 500):
                 await self.token_manager.record_error(token.id)
             else:
                 debug_logger.log_info(
@@ -3045,15 +3062,29 @@ class GenerationHandler:
         consecutive_poll_errors = 0
         last_poll_error: Optional[Exception] = None
         max_consecutive_poll_errors = 3
+        waiting_for_session = False
+        session_wait_deadline = time.monotonic() + max_attempts * poll_interval
 
         for attempt in range(max_attempts):
+            if waiting_for_session and time.monotonic() >= session_wait_deadline:
+                break
             await asyncio.sleep(poll_interval)
 
             try:
+                # Synchronization may replace credentials while an accepted task
+                # runs. Never switch its owner or keep using a stale access token.
+                if self.db is not None:
+                    latest_token = await self.db.get_token(token.id)
+                    if latest_token is not None and latest_token.id == token.id:
+                        latest_at = getattr(latest_token, "at", None)
+                        if isinstance(latest_at, str) and latest_at:
+                            token.at = latest_at
+                            token.st = latest_token.st
                 result = await self.flow_client.check_video_status(token.at, operations)
                 checked_operations = result.get("operations", [])
                 consecutive_poll_errors = 0
                 last_poll_error = None
+                waiting_for_session = False
 
                 if not checked_operations:
                     continue
@@ -3389,6 +3420,18 @@ class GenerationHandler:
 
             except Exception as e:
                 last_poll_error = e
+                if is_native_session_error(e) or is_upstream_authentication_error(e):
+                    # Allow same-account re-sync during the normal polling window;
+                    # authentication is not a verdict on this accepted operation.
+                    if not waiting_for_session:
+                        debug_logger.log_runtime_event("video_poll_waiting_session", token_id=token.id,
+                            stage="video_polling", reason="authentication_unavailable")
+                    waiting_for_session = True
+                    await self._update_request_log_progress(request_log_state, token_id=token.id,
+                        status_text="video_poll_waiting_session", progress=45,
+                        response_extra={"task_id": _operation_task_id(operations)})
+                    await asyncio.sleep(max(0.0, 10.0 - poll_interval))
+                    continue
                 consecutive_poll_errors += 1
                 debug_logger.log_error(f"Poll error: {str(e)}")
                 if consecutive_poll_errors >= max_consecutive_poll_errors:
@@ -3414,12 +3457,17 @@ class GenerationHandler:
                 continue
 
         # 超时
-        if last_poll_error is not None:
+        poll_status_code = 504
+        if waiting_for_session and last_poll_error is not None:
+            # Persisted operation IDs remain available for operator recovery.
+            error_msg = str(NativeSessionError("video_status_authentication_unavailable", stage="video_polling"))
+            poll_status_code = 503
+        elif last_poll_error is not None:
             error_msg = f"视频状态查询持续失败: {self._normalize_error_message(last_poll_error)}"
         else:
             error_msg = f"视频生成超时 (已轮询 {max_attempts} 次)"
         await self._fail_video_task(operations, error_msg)
-        self._mark_generation_failed(generation_result, error_msg)
+        self._mark_generation_failed(generation_result, error_msg, status_code=poll_status_code)
         await self._finalize_async_video_result_log(
             request_log_state,
             token_id=token.id,
@@ -3428,11 +3476,11 @@ class GenerationHandler:
                 "error": error_msg,
                 "task_id": _operation_task_id(operations),
             },
-            status_code=504,
+            status_code=poll_status_code,
             status_text="failed",
             progress=100,
         )
-        yield self._create_error_response(error_msg, status_code=504)
+        yield self._create_error_response(error_msg, status_code=poll_status_code)
 
     # ========== 响应格式化 ==========
 

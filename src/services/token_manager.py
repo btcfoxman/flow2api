@@ -12,6 +12,7 @@ from ..core.credits import (
 from ..core.models import Token, Project
 from ..core.logger import debug_logger
 from ..core.monitoring import record_token_refresh
+from ..core.session_availability import SessionAvailability
 from .flow_client import FlowClient
 from .proxy_manager import ProxyManager
 
@@ -30,6 +31,7 @@ class TokenManager:
         self._credits_refresh_futures: dict[int, asyncio.Task] = {}
         self._credits_refresh_round_lock = asyncio.Lock()
         self._periodic_credits_refresh_task: Optional[asyncio.Task] = None
+        self.native_sessions = SessionAvailability()
 
     async def _get_token_lock(
         self,
@@ -172,6 +174,7 @@ class TokenManager:
                 project_ids.append(project_id)
 
         await self.db.delete_token(token_id)
+        self.native_sessions.discard(token_id)
 
         refresh_task = self._refresh_futures.pop(token_id, None)
         if refresh_task and not refresh_task.done():
@@ -511,6 +514,12 @@ class TokenManager:
         return await task
 
     async def _do_refresh_at(self, token_id: int, st: str) -> bool:
+        if config.captcha_method == 'native_cdp':
+            async with self.flow_client.native_account_proxy_context(token_id):
+                return await self._do_refresh_at_on_bound_proxy(token_id, st)
+        return await self._do_refresh_at_on_bound_proxy(token_id, st)
+
+    async def _do_refresh_at_on_bound_proxy(self, token_id: int, st: str) -> bool:
         """执行 AT 刷新的核心逻辑
 
         Args:
@@ -637,6 +646,12 @@ class TokenManager:
             return None
 
     async def ensure_project_exists(self, token_id: int) -> str:
+        if config.captcha_method == 'native_cdp':
+            async with self.flow_client.native_account_proxy_context(token_id):
+                return await self._ensure_project_exists_on_bound_proxy(token_id)
+        return await self._ensure_project_exists_on_bound_proxy(token_id)
+
+    async def _ensure_project_exists_on_bound_proxy(self, token_id: int) -> str:
         """Ensure a token has a pooled set of projects and return one in round-robin order."""
         project_lock = await self._get_token_lock(
             self._project_locks,
@@ -687,6 +702,8 @@ class TokenManager:
         admin_config = await self.db.get_admin_config()
 
         if stats and stats.consecutive_error_count >= admin_config.error_ban_threshold:
+            debug_logger.log_runtime_event("token_auto_disabled", token_id=token_id,
+                                           stage="account_health", reason="consecutive_error_threshold")
             debug_logger.log_warning(
                 f"[TOKEN_BAN] Token {token_id} consecutive error count ({stats.consecutive_error_count}) "
                 f"reached threshold ({admin_config.error_ban_threshold}), auto-disabling"
@@ -777,6 +794,12 @@ class TokenManager:
     # ========== 余额刷新 ==========
 
     async def _refresh_credits_inner(self, token_id: int) -> tuple[bool, int]:
+        if config.captcha_method == 'native_cdp':
+            async with self.flow_client.native_account_proxy_context(token_id):
+                return await self._refresh_credits_on_bound_proxy(token_id)
+        return await self._refresh_credits_on_bound_proxy(token_id)
+
+    async def _refresh_credits_on_bound_proxy(self, token_id: int) -> tuple[bool, int]:
         """Perform one balance refresh and preserve a success indicator."""
         token = await self.db.get_token(token_id)
         if not token:

@@ -1,6 +1,7 @@
 """Shared media-generation error classification and public-message helpers."""
 
 import re
+from .generation_errors import is_native_session_error, is_upstream_authentication_error
 from typing import Any, Optional
 
 
@@ -73,6 +74,12 @@ _PUBLIC_UPSTREAM_PATTERNS = (
 
 def sanitize_public_error_message(error_message: Any) -> str:
     """Remove provider names, endpoints, and upstream terminology from public errors."""
+    if "video_status_authentication_unavailable" in str(error_message):
+        return "任务已提交，但暂时无法确认结果。请保留任务ID并联系管理员，勿重复提交。"
+    if is_upstream_authentication_error(error_message):
+        return "生成服务暂时不可用，请稍后重试"
+    if is_native_session_error(error_message):
+        return "生成服务暂时不可用，请稍后重试"
     text = str(error_message or "").strip() or "生成服务暂时不可用，请稍后重试"
     if "automatic resubmission is disabled" in text.lower():
         return "生成结果暂未确认，请勿立即重复提交，请稍后检查结果。"

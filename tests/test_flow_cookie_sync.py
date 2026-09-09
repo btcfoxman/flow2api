@@ -59,8 +59,9 @@ class CookieIntegrationTests(unittest.IsolatedAsyncioTestCase):
         browser.connection = SimpleNamespace(send=AsyncMock(return_value={}))
         browser._wait_for_document_ready = AsyncMock()
         browser._evaluate = AsyncMock(side_effect=["https://flow.google.com/project/p", False])
-        with self.assertRaisesRegex(RuntimeError, "complete login"):
-            await browser._open_real_project_page("s", "p")
+        with patch("src.services.browser_captcha_native_cdp.time.monotonic", side_effect=[0, 9]):
+            with self.assertRaisesRegex(RuntimeError, "flow_login_unavailable"):
+                await browser._open_real_project_page("s", "p", "angular")
 
     async def test_database_roundtrip_and_update(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -93,31 +94,44 @@ class CookieIntegrationTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(HTTPException):
                 await plugin_update_token({"session_token":"st", "google_cookies":"SID=unscoped"}, "Bearer test-key")
             manager.flow_client.st_to_at.assert_not_awaited()
+            with self.assertRaises(HTTPException) as caught:
+                await plugin_update_token({"session_token":"st", "google_cookies":[JAR[1]]}, "Bearer test-key")
+            self.assertEqual(caught.exception.status_code, 400)
+            manager.flow_client.st_to_at.assert_not_awaited()
 
     async def test_native_seeds_once_preserves_host_only_and_reloads_new_snapshot(self):
         token = SimpleNamespace(st="x" * 4000, google_cookies=normalize_google_cookies(JAR))
         db = SimpleNamespace(get_token=AsyncMock(return_value=token))
-        connection = SimpleNamespace(send=AsyncMock(return_value={"success":True}))
+        live_cookies = {}
+        async def send(method, params, **kwargs):
+            if method == "Network.getCookies":
+                return {"cookies": list(live_cookies.values())}
+            if method == "Network.setCookie":
+                live_cookies[params["name"]] = {**params, "domain": params.get("domain", "labs.google"), "path": "/"}
+            if method == "Network.deleteCookies":
+                live_cookies.pop(params["name"], None)
+            return {"success": True}
+        connection = SimpleNamespace(send=AsyncMock(side_effect=send))
         with tempfile.TemporaryDirectory() as directory, patch("src.services.browser_captcha_native_cdp._profile_root", return_value=Path(directory)):
             worker = NativeCdpAccountBrowser(1, db)
             worker.connection = connection
-            self.assertTrue(await worker._seed_session_cookie("page-1"))
+            self.assertTrue(await worker._seed_session_cookie("page-1", "angular"))
             sets = [c.args[1] for c in connection.send.await_args_list if c.args[0] == "Network.setCookie"]
             self.assertEqual(len(sets), 4)
             flow = next(c for c in sets if c["name"] == "__Secure-OSID")
             self.assertEqual(flow["url"], "https://flow.google.com/")
             self.assertNotIn("domain", flow)
             connection.send.reset_mock()
-            self.assertFalse(await worker._seed_session_cookie("page-1"))
-            connection.send.assert_not_awaited()
+            self.assertFalse(await worker._seed_session_cookie("page-1", "angular"))
+            self.assertEqual([c.args[0] for c in connection.send.await_args_list], ["Network.getCookies"])
             token.st = "new-legacy-session"
-            await worker._seed_session_cookie("page-1")
+            await worker._seed_session_cookie("page-1", "angular")
             self.assertEqual([c.args[1]["name"] for c in connection.send.await_args_list if c.args[0] == "Network.setCookie"], ["__Secure-next-auth.session-token"])
             connection.send.reset_mock()
             restarted = NativeCdpAccountBrowser(1, db)
             restarted.connection = connection
-            await restarted._seed_session_cookie("page-2")
-            connection.send.assert_not_awaited()
+            await restarted._seed_session_cookie("page-2", "angular")
+            self.assertEqual([c.args[0] for c in connection.send.await_args_list], ["Network.getCookies"])
             token.google_cookies = normalize_google_cookies([{**c, "value":"rotated"} for c in JAR])
-            self.assertTrue(await worker._seed_session_cookie("page-1"))
+            self.assertTrue(await worker._seed_session_cookie("page-1", "angular"))
             self.assertGreater(connection.send.await_count, 0)

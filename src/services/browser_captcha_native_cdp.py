@@ -18,13 +18,16 @@ from typing import Any, Awaitable, Callable, Dict, Optional
 from urllib.parse import quote, unquote, urlparse
 
 from ..core.config import config
-from ..core.flow_cookies import normalize_google_cookies
+from ..core.flow_cookies import normalize_google_cookies, has_complete_flow_cookies
 from ..core.logger import debug_logger
+from ..core.generation_errors import NativeSessionError
+from ..core.native_session_state import local_session_state, validate_local_session_proxy
 from ..core.media_errors import is_media_traffic_error
 from .flow_angular import AngularProtocolError, AngularSubmissionUncertain, parse_rpc_response, rpc_fetch_expression
 
 
-FLOW_PROJECT_BASE_URL = "https://flow.google.com"
+FLOW_PROJECT_BASE_URL = "https://labs.google/fx/zh/tools/flow"
+ANGULAR_PROJECT_BASE_URL = "https://flow.google.com"
 FLOW_WEBSITE_KEY = "6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV"
 DEFAULT_PROFILE_ROOT = Path("tmp") / "native_cdp_profiles"
 DEFAULT_IDLE_TTL_SECONDS = 600
@@ -431,6 +434,7 @@ class NativeCdpAccountBrowser:
         self._profile_reset_pending = False
         self._profile_reset_reason = ""
         self._requires_flow_login = False
+        self._legacy_migrated = False
         if self.profile_dir.exists():
             try:
                 profile_version = (
@@ -441,7 +445,7 @@ class NativeCdpAccountBrowser:
             if profile_version != PROFILE_STATE_VERSION:
                 self._profile_reset_pending = True
                 self._profile_reset_reason = "profile_baseline_upgrade"
-        self._project_sessions: Dict[str, tuple[str, str]] = {}
+        self._project_sessions: Dict[tuple[str, str], tuple[str, str]] = {}
         self._session_auth_signatures: Dict[str, str] = {}
         self._cookie_seed_signature = ""
         self._video_submit_reservations: list[float] = []
@@ -527,7 +531,7 @@ class NativeCdpAccountBrowser:
                 reset_reason = f"solve_threshold_{threshold}"
         if reset_reason:
             token = await self.db.get_token(self.token_id)
-            if getattr(token, "google_cookies", None):
+            if local_session_state(self.token_id, self.profile_dir) or getattr(token, "google_cookies", None):
                 # A signed-in Google profile can contain device-bound sessions
                 # and locally rotated credentials that cookie export cannot restore.
                 # Routine/risk recovery may restart it, but must not erase it.
@@ -574,6 +578,7 @@ class NativeCdpAccountBrowser:
 
     async def start(self) -> None:
         proxy_binding = await self._resolve_proxy()
+        validate_local_session_proxy(local_session_state(self.token_id, self.profile_dir), proxy_binding.url)
         if self.is_running and self.proxy_binding and self.proxy_binding.signature == proxy_binding.signature:
             return
         proxy_changed = bool(
@@ -684,15 +689,22 @@ class NativeCdpAccountBrowser:
                 pass
             await connection.close()
         if process and process.poll() is None:
-            process.terminate()
             try:
-                await asyncio.wait_for(asyncio.to_thread(process.wait), timeout=8)
-            except Exception:
-                process.kill()
+                # Browser.close starts asynchronous shutdown. Give Chromium time
+                # to flush Cookies/session state before escalating to OS signals.
+                # Use Popen's bounded wait so timeout leaves no waiting thread.
+                await asyncio.to_thread(process.wait, timeout=8)
+            except subprocess.TimeoutExpired:
+                process.terminate()
                 try:
-                    await asyncio.to_thread(process.wait)
-                except Exception:
-                    pass
+                    await asyncio.to_thread(process.wait, timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    await asyncio.to_thread(process.wait, timeout=3)
+                debug_logger.log_runtime_event(
+                    "native_browser_forced_shutdown", token_id=self.token_id,
+                    stage="browser_shutdown", reason="graceful_shutdown_timeout",
+                )
         if self.proxy_extension_dir and self.proxy_extension_dir.exists():
             shutil.rmtree(self.proxy_extension_dir, ignore_errors=True)
         self.proxy_extension_dir = None
@@ -773,12 +785,19 @@ class NativeCdpAccountBrowser:
             raise CdpProtocolError(str(description))
         return (result.get("result") or {}).get("value")
 
-    async def _seed_session_cookie(self, session_id: str) -> bool:
+    async def _seed_session_cookie(self, session_id: str, page_protocol: str = "labs") -> bool:
         if not self.connection:
+            return False
+        if local_session_state(self.token_id, self.profile_dir):
+            # This profile owns its login. Neither Labs ST nor Google cookies
+            # from the external updater may replace its locally rotated session.
             return False
         token = await self.db.get_token(self.token_id)
         session_token = str(getattr(token, "st", "") or "").strip() if token else ""
-        raw_cookies = str(getattr(token, "google_cookies", "") or "") if token else ""
+        raw_cookies = (str(getattr(token, "google_cookies", "") or "")
+                       if token and page_protocol == "angular" else "")
+        if raw_cookies and not has_complete_flow_cookies(raw_cookies):
+            raise NativeSessionError("google_session_cookies_incomplete", protocol=page_protocol)
         self._requires_flow_login = bool(raw_cookies)
         signature = hashlib.sha256((session_token + "\0" + raw_cookies).encode()).hexdigest()
         marker = self.profile_dir / ".flow2api-cookie-seed"
@@ -787,7 +806,18 @@ class NativeCdpAccountBrowser:
                 self._cookie_seed_signature = marker.read_text(encoding="utf-8").strip()
             except OSError:
                 pass
-        if signature != self._cookie_seed_signature:
+        # A seed marker outlives session-only NextAuth cookies. Check the live
+        # jar as well, otherwise an idle restart silently loses Labs login.
+        current = (await self.connection.send("Network.getCookies", {"urls": ["https://labs.google/"]},
+                                             session_id=session_id, timeout=5)
+                   if session_token else {})
+        labs_session_present = any(
+            cookie.get("name", "").startswith("__Secure-next-auth.session-token")
+            and cookie.get("value")
+            for cookie in current.get("cookies", [])
+        )
+        reseed_missing_st = bool(session_token and not labs_session_present)
+        if signature != self._cookie_seed_signature or reseed_missing_st:
             google_signature = hashlib.sha256(raw_cookies.encode()).hexdigest()
             google_marker = self.profile_dir / ".flow2api-google-cookie-seed"
             try:
@@ -798,7 +828,6 @@ class NativeCdpAccountBrowser:
                        if raw_cookies and google_signature != imported_google_signature else [])
             if session_token:
                 # Remove stale chunked NextAuth cookies before replacing the session.
-                current = await self.connection.send("Network.getCookies", {"urls": ["https://labs.google/"]}, session_id=session_id, timeout=5)
                 for cookie in current.get("cookies", []):
                     if cookie.get("name", "").startswith("__Secure-next-auth.session-token"):
                         await self.connection.send("Network.deleteCookies", {key: cookie[key] for key in ("name", "domain", "path")}, session_id=session_id, timeout=5)
@@ -818,20 +847,25 @@ class NativeCdpAccountBrowser:
             # snapshot over Google cookies that it has already rotated locally.
             self.profile_dir.mkdir(parents=True, exist_ok=True)
             marker.write_text(signature, encoding="utf-8")
-            google_marker.write_text(google_signature, encoding="utf-8")
-        changed = self._session_auth_signatures.get(session_id) != signature
+            if page_protocol == "angular":
+                google_marker.write_text(google_signature, encoding="utf-8")
+        changed = reseed_missing_st or self._session_auth_signatures.get(session_id) != signature
         self._session_auth_signatures[session_id] = signature
         return changed
 
     @staticmethod
-    def _project_page_url(project_id: Optional[str]) -> str:
+    def _project_page_url(project_id: Optional[str], page_protocol: str = "labs") -> str:
+        if page_protocol not in {"labs", "angular"}:
+            raise ValueError("Unknown native page protocol")
+        base_url = ANGULAR_PROJECT_BASE_URL if page_protocol == "angular" else FLOW_PROJECT_BASE_URL
         normalized_project_id = str(project_id or "").strip()
         if not normalized_project_id:
-            return FLOW_PROJECT_BASE_URL
-        return f"{FLOW_PROJECT_BASE_URL}/project/{quote(normalized_project_id, safe='')}"
+            return base_url
+        return f"{base_url}/project/{quote(normalized_project_id, safe='')}"
 
     async def _wait_for_document_ready(self, session_id: str, timeout: float = 35) -> None:
         deadline = time.monotonic() + timeout
+        complete_observations = 0
         while time.monotonic() < deadline:
             try:
                 ready_state = await self._evaluate(
@@ -839,10 +873,14 @@ class NativeCdpAccountBrowser:
                     "document.readyState",
                     timeout=3,
                 )
-                if ready_state in {"interactive", "complete"}:
-                    return
+                if ready_state == "complete":
+                    complete_observations += 1
+                    if complete_observations >= 3:
+                        return
+                else:
+                    complete_observations = 0
             except Exception:
-                pass
+                complete_observations = 0
             await asyncio.sleep(0.25)
         raise TimeoutError("real Flow project page did not become ready")
 
@@ -850,10 +888,11 @@ class NativeCdpAccountBrowser:
         self,
         session_id: str,
         project_id: str,
+        page_protocol: str = "labs",
     ) -> None:
         if not self.connection:
             raise ConnectionError("native CDP browser is not connected")
-        page_url = self._project_page_url(project_id)
+        page_url = self._project_page_url(project_id, page_protocol)
         navigation = await self.connection.send(
             "Page.navigate",
             {"url": page_url},
@@ -861,48 +900,72 @@ class NativeCdpAccountBrowser:
             timeout=45,
         )
         if navigation.get("errorText"):
-            raise CdpProtocolError(
-                f"real Flow project page navigation failed: {navigation['errorText']}"
-            )
-        await self._wait_for_document_ready(session_id)
-        current_url = str(
-            await self._evaluate(session_id, "window.location.href", timeout=5) or ""
-        )
-        normalized_project_id = str(project_id or "").strip()
-        parsed_url = urlparse(current_url)
-        if (parsed_url.scheme != "https" or parsed_url.hostname != "flow.google.com"
-                or (normalized_project_id and parsed_url.path.rstrip("/") != f"/project/{quote(normalized_project_id, safe='')}")):
-            raise RuntimeError(
-                "real Flow project page did not retain the requested project context"
-            )
-        if self._requires_flow_login:
-            authenticated = await self._evaluate(session_id,
-                "!!window.WIZ_global_data?.SNlM0e", timeout=5)
-            if not authenticated:
-                raise AngularProtocolError("Flow account session is unavailable; complete login in the destination profile")
+            raise NativeSessionError("page_navigation_failed", protocol=page_protocol, page_url=page_url)
+        try:
+            await self._wait_for_document_ready(session_id)
+        except TimeoutError as exc:
+            try:
+                actual_url = str(await self._evaluate(session_id, "window.location.href", timeout=3) or page_url)
+            except Exception:
+                actual_url = page_url
+            raise NativeSessionError("page_not_ready", protocol=page_protocol, page_url=actual_url) from exc
+        await self._validate_project_page(session_id, project_id, page_protocol, wait_seconds=8)
+
+    async def _validate_project_page(self, session_id, project_id, page_protocol, *, wait_seconds=0):
+        expected = urlparse(self._project_page_url(project_id, page_protocol))
+        deadline = time.monotonic() + wait_seconds
+        while True:
+            current_url = str(await self._evaluate(session_id, "window.location.href", timeout=5) or "")
+            parsed = urlparse(current_url)
+            matches = (parsed.scheme == "https" and parsed.hostname == expected.hostname
+                       and parsed.path.rstrip("/") == expected.path.rstrip("/"))
+            reason = "project_context_unavailable"
+            if matches:
+                if page_protocol == "labs":
+                    return
+                # Always verify Angular bootstrap, even without synchronized cookies.
+                if await self._evaluate(session_id, "!!window.WIZ_global_data?.SNlM0e", timeout=5):
+                    return
+                reason = "flow_login_unavailable"
+            if time.monotonic() >= deadline:
+                raise NativeSessionError(reason, protocol=page_protocol, page_url=current_url)
+            await asyncio.sleep(0.25)
 
     async def _get_or_create_project_session(
         self,
         project_id: str,
+        page_protocol: str = "labs",
     ) -> tuple[str, str]:
+        if page_protocol == "labs" and not self._legacy_migrated and self.db is not None:
+            token = await self.db.get_token(self.token_id)
+            if (local_session_state(self.token_id, self.profile_dir)
+                    or has_complete_flow_cookies(getattr(token, "google_cookies", None))):
+                # A complete modern session selects its authenticated page,
+                # independently from the REST/RPC generation wire format.
+                self._legacy_migrated = True
+        if page_protocol == "labs" and self._legacy_migrated:
+            return await self._get_or_create_project_session(project_id, "angular")
         normalized_project_id = str(project_id or "").strip()
-        cached = self._project_sessions.get(normalized_project_id)
+        cache_key = (page_protocol, normalized_project_id)
+        cached = self._project_sessions.get(cache_key)
         if cached:
             target_id, session_id = cached
             try:
                 await self._evaluate(session_id, "document.readyState", timeout=3)
-                if await self._seed_session_cookie(session_id):
-                    await self._open_real_project_page(session_id, normalized_project_id)
+                if await self._seed_session_cookie(session_id, page_protocol):
+                    await self._open_real_project_page(session_id, normalized_project_id, page_protocol)
+                else:
+                    await self._validate_project_page(session_id, normalized_project_id, page_protocol)
                 return target_id, session_id
             except Exception:
-                self._project_sessions.pop(normalized_project_id, None)
+                await self._discard_project_session(normalized_project_id, page_protocol)
 
         target_id, session_id = await self._create_page_session()
         try:
-            await self._seed_session_cookie(session_id)
-            await self._open_real_project_page(session_id, normalized_project_id)
+            await self._seed_session_cookie(session_id, page_protocol)
+            await self._open_real_project_page(session_id, normalized_project_id, page_protocol)
             await self._capture_fingerprint(session_id)
-        except Exception:
+        except Exception as exc:
             if self.connection and not self.connection.closed:
                 try:
                     await self.connection.send(
@@ -912,13 +975,23 @@ class NativeCdpAccountBrowser:
                     )
                 except Exception:
                     pass
+            if (page_protocol == "labs" and isinstance(exc, NativeSessionError)
+                    and exc.page_origin == ANGULAR_PROJECT_BASE_URL):
+                # The old site now performs a client-side migration. This is a
+                # preflight-only page transition, never a generation resubmit.
+                self._legacy_migrated = True
+                debug_logger.log_runtime_event("native_legacy_page_migrated", token_id=self.token_id,
+                                               stage="browser_preflight", reason="legacy_site_redirect", protocol="angular")
+                return await self._get_or_create_project_session(project_id, "angular")
             raise
-        self._project_sessions[normalized_project_id] = (target_id, session_id)
+        self._project_sessions[cache_key] = (target_id, session_id)
         return target_id, session_id
 
-    async def _discard_project_session(self, project_id: Optional[str]) -> None:
+    async def _discard_project_session(self, project_id: Optional[str], page_protocol: str = "labs") -> None:
+        if page_protocol == "labs" and self._legacy_migrated:
+            page_protocol = "angular"
         normalized_project_id = str(project_id or "").strip()
-        cached = self._project_sessions.pop(normalized_project_id, None)
+        cached = self._project_sessions.pop((page_protocol, normalized_project_id), None)
         if not cached or not self.connection or self.connection.closed:
             return
         target_id, session_id = cached
@@ -1073,13 +1146,18 @@ class NativeCdpAccountBrowser:
         headers: Optional[Dict[str, Any]] = None,
         json_data: Optional[Dict[str, Any]] = None,
         timeout: int = 60,
+        page_protocol: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Execute an API request in the token's persistent real Flow project page."""
         async with self.solve_lock:
             self.busy_count += 1
             try:
                 await self._prepare_profile(for_solve=False)
-                _, session_id = await self._get_or_create_project_session(project_id)
+                angular_request = urlparse(url).hostname == "flow.google.com"
+                page_protocol = "angular" if angular_request else (page_protocol or "labs")
+                _, session_id = await self._get_or_create_project_session(project_id, page_protocol)
+                if page_protocol == "labs" and self._legacy_migrated:
+                    page_protocol = "angular"
                 if url == "https://flow.google.com/_/AiSandboxAngularFrontend/data/batchexecute":
                     rpc_id = (json_data or {}).get("rpc_id")
                     is_submit = rpc_id in {"MZZa6b", "jIps6", "ogiZ0b"}
@@ -1091,6 +1169,8 @@ class NativeCdpAccountBrowser:
                             raise AngularProtocolError(rpc_result["preflightError"])
                         if rpc_result.get("fetchError"):
                             raise AngularSubmissionUncertain("Flow launch result is unconfirmed; automatic resubmission is disabled")
+                        if int(rpc_result.get("status", 0)) == 401:
+                            raise NativeSessionError("upstream_authentication_rejected", protocol="angular", stage="upstream_authentication")
                         if int(rpc_result.get("status", 0)) >= 400:
                             raise AngularProtocolError(f"Flow RPC rejected: HTTP {rpc_result['status']}")
                         try:
@@ -1163,6 +1243,9 @@ class NativeCdpAccountBrowser:
                 if status >= 400:
                     upstream_error = self._format_browser_fetch_http_error(status, text)
                     self.last_upstream_error = upstream_error[:240]
+                    if status == 401:
+                        raise NativeSessionError("upstream_authentication_rejected", protocol=page_protocol,
+                                                 stage="upstream_authentication")
                     raise RuntimeError(upstream_error)
                 if not text:
                     return {}
@@ -1181,11 +1264,13 @@ class NativeCdpAccountBrowser:
                 return parsed
             except Exception as exc:
                 self.last_error = f"{type(exc).__name__}: {str(exc)[:240]}"
+                if isinstance(exc, NativeSessionError):
+                    debug_logger.log_runtime_event("native_preflight_failed", token_id=self.token_id, **exc.diagnostic())
                 if _is_recaptcha_profile_risk_error(exc):
                     self._mark_profile_reset_pending("recaptcha_risk_rejected")
-                    await self._discard_project_session(project_id)
+                    await self._discard_project_session(project_id, page_protocol or "labs")
                 elif "native browser fetch failed" in str(exc).lower():
-                    await self._discard_project_session(project_id)
+                    await self._discard_project_session(project_id, page_protocol or "labs")
                 raise
             finally:
                 self.busy_count = max(0, self.busy_count - 1)
@@ -1197,13 +1282,19 @@ class NativeCdpAccountBrowser:
         action: str,
         *,
         website_key: str = FLOW_WEBSITE_KEY,
+        page_protocol: str = "labs",
     ) -> Optional[str]:
         async with self.solve_lock:
             self.busy_count += 1
             try:
                 await self._prepare_profile(for_solve=True)
-                _, session_id = await self._get_or_create_project_session(project_id)
-                await self._wait_for_recaptcha(session_id)
+                _, session_id = await self._get_or_create_project_session(project_id, page_protocol)
+                if page_protocol == "labs" and self._legacy_migrated:
+                    page_protocol = "angular"
+                try:
+                    await self._wait_for_recaptcha(session_id)
+                except TimeoutError as exc:
+                    raise NativeSessionError("captcha_script_not_ready", protocol=page_protocol) from exc
                 await asyncio.sleep(0.8 + random.random())
                 await self._evaluate(
                     session_id,
@@ -1259,10 +1350,16 @@ class NativeCdpAccountBrowser:
                     f"[NativeCDP] solve failed token_id={self.token_id}, "
                     f"project_id={project_id}: {self.last_error}"
                 )
-                await self._discard_project_session(project_id)
+                await self._discard_project_session(project_id, page_protocol)
                 if not self.is_running:
                     await self.stop(reason="runtime_disconnected")
-                return None
+                failure = exc if isinstance(exc, NativeSessionError) else NativeSessionError(
+                    "captcha_execution_failed", protocol=page_protocol)
+                self.last_error = str(failure)
+                debug_logger.log_runtime_event("native_preflight_failed", token_id=self.token_id, **failure.diagnostic())
+                if failure is exc:
+                    raise
+                raise failure from exc
             finally:
                 self.busy_count = max(0, self.busy_count - 1)
                 self.last_used_at = time.monotonic()
@@ -1632,6 +1729,7 @@ class BrowserCaptchaService:
         project_id: str,
         action: str = "IMAGE_GENERATION",
         token_id: Optional[int] = None,
+        page_protocol: str = "labs",
     ) -> tuple[Optional[str], Optional[str]]:
         if self._closed:
             raise RuntimeError("native_cdp service is closed")
@@ -1645,7 +1743,7 @@ class BrowserCaptchaService:
         worker.busy_count += 1
         try:
             await self._ensure_capacity(worker)
-            token = await worker.solve(project_id, action, website_key=self.website_key)
+            token = await worker.solve(project_id, action, website_key=self.website_key, page_protocol=page_protocol)
             if token and str(action or "").strip().upper() == "VIDEO_GENERATION":
                 worker.reserve_for_video_submit()
             return token, f"native:{token_key}" if token else None
@@ -1666,6 +1764,7 @@ class BrowserCaptchaService:
         json_data: Optional[Dict[str, Any]] = None,
         timeout: int = 60,
         consume_video_reservation: bool = False,
+        page_protocol: Optional[str] = None,
     ) -> Dict[str, Any]:
         if self._closed:
             raise RuntimeError("native_cdp service is closed")
@@ -1688,6 +1787,7 @@ class BrowserCaptchaService:
                 headers=headers,
                 json_data=json_data,
                 timeout=timeout,
+                page_protocol=page_protocol,
             )
             if consume_video_reservation:
                 try:

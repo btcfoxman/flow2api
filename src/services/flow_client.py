@@ -8,12 +8,14 @@ import uuid
 import random
 import base64
 import ssl
+from contextlib import asynccontextmanager
 from typing import Dict, Any, Optional, List, Union, Callable, Awaitable
 from urllib.parse import quote
 import urllib.error
 import urllib.request
 from curl_cffi.requests import AsyncSession
 from ..core.logger import debug_logger
+from ..core.generation_errors import NativeSessionError, is_native_session_error, is_upstream_authentication_error
 from ..core.config import config, get_yescaptcha_min_score
 from ..core.credits import is_quota_exhausted_error
 from ..core.media_errors import is_media_policy_error, is_media_traffic_error
@@ -28,6 +30,11 @@ except ImportError:
 
 class FlowClient:
     """VideoFX API客户端"""
+
+    @staticmethod
+    def native_page_protocol(model_key: Optional[str] = None) -> str:
+        return "angular" if use_angular_video(model_key, models=config.flow_angular_video_models,
+                                              families=config.flow_angular_video_families) else "labs"
 
     def __init__(self, proxy_manager, db=None):
         self.proxy_manager = proxy_manager
@@ -133,6 +140,17 @@ class FlowClient:
     def clear_request_fingerprint(self):
         """清理请求链路绑定的浏览器指纹。"""
         self._set_request_fingerprint(None)
+
+    @asynccontextmanager
+    async def native_account_proxy_context(self, token_id: int):
+        """Keep credential refresh on the same route as this account's browser."""
+        from .browser_captcha_native_cdp import NativeCdpAccountBrowser
+        binding = await NativeCdpAccountBrowser(token_id, self.db)._resolve_proxy()
+        previous = self._request_fingerprint_ctx.set({'proxy_url': binding.url})
+        try:
+            yield
+        finally:
+            self._request_fingerprint_ctx.reset(previous)
 
     def _clear_request_browser_ref(self):
         fingerprint = self._request_fingerprint_ctx.get()
@@ -616,7 +634,7 @@ class FlowClient:
                     ),
                     timeout=timeout + 5,
                 )
-            except AngularProtocolError:
+            except (AngularProtocolError, NativeSessionError):
                 raise
             except asyncio.TimeoutError as exc:
                 raise Exception(
@@ -994,7 +1012,7 @@ class FlowClient:
                 timeout=self._get_control_plane_timeout(),
             )
         except Exception as e:
-            if not self._is_proxy_connection_error(e):
+            if config.captcha_method == 'native_cdp' or not self._is_proxy_connection_error(e):
                 raise
 
             debug_logger.log_warning(
@@ -1288,6 +1306,7 @@ class FlowClient:
         project_id: Optional[str] = None,
         st: Optional[str] = None,
         token_id: Optional[int] = None,
+        model_key: Optional[str] = None,
     ) -> str:
         """上传图片,返回mediaId
 
@@ -1396,6 +1415,7 @@ class FlowClient:
                     },
                     json_data=payload,
                     timeout=max(30, min(int(self.timeout or 0) or 120, 90)),
+                    page_protocol=self.native_page_protocol(model_key),
                 )
                 fingerprint = service.get_fingerprint(token_id)
                 if fingerprint:
@@ -1438,6 +1458,9 @@ class FlowClient:
                     )
                     return media_id
                 raise Exception(f"Invalid upload response: missing media id, keys={list(new_result.keys())}")
+            except NativeSessionError:
+                # This failed before uploading; do not rewrap as a media error.
+                raise
             except Exception as new_upload_error:
                 last_error = new_upload_error
                 upload_error_summary = self._summarize_exception(new_upload_error)
@@ -1602,16 +1625,17 @@ class FlowClient:
         mime_type: str = "video/mp4",
         file_name: str = "upload.mp4",
         token_id: Optional[int] = None,
+        model_key: Optional[str] = None,
     ) -> Dict[str, Any]:
         normalized_project_id = str(project_id or "").strip()
         if not normalized_project_id:
             raise RuntimeError("project_id is required for video upload")
         if not video_bytes:
             raise RuntimeError("video_bytes is required for video upload")
-        if config.captcha_method == "native_cdp" and config.flow_native_video_upload and token_id and self.db:
-            token = await self.db.get_token(token_id)
-            from ..core.flow_cookies import google_cookie_status
-            if google_cookie_status(getattr(token, "google_cookies", None))["flow_cookies_configured"]:
+        if config.captcha_method == "native_cdp" and self.native_page_protocol(model_key) == "angular":
+            if not config.flow_native_video_upload or not token_id or not self.db:
+                raise NativeSessionError("angular_video_upload_unavailable", protocol="angular")
+            else:
                 from .browser_captcha_native_cdp import BrowserCaptchaService
                 service = await BrowserCaptchaService.get_instance(self.db)
                 return await service.fetch_json(token_id=token_id, project_id=normalized_project_id,
@@ -2325,7 +2349,8 @@ class FlowClient:
                 recaptcha_token, browser_id = await self._get_recaptcha_token(
                     project_id,
                     action="VIDEO_GENERATION",
-                    token_id=token_id
+                    token_id=token_id,
+                    model_key=model_key,
                 )
             finally:
                 if launch_gate_acquired:
@@ -2455,7 +2480,8 @@ class FlowClient:
                 recaptcha_token, browser_id = await self._get_recaptcha_token(
                     project_id,
                     action="VIDEO_GENERATION",
-                    token_id=token_id
+                    token_id=token_id,
+                    model_key=model_key,
                 )
             finally:
                 if launch_gate_acquired:
@@ -2572,7 +2598,8 @@ class FlowClient:
                 recaptcha_token, browser_id = await self._get_recaptcha_token(
                     project_id,
                     action="VIDEO_GENERATION",
-                    token_id=token_id
+                    token_id=token_id,
+                    model_key=model_key,
                 )
             finally:
                 if launch_gate_acquired:
@@ -2704,7 +2731,8 @@ class FlowClient:
                 recaptcha_token, browser_id = await self._get_recaptcha_token(
                     project_id,
                     action="VIDEO_GENERATION",
-                    token_id=token_id
+                    token_id=token_id,
+                    model_key=model_key,
                 )
             finally:
                 if launch_gate_acquired:
@@ -2835,7 +2863,8 @@ class FlowClient:
                 recaptcha_token, browser_id = await self._get_recaptcha_token(
                     project_id,
                     action="VIDEO_GENERATION",
-                    token_id=token_id
+                    token_id=token_id,
+                    model_key=model_key,
                 )
             finally:
                 if launch_gate_acquired:
@@ -2963,7 +2992,8 @@ class FlowClient:
                 recaptcha_token, browser_id = await self._get_recaptcha_token(
                     project_id,
                     action="VIDEO_GENERATION",
-                    token_id=token_id
+                    token_id=token_id,
+                    model_key=model_key,
                 )
             finally:
                 if launch_gate_acquired:
@@ -3239,7 +3269,8 @@ class FlowClient:
                 recaptcha_token, browser_id = await self._get_recaptcha_token(
                     project_id,
                     action="VIDEO_GENERATION",
-                    token_id=token_id
+                    token_id=token_id,
+                    model_key=model_key,
                 )
             finally:
                 if launch_gate_acquired:
@@ -3378,6 +3409,8 @@ class FlowClient:
                 )
                 return self._normalize_video_generation_response(result)
             except Exception as e:
+                if is_upstream_authentication_error(e):
+                    raise NativeSessionError("upstream_authentication_rejected", stage="video_polling") from None
                 if media_refs:
                     try:
                         result = await self._make_video_api_request(
@@ -3387,8 +3420,9 @@ class FlowClient:
                             timeout=self._get_video_poll_timeout()
                         )
                         return self._normalize_video_generation_response(result)
-                    except Exception:
-                        pass
+                    except Exception as fallback_error:
+                        if is_upstream_authentication_error(fallback_error):
+                            raise NativeSessionError("upstream_authentication_rejected", stage="video_polling") from None
                 last_error = e
                 retry_reason = self._get_retry_reason(str(e))
                 if retry_reason and retry_attempt < max_retries - 1:
@@ -3566,7 +3600,7 @@ class FlowClient:
     ) -> bool:
         """统一处理生成链路的重试判定与打码自愈通知。"""
         error_str = str(error)
-        if isinstance(error, AngularSubmissionUncertain):
+        if isinstance(error, AngularSubmissionUncertain) or is_native_session_error(error):
             return False
         if is_media_traffic_error(error_str):
             if str(getattr(config, "captcha_method", "") or "").strip().lower() == "native_cdp":
@@ -4008,7 +4042,8 @@ class FlowClient:
         self,
         project_id: str,
         action: str = "IMAGE_GENERATION",
-        token_id: Optional[int] = None
+        token_id: Optional[int] = None,
+        model_key: Optional[str] = None,
     ) -> tuple[Optional[str], Optional[Union[int, str]]]:
         """获取reCAPTCHA token - 支持多种打码方式
         
@@ -4092,6 +4127,7 @@ class FlowClient:
                     project_id,
                     action,
                     token_id=token_id,
+                    page_protocol=self.native_page_protocol(model_key),
                 )
                 fingerprint = service.get_fingerprint(token_id) if token else None
                 if token:
@@ -4101,6 +4137,9 @@ class FlowClient:
                 else:
                     self._set_request_fingerprint(None)
                 return token, browser_id
+            except NativeSessionError:
+                self._set_request_fingerprint(None)
+                raise
             except Exception as e:
                 debug_logger.log_error(
                     f"[reCAPTCHA NativeCDP] {type(e).__name__}: {str(e)}"

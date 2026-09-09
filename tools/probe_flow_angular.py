@@ -164,7 +164,7 @@ async def main(port, reference=None, inspect_media=None, download_proxy=None, ve
                 try:
                     with patch.object(native.subprocess, "Popen", headless_popen):
                         await worker._prepare_profile(for_solve=False)
-                        _, native_session = await worker._get_or_create_project_session(project)
+                        _, native_session = await worker._get_or_create_project_session(project, "angular")
                     await asyncio.sleep(5)
                     diagnostic = await worker._evaluate(native_session, "JSON.stringify({origin:location.origin, path:location.pathname, ua:navigator.userAgent, signIn:/Sign in|登录/.test(document.body.innerText), at:!!window.WIZ_global_data?.SNlM0e})")
                     imported = (await worker.connection.send("Network.getCookies", {"urls":["https://flow.google.com/"]}, session_id=native_session))["cookies"]

@@ -75,3 +75,4 @@ tests/__pycache__/
 
 # Local browser protocol captures may include account/project metadata.
 /output/playwright/
+/.playwright-cli/

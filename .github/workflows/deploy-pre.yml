@@ -12,7 +12,7 @@ permissions:
 
 concurrency:
   group: flow2api-pre-production
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
   IMAGE_REGISTRY: ghcr.io
@@ -29,6 +29,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Verify regression tests before publishing
+        run: |
+          python -m pip install -r requirements.txt pytest pytest-asyncio
+          python -m pytest -q
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -70,6 +80,9 @@ jobs:
       HTTPS_PROXY: "http://127.0.0.1:10809"
       NO_PROXY: "localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.local"
     steps:
+      - name: Checkout deployment guard
+        uses: actions/checkout@v4
+
       - name: Login to GHCR
         shell: bash
         env:
@@ -103,26 +116,13 @@ jobs:
           export IMAGE_REPOSITORY="${IMAGE_REPOSITORY}"
           export IMAGE_TAG="${IMAGE_TAG}"
 
-          touch .env
-          set_env_var() {
-            local key="$1"
-            local value="$2"
-            if grep -q "^${key}=" .env; then
-              sed -i "s|^${key}=.*|${key}=${value}|" .env
-            else
-              printf '%s=%s\n' "$key" "$value" >> .env
-            fi
-          }
-
-          set_env_var IMAGE_REGISTRY "$IMAGE_REGISTRY"
-          set_env_var IMAGE_NAMESPACE "$IMAGE_NAMESPACE"
-          set_env_var IMAGE_REPOSITORY "$IMAGE_REPOSITORY"
-          set_env_var IMAGE_TAG "$IMAGE_TAG"
+          # Image selection is command-local; never rewrite application secrets.
 
           cat > docker-compose.pre-headed.yml <<'YAML'
           services:
             flow2api:
               shm_size: "2gb"
+              stop_grace_period: "60s"
               environment:
                 DISPLAY: ":99"
                 ALLOW_DOCKER_HEADED_CAPTCHA: "true"
@@ -142,8 +142,18 @@ jobs:
             fi
             sleep $((attempt * 8))
           done
-          "${compose[@]}" up -d --remove-orphans flow2api
-          docker image prune -f
+          # Fail closed if accepted work or a diagnostic login is still active.
+          for attempt in $(seq 1 12); do
+            if docker exec -i flow2api python - < "$GITHUB_WORKSPACE/tools/check_pre_deploy.py"; then
+              break
+            fi
+            if [ "$attempt" = "12" ]; then
+              echo "Service is still busy or diagnostic login is active; deployment refused" >&2
+              exit 1
+            fi
+            sleep 10
+          done
+          "${compose[@]}" up -d --no-deps flow2api
 
       - name: Verify container status
         shell: bash
@@ -157,7 +167,7 @@ jobs:
               published="$(docker compose -f docker-compose.yml -f docker-compose.pre-headed.yml port flow2api 4020 2>/dev/null | head -n1 || true)"
               port="${published##*:}"
               port="${port:-4020}"
-              if curl -fsS "http://127.0.0.1:${port}/login" >/dev/null; then
+              if curl -fsS "http://127.0.0.1:${port}/healthz" >/dev/null; then
                 exit 0
               fi
             fi

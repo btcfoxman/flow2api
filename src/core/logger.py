@@ -49,6 +49,15 @@ class DebugLogger:
             return token
         return f"{token[:6]}...{token[-6:]}"
 
+    def log_runtime_event(self, event: str, **fields):
+        """Always retain operational reason codes, never request/response bodies."""
+        allowed = {"request_id", "token_id", "stage", "reason", "protocol",
+                   "page_origin", "page_path", "status_code"}
+        payload = {key: value for key, value in fields.items() if key in allowed}
+        line = json.dumps({"event": event, "timestamp": self._format_timestamp(), **payload}, ensure_ascii=True)
+        print(line, flush=True)
+        self.logger.warning(line)
+
     def _format_timestamp(self) -> str:
         """Format current timestamp"""
         return datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]

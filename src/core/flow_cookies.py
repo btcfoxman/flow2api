@@ -73,5 +73,11 @@ def google_cookie_status(raw: Any) -> dict:
     return {
         "cookies_configured": bool(cookies),
         "flow_cookies_configured": any(c["domain"].lstrip(".") == "flow.google.com" and c["name"] in {"OSID", "__Secure-OSID"} for c in cookies),
+        "google_session_cookies_configured": any(c["domain"] == ".google.com" and c["name"] in {"SID", "__Secure-1PSID", "__Secure-3PSID"} and c["value"] for c in cookies),
         "cookie_count": len(cookies),
     }
+
+
+def has_complete_flow_cookies(raw: Any) -> bool:
+    status = google_cookie_status(raw)
+    return bool(status["flow_cookies_configured"] and status["google_session_cookies_configured"])

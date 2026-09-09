@@ -329,6 +329,11 @@ class LoadBalancer:
 
         for token in active_tokens:
             video_proxy_state = None
+            sessions = getattr(self.token_manager, "native_sessions", None)
+            if (config.captcha_method == "native_cdp" and sessions is not None
+                    and not sessions.available(token)):
+                filtered_reasons[token.id] = "browser session awaiting credentials or next health probe"
+                continue
             if token.id in excluded_ids:
                 filtered_reasons[token.id] = "excluded after a failed attempt in this request"
                 continue

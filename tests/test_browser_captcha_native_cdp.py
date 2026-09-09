@@ -187,7 +187,7 @@ class _FakeAccountBrowser:
     async def start(self):
         self.is_running = True
 
-    async def solve(self, project_id, action, website_key):
+    async def solve(self, project_id, action, website_key, page_protocol="labs"):
         self.solve_calls.append((project_id, action, website_key))
         if self.token_id in type(self).blocked_tokens:
             type(self).solve_started.setdefault(self.token_id, asyncio.Event()).set()
@@ -290,7 +290,7 @@ class NativeCdpServiceTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(result, {"ok": True})
-        browser._get_or_create_project_session.assert_awaited_once_with("project-a")
+        browser._get_or_create_project_session.assert_awaited_once_with("project-a", "labs")
         expression = browser._evaluate.await_args.args[1]
         self.assertIn("credentials: 'include'", expression)
         self.assertNotIn('\\"user-agent\\"', expression)
@@ -327,7 +327,7 @@ class NativeCdpServiceTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertTrue(browser._profile_reset_pending)
-        browser._discard_project_session.assert_awaited_once_with("project-a")
+        browser._discard_project_session.assert_awaited_once_with("project-a", "labs")
 
     async def test_periodic_rotation_resets_profile_before_next_solve(self):
         browser = NativeCdpAccountBrowser(7, _FakeDatabase())

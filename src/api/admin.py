@@ -15,7 +15,8 @@ from urllib.parse import urlparse
 from curl_cffi.requests import AsyncSession
 from ..core.auth import AuthManager
 from ..core.database import Database
-from ..core.flow_cookies import normalize_google_cookies, google_cookie_status
+from ..core.flow_cookies import normalize_google_cookies, google_cookie_status, has_complete_flow_cookies
+from ..core.native_session_state import local_session_state
 from ..core.config import config, get_yescaptcha_min_score, normalize_yescaptcha_task_type
 from ..core.monitoring import build_public_health_snapshot
 from ..services.token_manager import TokenManager
@@ -2476,6 +2477,8 @@ async def plugin_update_token(request: dict, authorization: Optional[str] = Head
     if cookies_provided:
         try:
             google_cookies = normalize_google_cookies(request["google_cookies"])
+            if not has_complete_flow_cookies(google_cookies):
+                raise ValueError("Google/Flow 会话 Cookie 不完整：需同时包含 .google.com 登录 Cookie 和 Flow OSID；请升级并重新加载同步插件、批准 Google 主域权限后重新同步")
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
 
@@ -2512,6 +2515,8 @@ async def plugin_update_token(request: dict, authorization: Optional[str] = Head
     existing_token = await db.get_token_by_email(email)
 
     if existing_token:
+        if config.captcha_method == 'native_cdp' and local_session_state(existing_token.id):
+            raise HTTPException(status_code=409, detail="该账号采用服务器独立登录，请在目标 Native Profile 更新会话；同步端不能覆盖本地登录态")
         # Update existing token
         try:
             # Update token
