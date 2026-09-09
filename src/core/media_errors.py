@@ -16,6 +16,7 @@ MEDIA_POLICY_REASON_UNSAFE_GENERATION = "unsafe_generation"
 MEDIA_POLICY_REASON_PROMINENT_PEOPLE = "prominent_people_filter"
 MEDIA_POLICY_REASON_MINOR = "minor_filter"
 MEDIA_POLICY_REASON_AUDIO = "audio_filter"
+MEDIA_POLICY_REASON_SEXUAL = "sexual_filter"
 MEDIA_TRAFFIC_REASON = "upstream_traffic_control"
 MEDIA_INVALID_ARGUMENT_REASON = "invalid_argument"
 MEDIA_TRANSPORT_REASON = "transport_error"
@@ -109,6 +110,8 @@ def media_policy_reason(error_message: Any) -> Optional[str]:
         return MEDIA_POLICY_REASON_MINOR
     if re.search(r"\bpublic_error_audio_filtered\b", error_lower):
         return MEDIA_POLICY_REASON_AUDIO
+    if re.search(r"\bpublic_error_sexual\b", error_lower):
+        return MEDIA_POLICY_REASON_SEXUAL
     if (
         "public_error_prominent_people_filter_failed" in error_lower
         or "prominent_people_filter_failed" in error_lower

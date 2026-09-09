@@ -162,10 +162,11 @@ class MediaPolicyErrorTests(unittest.TestCase):
 
         self.assertIsNone(reason)
 
-    def test_minor_and_audio_filter_are_task_outcomes_not_account_failures(self):
+    def test_content_filters_are_task_outcomes_not_account_failures(self):
         handler = GenerationHandler.__new__(GenerationHandler)
         for code, expected_reason in [('PUBLIC_ERROR_MINOR','minor_filter'),
-                                      ('PUBLIC_ERROR_AUDIO_FILTERED','audio_filter')]:
+                                      ('PUBLIC_ERROR_AUDIO_FILTERED','audio_filter'),
+                                      ('PUBLIC_ERROR_SEXUAL','sexual_filter')]:
             self.assertTrue(is_media_policy_error(code))
             self.assertEqual(media_generation_failure_reason(code),expected_reason)
             message,status=media_generation_failure_response('video',code)
@@ -174,6 +175,7 @@ class MediaPolicyErrorTests(unittest.TestCase):
             self.assertFalse(handler._should_record_token_error(code,502))
             self.assertIsNone(FlowClient(None)._get_retry_reason(code))
         self.assertFalse(is_media_policy_error('PUBLIC_ERROR_MINOR_INTERNAL'))
+        self.assertFalse(is_media_policy_error('PUBLIC_ERROR_SEXUAL_INTERNAL'))
 
     def test_flow_client_still_retries_generic_public_error(self):
         reason = FlowClient(None)._get_retry_reason("PUBLIC_ERROR_INTERNAL")
