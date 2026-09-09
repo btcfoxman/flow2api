@@ -22,6 +22,7 @@ from ..core.flow_cookies import normalize_google_cookies, has_complete_flow_cook
 from ..core.logger import debug_logger
 from ..core.generation_errors import NativeSessionError
 from ..core.native_session_state import local_session_state, validate_local_session_proxy
+from ..core.browser_profile import configure_web_only_profile
 from ..core.media_errors import is_media_traffic_error
 from .flow_angular import AngularProtocolError, AngularSubmissionUncertain, parse_rpc_response, rpc_fetch_expression
 
@@ -599,6 +600,10 @@ class NativeCdpAccountBrowser:
             )
 
         self.profile_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            configure_web_only_profile(self.profile_dir)
+        except (OSError, ValueError, TypeError, AttributeError):
+            raise NativeSessionError("native_profile_preferences_invalid", stage="browser_startup") from None
         try:
             (self.profile_dir / PROFILE_STATE_VERSION_FILE).write_text(
                 PROFILE_STATE_VERSION,
