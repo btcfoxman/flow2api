@@ -11,6 +11,19 @@ DEFAULT_MIN_GENERATION_CREDITS = 15
 MIN_GENERATION_CREDITS = DEFAULT_MIN_GENERATION_CREDITS
 
 
+def normalize_credits_response(payload: Any) -> Any:
+    """Google's authenticated zero balance may omit the protobuf scalar field."""
+    if (isinstance(payload, dict) and "credits" not in payload and "error" not in payload
+            and isinstance(payload.get("serviceTier"), str)
+            and payload["serviceTier"].startswith("SERVICE_TIER_")
+            and isinstance(payload.get("userPaygateTier"), str)
+            and payload["userPaygateTier"].startswith("PAYGATE_TIER_")
+            and isinstance(payload.get("sku"), str) and payload["sku"].strip()):
+        return {**payload, "credits": 0}
+    # Empty, malformed, or explicit invalid balances must still fail validation.
+    return payload
+
+
 def get_minimum_generation_credits() -> int:
     return config.minimum_generation_credits
 

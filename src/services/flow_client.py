@@ -17,7 +17,7 @@ from curl_cffi.requests import AsyncSession
 from ..core.logger import debug_logger
 from ..core.generation_errors import NativeSessionError, is_native_session_error, is_upstream_authentication_error
 from ..core.config import config, get_yescaptcha_min_score
-from ..core.credits import is_quota_exhausted_error
+from ..core.credits import is_quota_exhausted_error, normalize_credits_response
 from ..core.media_errors import is_media_policy_error, is_media_traffic_error
 from .browser_cookie_utils import serialize_cookie_header
 from .flow_angular import AngularProtocolError, AngularSubmissionUncertain, build_video_rpc, use_angular_video, video_operations
@@ -1238,7 +1238,7 @@ class FlowClient:
             at_token=at,
             timeout=self._get_control_plane_timeout(),
         )
-        return result
+        return normalize_credits_response(result)
 
     # ========== 图片上传 (使用AT) ==========
 
