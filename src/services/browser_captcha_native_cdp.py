@@ -909,6 +909,16 @@ class NativeCdpAccountBrowser:
         try:
             await self._wait_for_document_ready(session_id)
         except TimeoutError as exc:
+            # A stalled nonessential resource can keep load pending even after
+            # Angular is authenticated and usable. Accept only the exact project
+            # URL plus its live bootstrap, never a login/about/other project page.
+            if page_protocol == "angular":
+                try:
+                    await self._validate_project_page(session_id, project_id, page_protocol)
+                    return
+                except NativeSessionError as validation:
+                    if validation.page_path.rstrip("/") == "/about":
+                        raise validation from exc
             try:
                 actual_url = str(await self._evaluate(session_id, "window.location.href", timeout=3) or page_url)
             except Exception:

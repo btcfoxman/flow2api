@@ -21,6 +21,7 @@ def make_token(token_id: int, credits: int, proxy_url: str = None) -> Token:
         image_enabled=True,
         video_enabled=True,
         captcha_proxy_url=proxy_url,
+        google_cookies='[{"name":"SID","value":"test-root","domain":".google.com"},{"name":"OSID","value":"test-flow","domain":"flow.google.com"}]',
     )
 
 

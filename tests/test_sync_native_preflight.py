@@ -17,6 +17,23 @@ def account(**changes):
 
 
 class NativeSyncPreflightTests(unittest.IsolatedAsyncioTestCase):
+    async def test_slow_resource_does_not_reject_an_authenticated_exact_project(self):
+        worker=NativeCdpAccountBrowser(52,None)
+        worker.connection=SimpleNamespace(send=AsyncMock(return_value={}))
+        worker._wait_for_document_ready=AsyncMock(side_effect=TimeoutError())
+        worker._evaluate=AsyncMock(side_effect=['https://flow.google.com/project/test-project',True])
+        await worker._open_real_project_page('session','test-project','angular')
+        self.assertEqual(worker._evaluate.await_count,2)
+
+    async def test_load_timeout_on_about_page_remains_a_signed_out_failure(self):
+        worker=NativeCdpAccountBrowser(52,None)
+        worker.connection=SimpleNamespace(send=AsyncMock(return_value={}))
+        worker._wait_for_document_ready=AsyncMock(side_effect=TimeoutError())
+        worker._evaluate=AsyncMock(return_value='https://flow.google.com/about')
+        with self.assertRaises(NativeSessionError) as caught:
+            await worker._open_real_project_page('session','test-project','angular')
+        self.assertEqual(caught.exception.reason,'project_context_unavailable')
+
     async def test_page_check_does_not_solve_or_submit_and_uses_angular_context(self):
         worker = NativeCdpAccountBrowser(52, None)
         worker._prepare_profile = AsyncMock()

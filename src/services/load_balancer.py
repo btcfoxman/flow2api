@@ -334,7 +334,7 @@ class LoadBalancer:
             video_proxy_state = None
             if config.captcha_method == "native_cdp":
                 raw_cookies = getattr(token, "google_cookies", None)
-                if raw_cookies and not has_complete_flow_cookies(raw_cookies):
+                if not has_complete_flow_cookies(raw_cookies):
                     try:
                         locally_owned = bool(local_session_state(token.id))
                     except NativeSessionError:

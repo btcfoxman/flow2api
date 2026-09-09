@@ -66,6 +66,15 @@ class SessionAvailabilityTests(unittest.TestCase):
 
 
 class SessionSchedulingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_missing_snapshot_is_not_sent_to_browser_after_restart(self):
+        for raw in (None, "", "[]"):
+            manager = SimpleNamespace(native_sessions=SessionAvailability(), get_active_tokens=AsyncMock(return_value=[token(google_cookies=raw)]))
+            balancer = LoadBalancer(manager)
+            with patch('src.services.load_balancer.config', SimpleNamespace(captcha_method='native_cdp')), \
+                 patch('src.services.load_balancer.local_session_state', return_value=None):
+                self.assertIsNone(await balancer.select_token(for_video_generation=True, minimum_credits=4, track_pending=True))
+            self.assertFalse(balancer._pending_credits)
+
     async def test_incomplete_import_is_skipped_without_consuming_slots(self):
         manager = SimpleNamespace(native_sessions=SessionAvailability(), get_active_tokens=AsyncMock(return_value=[token()]))
         balancer = LoadBalancer(manager)

@@ -49,6 +49,14 @@ data/*.db
 data/*.db-journal
 tmp/*
 logs/*
+logs.txt
+output/
+browser_data*/
+.playwright-cli/
+.pytest_cache/
+.ruff_cache/
+data/*.db-wal
+data/*.db-shm
 *.log
 
 # Docker
