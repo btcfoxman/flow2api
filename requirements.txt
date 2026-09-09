@@ -12,3 +12,4 @@ playwright>=1.40.0
 nodriver>=0.48.0
 websockets>=12.0,<16.0
 prometheus-client==0.22.1
+Pillow>=10,<13
