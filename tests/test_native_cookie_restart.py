@@ -10,6 +10,23 @@ from src.services.browser_captcha_native_cdp import NativeCdpAccountBrowser
 
 
 class CookieRestartTests(unittest.IsolatedAsyncioTestCase):
+    async def test_new_credentials_recheck_legacy_redirect_but_unchanged_do_not(self):
+        with tempfile.TemporaryDirectory() as directory:
+            token = SimpleNamespace(st="old", google_cookies=None)
+            worker = NativeCdpAccountBrowser(1, SimpleNamespace(get_token=AsyncMock(return_value=token)))
+            worker.profile_dir = Path(directory)
+            worker._legacy_migrated = True
+            worker._legacy_auth_revision = hashlib.sha256(b"old\0").hexdigest()
+            worker._create_page_session = AsyncMock(return_value=("target", "session"))
+            worker._seed_session_cookie = AsyncMock()
+            worker._open_real_project_page = AsyncMock()
+            worker._capture_fingerprint = AsyncMock()
+            await worker._get_or_create_project_session("p", "labs")
+            worker._open_real_project_page.assert_awaited_with("session", "p", "angular")
+            token.st = "new"
+            await worker._get_or_create_project_session("p", "labs")
+            worker._open_real_project_page.assert_awaited_with("session", "p", "labs")
+
     def worker(self, directory, cookies, google=""):
         worker = NativeCdpAccountBrowser(1, SimpleNamespace(get_token=AsyncMock(
             return_value=SimpleNamespace(st="stored-st", google_cookies=google))))

@@ -936,8 +936,15 @@ class NativeCdpAccountBrowser:
         project_id: str,
         page_protocol: str = "labs",
     ) -> tuple[str, str]:
-        if page_protocol == "labs" and not self._legacy_migrated and self.db is not None:
+        if page_protocol == "labs" and self.db is not None:
             token = await self.db.get_token(self.token_id)
+            revision = hashlib.sha256((str(getattr(token, "st", "") or "") + "\0"
+                                       + str(getattr(token, "google_cookies", "") or "")).encode()).hexdigest()
+            if getattr(self, "_legacy_auth_revision", None) != revision:
+                # A redirect observed with old credentials must not permanently
+                # force new Labs sessions onto an unauthenticated Angular page.
+                self._legacy_migrated = False
+                self._legacy_auth_revision = revision
             if (local_session_state(self.token_id, self.profile_dir)
                     or has_complete_flow_cookies(getattr(token, "google_cookies", None))):
                 # A complete modern session selects its authenticated page,
