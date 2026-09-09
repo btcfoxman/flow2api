@@ -13,6 +13,30 @@ JPEG_BYTES = b"\xff\xd8\xff" + b"0" * 16
 
 
 class FlowClientUploadImageTests(unittest.IsolatedAsyncioTestCase):
+    async def test_empty_timeout_retries_only_the_project_upload(self):
+        client = FlowClient(proxy_manager=None)
+        client._make_request = AsyncMock(side_effect=[TimeoutError(), {"media": {"name": "recovered"}}])
+        with patch("src.services.flow_client.asyncio.sleep", new=AsyncMock()):
+            media_id = await client.upload_image(
+                at="test-at", image_bytes=JPEG_BYTES, project_id="project-123",
+            )
+        self.assertEqual(media_id, "recovered")
+        self.assertEqual(client._make_request.await_count, 2)
+        for call in client._make_request.await_args_list:
+            self.assertTrue(call.kwargs["url"].endswith("/flow/uploadImage"))
+            self.assertEqual(call.kwargs["json_data"]["clientContext"]["projectId"], "project-123")
+
+    async def test_exhausted_upload_timeout_is_retryable_without_generation(self):
+        from src.core.media_errors import project_image_upload_failure_response
+        client = FlowClient(proxy_manager=None)
+        client._make_request = AsyncMock(side_effect=TimeoutError())
+        with (patch.object(client, "_captcha_aware_max_retries", return_value=2),
+              patch("src.services.flow_client.asyncio.sleep", new=AsyncMock()),
+              patch("builtins.print"), self.assertRaises(RuntimeError) as caught):
+            await client.upload_image(at="test-at", image_bytes=JPEG_BYTES, project_id="project-123")
+        self.assertEqual(client._make_request.await_count, 2)
+        self.assertEqual(project_image_upload_failure_response(str(caught.exception))[1], 503)
+
     async def test_native_cdp_upload_uses_bound_real_project_page(self):
         original_method = config.captcha_method
         config.set_captcha_method("native_cdp")

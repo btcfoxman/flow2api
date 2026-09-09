@@ -26,6 +26,15 @@ from src.services.generation_handler import GenerationHandler
 
 
 class MediaPolicyErrorTests(unittest.TestCase):
+    def test_upload_timeout_is_transient_but_generation_timeout_is_not(self):
+        for cause in ("TimeoutError", "operation timed out", "curl: (28)"):
+            message, status = project_image_upload_failure_response(
+                f"Project-scoped image upload failed via /flow/uploadImage (project_id=p, cause={cause})"
+            )
+            self.assertEqual(status, 503)
+            self.assertEqual(message, MEDIA_TRANSPORT_FAILURE_MESSAGE)
+        self.assertEqual(project_image_upload_failure_response("generation submit TimeoutError")[1], 502)
+
     def test_service_unavailable_message_hides_internal_account_routing(self):
         video_message = media_service_unavailable_message("video")
         image_message = media_service_unavailable_message("image")

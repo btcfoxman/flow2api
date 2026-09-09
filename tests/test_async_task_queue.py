@@ -129,6 +129,37 @@ class AsyncTaskQueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(queued["status"], "queued")
         self.assertEqual(queued["last_error"], "proxy cooling down")
 
+    async def test_upload_timeout_retains_payload_and_queue_position(self):
+        from src.core.media_errors import project_image_upload_failure_response
+        normalized = routes.NormalizedGenerationRequest(
+            model="abra_r2v_4s_360p", prompt="upload timeout", images=[b"reference"],
+        )
+        payload = routes._serialize_normalized_generation_request(normalized)
+        await self.db.enqueue_async_task(
+            task_id="upload-timeout", task_type="video", model=normalized.model,
+            prompt=normalized.prompt, request_payload=payload,
+            base_url_override=None, capacity=50,
+        )
+        claimed = await self.db.claim_next_async_task()
+        message, status = project_image_upload_failure_response(
+            "Project-scoped image upload failed via /flow/uploadImage (cause=TimeoutError)"
+        )
+        handler = SimpleNamespace(db=self.db, load_balancer=SimpleNamespace(
+            select_token=AsyncMock(return_value=SimpleNamespace(id=43)),
+        ))
+        with (patch.object(routes, "generation_handler", handler),
+              patch.object(routes, "_collect_async_video_task_result", new=AsyncMock(
+                  return_value={"error": {"message": message, "status_code": status}},
+              ))):
+            delay = await routes._process_async_video_queue_item(claimed)
+        queued = await self.db.get_async_task("upload-timeout")
+        self.assertGreater(delay, 0)
+        self.assertEqual(queued["status"], "queued")
+        self.assertEqual(queued["request_payload"], payload)
+        self.assertEqual(queued["attempt_count"], 1)
+        self.assertFalse(queued["upstream_task_id"])
+        self.assertEqual(await self.db.get_async_task_position("upload-timeout"), 1)
+
     async def test_successful_submission_moves_item_to_normal_task_table(self):
         token_id = await self.db.add_token(
             Token(st="st-queue", at="at-queue", email="queue@example.com")

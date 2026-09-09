@@ -176,6 +176,13 @@ def project_image_upload_failure_response(error_message: Any) -> tuple[str, int]
     """Return a safe public response for project-scoped upload failures."""
     if is_project_image_upload_invalid_argument_error(error_message):
         return VIDEO_UPLOAD_INVALID_ARGUMENT_MESSAGE, 400
+    if is_project_image_upload_error(error_message):
+        # Only a failed reference upload is safe to return to the submit queue.
+        # Never broaden this to generation-submit/polling timeouts: they may
+        # already have created a paid task whose result is still unknown.
+        cause = str(error_message).lower().partition("cause=")[2]
+        if any(marker in cause for marker in ("timeouterror", "timed out", "timeout", "curl: (28)")):
+            return MEDIA_TRANSPORT_FAILURE_MESSAGE, 503
     return VIDEO_UPLOAD_FAILURE_MESSAGE, 502
 
 

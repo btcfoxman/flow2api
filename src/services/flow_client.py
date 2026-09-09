@@ -1464,7 +1464,10 @@ class FlowClient:
             except Exception as new_upload_error:
                 last_error = new_upload_error
                 upload_error_summary = self._summarize_exception(new_upload_error)
-                retry_reason = "网络超时" if self._is_timeout_error(new_upload_error) else self._get_retry_reason(str(new_upload_error))
+                # asyncio/CDP TimeoutError often has an empty message. This
+                # retry is limited to uploading an asset, before generation.
+                upload_timed_out = isinstance(new_upload_error, TimeoutError) or self._is_timeout_error(new_upload_error)
+                retry_reason = "网络超时" if upload_timed_out else self._get_retry_reason(str(new_upload_error))
 
                 # 旧接口不携带 projectId，带项目上下文的上传一旦回退就可能把图片挂到错误项目。
                 if normalized_project_id:
