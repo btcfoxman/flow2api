@@ -101,6 +101,47 @@ class AsyncVideoResultBackfillTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(inserted, 0)
 
+    async def test_failed_queue_alias_does_not_create_second_result_log(self):
+        for task_id in ['upstream-task','flow2api-submit-wrapper']:
+            await self.db.create_task(Task(task_id=task_id,token_id=self.token_id,
+                model='abra_r2v_10s',prompt='test',status='failed',progress=100,
+                operations=[{'operation':{'name':'upstream-task'}}]))
+        inserted=await self.db.backfill_async_video_result_logs()
+        self.assertEqual(inserted,1)
+        self.assertEqual(await self.db.backfill_async_video_result_logs(),0)
+        logs=await self.db.get_logs(include_payload=True)
+        self.assertEqual(len(logs),1)
+        self.assertEqual(json.loads(logs[0]['response_body'])['task_id'],'upstream-task')
+
+    async def test_historical_duplicate_is_preserved_as_audit_not_double_counted(self):
+        canonical_id=await self.db.add_request_log(RequestLog(token_id=self.token_id,
+            operation='generate_video_async_result',status_text='failed',status_code=400,progress=100,
+            request_body=json.dumps({'task_id':'original'}),response_body=json.dumps({'task_id':'original'}),duration=1))
+        alias_id=await self.db.add_request_log(RequestLog(token_id=self.token_id,
+            operation='generate_video_async_result',status_text='failed',status_code=502,progress=100,
+            request_body=json.dumps({'task_id':'flow2api-submit-alias','backfilled':True,
+                'operations':[{'operation':{'name':'original'}}]}),duration=1))
+        self.assertEqual((await self.db.get_generation_outcome_stats())['total_failed_tasks'],2)
+        await self.db.backfill_async_video_result_logs()
+        await self.db.backfill_async_video_result_logs()
+        self.assertEqual((await self.db.get_generation_outcome_stats())['total_failed_tasks'],1)
+        audit=await self.db.get_log_detail(alias_id)
+        self.assertEqual(audit['operation'],'generate_video_alias_audit')
+        self.assertEqual(json.loads(audit['request_body'])['duplicate_of_log_id'],canonical_id)
+        self.assertEqual(len(await self.db.get_logs(include_payload=True)),2)
+
+    async def test_alias_without_confirmed_canonical_log_is_not_archived(self):
+        alias_id=await self.db.add_request_log(RequestLog(token_id=self.token_id,
+            operation='generate_video_async_result',status_text='failed',status_code=502,progress=100,
+            request_body=json.dumps({'task_id':'flow2api-submit-alias','backfilled':True,
+                'operations':[{'operation':{'name':'not-completed'}}]}),duration=1))
+        await self.db.add_request_log(RequestLog(token_id=self.token_id,
+            operation='generate_video_async_result',status_text='processing',status_code=102,progress=45,
+            request_body=json.dumps({'task_id':'not-completed'}),duration=1))
+        await self.db.backfill_async_video_result_logs()
+        self.assertEqual((await self.db.get_log_detail(alias_id))['operation'],'generate_video_async_result')
+        self.assertEqual((await self.db.get_generation_outcome_stats())['total_failed_tasks'],1)
+
     async def test_backfills_failed_post_submit_task_when_submit_log_is_missing(self):
         await self.db.create_task(
             Task(

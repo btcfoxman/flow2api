@@ -1960,6 +1960,8 @@ class Database:
         """Backfill final request-log rows for async video tasks created by older builds."""
         async with self._connect(write=True) as db:
             db.row_factory = aiosqlite.Row
+            await self._archive_duplicate_async_alias_logs(db)
+            await db.commit()
             clear_cutoff = await self._get_app_metadata_value(db, "request_logs_cleared_at")
             clear_cutoff_seconds = self._timestamp_seconds(clear_cutoff)
             query_limit = limit if clear_cutoff_seconds is None else max(limit * 5, limit)
@@ -2013,6 +2015,13 @@ class Database:
                 task_id = str(task.get("task_id") or "")
                 if not task_id:
                     continue
+                canonical_id = self._async_video_canonical_id(task)
+                if canonical_id:
+                    canonical = await db.execute('SELECT 1 FROM tasks WHERE task_id = ?', (canonical_id,))
+                    if await canonical.fetchone():
+                        # Queue wrappers expose the original task, not a second
+                        # generation. Only its canonical task needs a result log.
+                        continue
                 if clear_cutoff_seconds is not None:
                     completed_seconds = self._timestamp_seconds(task.get("completed_at"))
                     if completed_seconds is None or completed_seconds <= clear_cutoff_seconds:
@@ -2092,6 +2101,53 @@ class Database:
 
             await db.commit()
             return inserted
+
+    @classmethod
+    def _async_video_canonical_id(cls, task):
+        task_id = str(task.get('task_id') or '')
+        if not task_id.startswith('flow2api-submit-'):
+            return None
+        operations = cls._json_or_none(task.get('operations'))
+        if not isinstance(operations, list) or not operations or not isinstance(operations[0], dict):
+            return None
+        operation = operations[0].get('operation')
+        canonical_id = operation.get('name') if isinstance(operation, dict) else None
+        return canonical_id if isinstance(canonical_id, str) and canonical_id and canonical_id != task_id else None
+
+    async def _archive_duplicate_async_alias_logs(self, db):
+        """Keep proven duplicate backfills as audit logs, not extra task outcomes."""
+        cursor = await db.execute("SELECT id, token_id, request_body FROM request_logs WHERE operation = 'generate_video_async_result'")
+        for row in await cursor.fetchall():
+            payload = self._json_or_none(row['request_body'])
+            if not isinstance(payload, dict) or payload.get('backfilled') is not True:
+                continue
+            canonical_id = self._async_video_canonical_id(payload)
+            if not canonical_id:
+                continue
+            candidates = await db.execute(
+                "SELECT id, request_body, response_body FROM request_logs "
+                "WHERE operation = 'generate_video_async_result' AND token_id = ? AND id != ? "
+                "AND status_text IN ('completed','failed') AND progress >= 100 "
+                "AND (request_body LIKE ? OR response_body LIKE ?)",
+                (row['token_id'], row['id'], '%'+canonical_id+'%', '%'+canonical_id+'%'),
+            )
+            canonical_log = None
+            for candidate in await candidates.fetchall():
+                bodies = [self._json_or_none(candidate[key]) for key in ('request_body','response_body')]
+                if any(isinstance(body, dict) and body.get('task_id') == canonical_id for body in bodies):
+                    canonical_log = candidate['id']
+                    break
+            if canonical_log is None:
+                continue
+            payload['duplicate_of_log_id'] = canonical_log
+            payload['original_operation'] = 'generate_video_async_result'
+            await db.execute(
+                "UPDATE request_logs SET operation = 'generate_video_alias_audit', request_body = ? WHERE id = ?",
+                (json.dumps(payload, ensure_ascii=False), row['id']),
+            )
+            # This is a duplicate derived counter only. Original task/log data
+            # stays available, including the link needed to reverse the archive.
+            await db.execute('DELETE FROM generation_outcomes WHERE request_log_id = ?', (row['id'],))
 
     async def _get_app_metadata_value(self, db, key: str) -> Optional[str]:
         try:
