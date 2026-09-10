@@ -10,7 +10,7 @@ class PublicUnavailableErrorTests(unittest.IsolatedAsyncioTestCase):
         handler = SimpleNamespace(
             db=SimpleNamespace(
                 enqueue_async_task=AsyncMock(
-                    return_value={"position": 1, "capacity": 50}
+                    return_value={"position": 1, "capacity": 50, "expires_at": 4102444800}
                 )
             ),
             load_balancer=SimpleNamespace(
@@ -29,11 +29,14 @@ class PublicUnavailableErrorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["status"], "queued")
         self.assertEqual(payload["queue_position"], 1)
         self.assertEqual(payload["queue_capacity"], 50)
+        self.assertEqual(payload["queue_expires_at"], 4102444800)
         handler.load_balancer.select_token.assert_not_awaited()
 
     async def test_queued_video_payload_hides_internal_proxy_cooldown(self):
         handler = SimpleNamespace(
-            db=SimpleNamespace(get_async_task_position=AsyncMock(return_value=1))
+            db=SimpleNamespace(get_async_task_position=AsyncMock(return_value=1),
+                               expire_async_tasks=AsyncMock(return_value=0),
+                               get_async_task=AsyncMock(return_value=None))
         )
         queue_item = {
             "task_id": "flow2api-submit-test",

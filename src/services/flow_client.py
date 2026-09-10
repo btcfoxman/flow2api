@@ -17,6 +17,7 @@ from curl_cffi.requests import AsyncSession
 from ..core.logger import debug_logger
 from ..core.generation_errors import NativeSessionError, is_native_session_error, is_upstream_authentication_error
 from ..core.config import config, get_yescaptcha_min_score
+from ..core.async_queue import AsyncQueueExpired, admit_queued_video_submission
 from ..core.credits import is_quota_exhausted_error, normalize_credits_response
 from ..core.media_errors import is_media_policy_error, is_media_traffic_error
 from .browser_cookie_utils import serialize_cookie_header
@@ -605,6 +606,8 @@ class FlowClient:
         respect_fingerprint_proxy = True
         native_token_id = fingerprint.get("native_token_id") if isinstance(fingerprint, dict) else None
         is_video_submit = "video:" in url and "batchCheckAsyncVideoGenerationStatus" not in url
+        if is_video_submit:
+            await admit_queued_video_submission()
         if captcha_method == "native_cdp" and native_token_id and is_video_submit:
             client_context = (json_data or {}).get("clientContext") or {}
             if not isinstance(client_context, dict):
@@ -3614,7 +3617,7 @@ class FlowClient:
     ) -> bool:
         """统一处理生成链路的重试判定与打码自愈通知。"""
         error_str = str(error)
-        if isinstance(error, AngularSubmissionUncertain) or is_native_session_error(error):
+        if isinstance(error, (AngularSubmissionUncertain, AsyncQueueExpired)) or is_native_session_error(error):
             return False
         if is_media_traffic_error(error_str):
             if str(getattr(config, "captcha_method", "") or "").strip().lower() == "native_cdp":

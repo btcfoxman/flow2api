@@ -8,6 +8,7 @@ from typing import Optional, AsyncGenerator, List, Dict, Any, Set
 from ..core.logger import debug_logger
 from ..core.generation_errors import NativeSessionError, is_native_session_error, is_upstream_authentication_error
 from ..core.config import config
+from ..core.async_queue import AsyncQueueExpired, QUEUE_TIMEOUT_MESSAGE
 from ..core.credits import (
     is_quota_exhausted_error,
     quota_exhausted_message,
@@ -1862,7 +1863,10 @@ class GenerationHandler:
             raise
         except Exception as e:
             raw_error_msg = str(e)
-            if is_quota_exhausted_error(raw_error_msg):
+            if isinstance(e, AsyncQueueExpired):
+                error_msg = QUEUE_TIMEOUT_MESSAGE
+                response_status_code = 408
+            elif is_quota_exhausted_error(raw_error_msg):
                 await self._handle_quota_exhausted_error(
                     token,
                     raw_error_msg,
@@ -1961,7 +1965,7 @@ class GenerationHandler:
                 response_status_code,
             )
             debug_logger.log_error(f"[GENERATION] ❌ {error_msg}")
-            if token and self._should_record_token_error(raw_error_msg, response_status_code):
+            if token and not isinstance(e, AsyncQueueExpired) and self._should_record_token_error(raw_error_msg, response_status_code):
                 # 记录错误（所有错误统一处理，不再特殊处理429）
                 await self.token_manager.record_error(token.id)
             elif token:

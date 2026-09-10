@@ -18,6 +18,10 @@ from pydantic import AliasChoices, BaseModel, Field
 
 from ..core.auth import AuthManager, verify_api_key_flexible
 from ..core.config import config
+from ..core.async_queue import (
+    AsyncQueueExpired, QUEUE_TIMEOUT_MESSAGE, QUEUE_SUBMISSION_UNCERTAIN_MESSAGE,
+    queue_submission_guard,
+)
 from ..core.logger import debug_logger
 from ..core.media_errors import (
     sanitize_public_error_message,
@@ -1248,10 +1252,14 @@ async def _build_queued_video_task_payload(
     queue_item: Dict[str, Any],
 ) -> Dict[str, Any]:
     handler = _ensure_generation_handler()
+    await handler.db.expire_async_tasks(queue_item["task_id"])
+    queue_item = await handler.db.get_async_task(queue_item["task_id"]) or queue_item
     queue_status = str(queue_item.get("status") or "queued")
-    # "submitting" is an internal queue claim. Until an upstream task exists the
-    # public task is still queued, avoiding a processing/queued status flicker.
-    status = "queued" if queue_status == "submitting" else queue_status
+    # A claim alone is still waiting; only the atomic upstream admission ends
+    # queue waiting. Admitted work is governed by the generation timeout.
+    status = queue_status
+    if queue_status == "submitting":
+        status = "processing" if queue_item.get("submission_started_at") else "queued"
     payload: Dict[str, Any] = {
         "id": queue_item["task_id"],
         "object": "video",
@@ -1260,14 +1268,15 @@ async def _build_queued_video_task_payload(
         "model": _video_model_response_name(str(queue_item.get("model") or "")),
         "progress": 100 if status == "failed" else 0,
         "queue_capacity": config.async_task_queue_capacity,
+        "queue_expires_at": int(queue_item.get("expires_at") or 0),
     }
-    if queue_status in {"queued", "submitting"}:
+    if status == "queued":
         position = await handler.db.get_async_task_position(queue_item["task_id"])
         if position is not None:
             payload["queue_position"] = position
     if queue_status == "failed":
         payload["error"] = {
-            "code": "FAILED",
+            "code": "QUEUE_TIMEOUT" if queue_item.get("last_error") == QUEUE_TIMEOUT_MESSAGE else "FAILED",
             "message": sanitize_public_error_message(
                 queue_item.get("last_error") or "视频任务提交失败，请重新提交"
             ),
@@ -1289,6 +1298,7 @@ async def _create_deferred_async_video_task(
         request_payload=_serialize_normalized_generation_request(normalized),
         base_url_override=base_url_override,
         capacity=config.async_task_queue_capacity,
+        timeout_seconds=config.video_timeout,
     )
     if enqueued is None:
         return {
@@ -1310,6 +1320,7 @@ async def _create_deferred_async_video_task(
         "progress": 0,
         "queue_position": enqueued["position"],
         "queue_capacity": enqueued["capacity"],
+        "queue_expires_at": int(enqueued["expires_at"]),
     }
 
 
@@ -1325,6 +1336,9 @@ async def _run_async_task_queue_workers(worker_count: int) -> None:
         )
         for index in range(normalized_count)
     ]
+    # Independent from submit workers: a stalled account refresh/preparation must
+    # not prevent the rest of the waiting pool from reaching its deadline.
+    workers.append(asyncio.create_task(_run_async_task_queue_expirer()))
     try:
         await asyncio.gather(*workers)
     finally:
@@ -1332,6 +1346,18 @@ async def _run_async_task_queue_workers(worker_count: int) -> None:
             if not worker.done():
                 worker.cancel()
         await asyncio.gather(*workers, return_exceptions=True)
+
+
+async def _run_async_task_queue_expirer() -> None:
+    handler = _ensure_generation_handler()
+    while True:
+        try:
+            await handler.db.expire_async_tasks()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            debug_logger.log_error(f"[ASYNC QUEUE] Expiration sweep failed: {type(exc).__name__}")
+        await asyncio.sleep(ASYNC_TASK_QUEUE_RETRY_SECONDS)
 
 
 async def _run_async_task_queue_worker(
@@ -1375,12 +1401,16 @@ async def _run_async_task_queue_worker(
             )
             if queue_item is not None:
                 try:
+                    current = await handler.db.get_async_task(queue_item["task_id"])
+                    uncertain = bool(current and current.get("submission_started_at")
+                                     and not current.get("upstream_task_id"))
                     await handler.db.update_async_task(
                         queue_item["task_id"],
-                        status="queued",
-                        last_error=str(exc) or exc.__class__.__name__,
+                        status="failed" if uncertain else "queued",
+                        last_error=QUEUE_SUBMISSION_UNCERTAIN_MESSAGE if uncertain else (str(exc) or exc.__class__.__name__),
                         retry_after_seconds=ASYNC_TASK_QUEUE_RETRY_SECONDS,
                         increment_attempt=True,
+                        **({"request_payload": "{}"} if uncertain else {}),
                     )
                 except Exception as recovery_exc:
                     debug_logger.log_error(
@@ -1394,6 +1424,10 @@ async def _process_async_video_queue_item(queue_item: Dict[str, Any]) -> float:
     """Try to submit one claimed video item; return a retry delay in seconds."""
     handler = _ensure_generation_handler()
     local_task_id = str(queue_item["task_id"])
+    await handler.db.expire_async_tasks(local_task_id)
+    queue_item = await handler.db.get_async_task(local_task_id)
+    if queue_item is None or queue_item["status"] == "failed":
+        return 0.0
     try:
         normalized = _deserialize_normalized_generation_request(
             str(queue_item.get("request_payload") or "")
@@ -1446,6 +1480,12 @@ async def _process_async_video_queue_item(queue_item: Dict[str, Any]) -> float:
         minimum_credits=required_credits,
         advance_polling_state=False,
     )
+    # Selection can wait for an account refresh. Do not start the generation
+    # pipeline using a stale claim after a deadline/sweeper has ended the task.
+    await handler.db.expire_async_tasks(local_task_id)
+    current = await handler.db.get_async_task(local_task_id)
+    if current is None or current["status"] == "failed":
+        return 0.0
     if token is None or token.id is None:
         unavailable_reason = "当前没有可执行该视频任务的账号"
         if hasattr(handler.load_balancer, "get_unavailable_reason"):
@@ -1469,10 +1509,17 @@ async def _process_async_video_queue_item(queue_item: Dict[str, Any]) -> float:
         )
         return ASYNC_TASK_QUEUE_RETRY_SECONDS
 
-    result = await _collect_async_video_task_result(
-        normalized,
-        queue_item.get("base_url_override"),
-    )
+    with queue_submission_guard(lambda: handler.db.admit_async_task_submission(local_task_id)):
+        try:
+            result = await _collect_async_video_task_result(
+                normalized,
+                queue_item.get("base_url_override"),
+            )
+        except AsyncQueueExpired:
+            return 0.0
+    current = await handler.db.get_async_task(local_task_id)
+    if current is None or current["status"] == "failed":
+        return 0.0
     if "error" in result:
         status_code = _get_error_status_code(result)
         error_message = _extract_error_message(result)

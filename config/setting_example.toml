@@ -46,6 +46,7 @@ proxy_url = ""
 
 [generation]
 image_timeout = 300
+# 视频生成超时；异步任务入队时也以此值固化独立的排队截止时间（重试不续期）。
 video_timeout = 1500
 async_task_queue_capacity = 50
 

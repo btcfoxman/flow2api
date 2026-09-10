@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from src.core.config import config
+from src.core.async_queue import AsyncQueueExpired
 from src.core.generation_errors import NativeSessionError
 from src.core.logger import debug_logger
 from src.services.browser_captcha_native_cdp import NativeCdpAccountBrowser
@@ -166,7 +167,8 @@ class ProtocolIsolationTests(unittest.IsolatedAsyncioTestCase):
 
 class FailureAccountingTests(unittest.IsolatedAsyncioTestCase):
     async def test_preflight_and_wrapped_upload_do_not_disable_account(self):
-        for failure, expected_status in [(NativeSessionError('flow_login_unavailable', protocol='angular'), 503),
+        for failure, expected_status in [(AsyncQueueExpired(), 408),
+              (NativeSessionError('flow_login_unavailable', protocol='angular'), 503),
               (RuntimeError('Project-scoped image upload failed via /flow/uploadImage (cause=HTTP Error 500)'), 502)]:
             handler, _, _ = quota_helpers.QuotaAccountSwitchingTests()._make_handler(quota_token_ids=set())
             from src.core.session_availability import SessionAvailability

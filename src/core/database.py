@@ -2,11 +2,13 @@
 import asyncio
 import aiosqlite
 import json
+import time
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
 from typing import Optional, List, Dict, Any
 from pathlib import Path
 from .config import DEFAULT_YESCAPTCHA_TASK_TYPE, normalize_yescaptcha_task_type
+from .async_queue import QUEUE_TIMEOUT_MESSAGE, QUEUE_SUBMISSION_UNCERTAIN_MESSAGE, normalize_queue_timeout
 from .media_errors import (
     media_generation_failure_reason,
     media_generation_failure_response,
@@ -581,6 +583,8 @@ class Database:
                         upstream_task_id TEXT,
                         attempt_count INTEGER NOT NULL DEFAULT 0,
                         next_attempt_at REAL NOT NULL DEFAULT 0,
+                        expires_at REAL,
+                        submission_started_at REAL,
                         last_error TEXT,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -648,6 +652,8 @@ class Database:
             if await self._table_exists(db, "async_task_queue"):
                 queue_columns_to_add = [
                     ("next_attempt_at", "REAL NOT NULL DEFAULT 0"),
+                    ("expires_at", "REAL"),
+                    ("submission_started_at", "REAL"),
                 ]
                 for col_name, col_type in queue_columns_to_add:
                     if not await self._column_exists(db, "async_task_queue", col_name):
@@ -661,6 +667,19 @@ class Database:
                                 f"  Failed to add column '{col_name}' "
                                 f"to async_task_queue table: {e}"
                             )
+
+                # Legacy tasks keep their original age; deployment is not a fresh
+                # waiting window. Never overwrite an already persisted deadline.
+                cursor = await db.execute("SELECT video_timeout FROM generation_config WHERE id = 1")
+                row = await cursor.fetchone()
+                fallback_timeout = (config_dict or {}).get("generation", {}).get("video_timeout", 1500)
+                queue_timeout = normalize_queue_timeout(row[0] if row else fallback_timeout)
+                await db.execute(
+                    """UPDATE async_task_queue
+                       SET expires_at = COALESCE(CAST(strftime('%s', created_at) AS INTEGER), 0) + ?
+                       WHERE expires_at IS NULL""",
+                    (queue_timeout,),
+                )
 
             # Check and add missing columns to admin_config table
             if await self._table_exists(db, "admin_config"):
@@ -934,6 +953,8 @@ class Database:
                     upstream_task_id TEXT,
                     attempt_count INTEGER NOT NULL DEFAULT 0,
                     next_attempt_at REAL NOT NULL DEFAULT 0,
+                    expires_at REAL,
+                    submission_started_at REAL,
                     last_error TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -1606,16 +1627,19 @@ class Database:
         request_payload: str,
         base_url_override: Optional[str],
         capacity: int,
+        timeout_seconds: int = 1500,
     ) -> Optional[Dict[str, Any]]:
         """Atomically append an item to the bounded persistent FIFO queue."""
         try:
             normalized_capacity = max(1, min(1000, int(capacity)))
         except (TypeError, ValueError):
             normalized_capacity = 50
+        expires_at = time.time() + normalize_queue_timeout(timeout_seconds)
 
         async with self._connect(write=True) as db:
             db.row_factory = aiosqlite.Row
             await db.execute("BEGIN IMMEDIATE")
+            await self._expire_async_tasks_on_connection(db)
             cursor = await db.execute(
                 """
                 SELECT COUNT(*)
@@ -1625,16 +1649,16 @@ class Database:
             )
             active_count = int((await cursor.fetchone())[0] or 0)
             if active_count >= normalized_capacity:
-                await db.rollback()
+                await db.commit()  # Keep any expired entries terminal, even if still full.
                 return None
 
             cursor = await db.execute(
                 """
                 INSERT INTO async_task_queue (
                     task_id, task_type, model, prompt, request_payload,
-                    base_url_override, status
+                    base_url_override, status, expires_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, 'queued')
+                VALUES (?, ?, ?, ?, ?, ?, 'queued', ?)
                 """,
                 (
                     task_id,
@@ -1643,6 +1667,7 @@ class Database:
                     prompt,
                     request_payload,
                     base_url_override,
+                    expires_at,
                 ),
             )
             queue_id = int(cursor.lastrowid)
@@ -1653,6 +1678,7 @@ class Database:
                 "task_id": task_id,
                 "position": position,
                 "capacity": normalized_capacity,
+                "expires_at": expires_at,
             }
 
     async def claim_next_async_task(
@@ -1669,6 +1695,7 @@ class Database:
         async with self._connect(write=True) as db:
             db.row_factory = aiosqlite.Row
             await db.execute("BEGIN IMMEDIATE")
+            await self._expire_async_tasks_on_connection(db)
             cursor = await db.execute(
                 """
                 SELECT COUNT(*)
@@ -1679,7 +1706,7 @@ class Database:
             )
             submitting_count = int((await cursor.fetchone())[0] or 0)
             if submitting_count >= submitting_limit:
-                await db.rollback()
+                await db.commit()
                 return None
 
             cursor = await db.execute(
@@ -1694,12 +1721,12 @@ class Database:
             )
             row = await cursor.fetchone()
             if row is None:
-                await db.rollback()
+                await db.commit()
                 return None
 
             retry_not_before = float(row["next_attempt_at"] or 0)
             if retry_not_before > datetime.now(timezone.utc).timestamp():
-                await db.rollback()
+                await db.commit()
                 return None
 
             cursor = await db.execute(
@@ -1719,6 +1746,53 @@ class Database:
             item = dict(row)
             item["status"] = "submitting"
             return item
+
+    async def _expire_async_tasks_on_connection(self, db, task_id: Optional[str] = None) -> int:
+        """Expire all unsubmitted waiting work, including claimed preparation.
+
+        The final upstream admission and this sweep use the same SQLite write
+        transaction boundary. An admitted or attached job is never swept.
+        """
+        sql = """UPDATE async_task_queue
+                 SET status = 'failed', last_error = ?, request_payload = '{}',
+                     next_attempt_at = 0, updated_at = CURRENT_TIMESTAMP
+                 WHERE status IN ('queued', 'submitting')
+                   AND COALESCE(TRIM(upstream_task_id), '') = ''
+                   AND submission_started_at IS NULL
+                   AND (expires_at IS NULL OR expires_at <= ?)"""
+        params = [QUEUE_TIMEOUT_MESSAGE, time.time()]
+        if task_id is not None:
+            sql += " AND task_id = ?"
+            params.append(task_id)
+        cursor = await db.execute(sql, params)
+        return cursor.rowcount or 0
+
+    async def expire_async_tasks(self, task_id: Optional[str] = None) -> int:
+        async with self._connect(write=True) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            count = await self._expire_async_tasks_on_connection(db, task_id)
+            await db.commit()
+            return count
+
+    async def admit_async_task_submission(self, task_id: str) -> bool:
+        """Last atomic gate before upstream generation; terminal tasks cannot pass."""
+        async with self._connect(write=True) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            await self._expire_async_tasks_on_connection(db, task_id)
+            admitted_at = time.time()
+            cursor = await db.execute(
+                """UPDATE async_task_queue
+                   SET submission_started_at = COALESCE(submission_started_at, ?),
+                       updated_at = CURRENT_TIMESTAMP
+                   WHERE task_id = ? AND status = 'submitting'
+                     AND COALESCE(TRIM(upstream_task_id), '') = ''
+                     AND (submission_started_at IS NOT NULL OR expires_at > ?)""",
+                (admitted_at, task_id, admitted_at),
+            )
+            if cursor.rowcount != 1:
+                await self._expire_async_tasks_on_connection(db, task_id)
+            await db.commit()
+            return cursor.rowcount == 1
 
     async def get_async_task(self, task_id: str) -> Optional[Dict[str, Any]]:
         """Return one queued/submitting/failed async submission."""
@@ -1780,12 +1854,18 @@ class Database:
             return False
 
         updates.append("updated_at = CURRENT_TIMESTAMP")
+        if kwargs.get("status") == "queued":
+            # Only an explicitly retryable result goes back to waiting. The
+            # original deadline remains unchanged across every retry.
+            updates.append("submission_started_at = NULL")
         params.append(task_id)
         async with self._connect(write=True) as db:
+            await db.execute("BEGIN IMMEDIATE")
             cursor = await db.execute(
-                f"UPDATE async_task_queue SET {', '.join(updates)} WHERE task_id = ?",
+                f"UPDATE async_task_queue SET {', '.join(updates)} WHERE task_id = ? AND status != 'failed'",
                 params,
             )
+            await self._expire_async_tasks_on_connection(db, task_id)
             await db.commit()
             return cursor.rowcount == 1
 
@@ -1802,6 +1882,18 @@ class Database:
     async def reset_submitting_async_tasks(self) -> int:
         """Recover queue claims interrupted by the previous process."""
         async with self._connect(write=True) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            # A crash after upstream admission has an unknown result. Do not
+            # silently launch the same generation again after restarting.
+            await db.execute(
+                """UPDATE async_task_queue
+                   SET status = 'failed', last_error = ?, request_payload = '{}',
+                       next_attempt_at = 0, updated_at = CURRENT_TIMESTAMP
+                   WHERE status = 'submitting' AND submission_started_at IS NOT NULL
+                     AND COALESCE(TRIM(upstream_task_id), '') = ''""",
+                (QUEUE_SUBMISSION_UNCERTAIN_MESSAGE,),
+            )
+            await self._expire_async_tasks_on_connection(db)
             cursor = await db.execute(
                 """
                 UPDATE async_task_queue
