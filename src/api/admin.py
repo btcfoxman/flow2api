@@ -2,7 +2,7 @@
 import asyncio
 import json
 from contextlib import nullcontext
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Header, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -18,6 +18,7 @@ from ..core.auth import AuthManager
 from ..core.database import Database
 from ..core.flow_cookies import normalize_google_cookies, google_cookie_status, has_complete_flow_cookies
 from ..core.native_session_state import local_session_state
+from ..core.generation_errors import NativeSessionError
 from ..core.config import config, get_yescaptcha_min_score, normalize_yescaptcha_task_type
 from ..core.monitoring import build_public_health_snapshot
 from ..services.token_manager import TokenManager
@@ -2454,10 +2455,8 @@ async def update_plugin_config(
     }
 
 
-@router.post("/api/plugin/update-token")
-async def plugin_update_token(request: dict, authorization: Optional[str] = Header(None)):
-    """Receive token update from Chrome extension (no admin auth required, uses connection_token)"""
-    # Verify connection token
+async def _authenticate_plugin(authorization: Optional[str]):
+    """Share the connection-token boundary between plugin reads and writes."""
     plugin_config = await db.get_plugin_config()
 
     # Extract token from Authorization header
@@ -2471,6 +2470,56 @@ async def plugin_update_token(request: dict, authorization: Optional[str] = Head
     # Check if token matches
     if not plugin_config.connection_token or provided_token != plugin_config.connection_token:
         raise HTTPException(status_code=401, detail="Invalid connection token")
+    return plugin_config
+
+
+@router.post("/api/plugin/check-tokens")
+async def plugin_check_tokens(request: dict, authorization: Optional[str] = Header(None)):
+    """Read cached status only; never refresh credentials, launch Chrome or submit work."""
+    await _authenticate_plugin(authorization)
+    emails = request.get("emails", [])
+    if not isinstance(emails, list) or len(emails) > 1000 or any(
+        not isinstance(email, str) or not email.strip() or len(email) > 320
+        or "@" not in email or any(char.isspace() for char in email.strip())
+        for email in emails
+    ):
+        raise HTTPException(status_code=400, detail="emails must be a list of at most 1000 email addresses")
+    requested = {email.strip().lower() for email in emails}
+    refresh_before = datetime.now(timezone.utc) + timedelta(hours=1)
+    native = config.captcha_method == "native_cdp"
+    statuses = []
+    for token in await db.get_all_tokens():
+        email = token.email.strip().lower()
+        if requested and email not in requested:
+            continue
+        sync_allowed = True
+        if native:
+            try:
+                sync_allowed = local_session_state(token.id) is None
+            except NativeSessionError:
+                # A damaged ownership marker must never authorize an external overwrite.
+                sync_allowed = False
+        expires = token.at_expires
+        if expires is not None and expires.tzinfo is None:
+            expires = expires.replace(tzinfo=timezone.utc)
+        needs_refresh = (
+            not token.is_active or not token.st or not token.at
+            or expires is None or expires < refresh_before
+            or (native and not has_complete_flow_cookies(token.google_cookies))
+        )
+        # Explicit allowlist: no credentials, proxy URLs or project data in this response.
+        status = {"email": email, "is_active": bool(token.is_active),
+                  "needs_refresh": bool(needs_refresh and sync_allowed), "sync_allowed": sync_allowed}
+        if not sync_allowed:
+            status["sync_block_reason"] = "independent_login"
+        statuses.append(status)
+    return {"success": True, "tokens": statuses}
+
+
+@router.post("/api/plugin/update-token")
+async def plugin_update_token(request: dict, authorization: Optional[str] = Header(None)):
+    """Receive token update from Chrome extension using its connection token."""
+    plugin_config = await _authenticate_plugin(authorization)
 
     captcha_proxy_url, proxy_provided = _normalize_plugin_captcha_proxy_url(request)
     cookies_provided = "google_cookies" in request
