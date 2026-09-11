@@ -129,6 +129,28 @@ class AsyncTaskQueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(queued["status"], "queued")
         self.assertEqual(queued["last_error"], "proxy cooling down")
 
+    async def test_missing_model_adapter_ends_queue_without_retry(self):
+        normalized = routes.NormalizedGenerationRequest(
+            model="veo_3_1_t2v_fast_portrait", prompt="test", images=[])
+        await self.db.enqueue_async_task(
+            task_id="unsupported", task_type="video", model=normalized.model,
+            prompt=normalized.prompt,
+            request_payload=routes._serialize_normalized_generation_request(normalized),
+            base_url_override=None, capacity=50)
+        await self._enqueue("next")
+        claimed = await self.db.claim_next_async_task()
+        handler = SimpleNamespace(db=self.db, load_balancer=SimpleNamespace(
+            select_token=AsyncMock(return_value=SimpleNamespace(id=1))))
+        collect = AsyncMock(return_value={"error": {"status_code": 501, "message": "Unsupported output"}})
+        with patch.object(routes, "generation_handler", handler), patch.object(
+                routes, "_collect_async_video_task_result", collect):
+            self.assertEqual(await routes._process_async_video_queue_item(claimed), 0)
+        current = await self.db.get_async_task("unsupported")
+        self.assertEqual(current["status"], "failed")
+        self.assertEqual(current["request_payload"], "{}")
+        self.assertEqual((await self.db.claim_next_async_task())["task_id"], "next")
+        collect.assert_awaited_once()
+
     async def test_upload_timeout_retains_payload_and_queue_position(self):
         from src.core.media_errors import project_image_upload_failure_response
         normalized = routes.NormalizedGenerationRequest(

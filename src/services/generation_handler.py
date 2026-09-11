@@ -1944,6 +1944,13 @@ class GenerationHandler:
             elif is_native_session_error(e):
                 error_msg = media_service_unavailable_message(generation_type)
                 response_status_code = 503
+                if isinstance(e, NativeSessionError) and e.reason in {
+                    "flow_model_transport_unavailable", "flow_upsample_transport_unavailable",
+                }:
+                    # A missing adapter cannot recover by retrying the same queued
+                    # request. End it without penalizing a healthy account/session.
+                    error_msg = "当前模型或输出规格暂不支持，请更换模型或输出规格。"
+                    response_status_code = 501
                 if isinstance(e, NativeSessionError):
                     sessions = getattr(self.token_manager, "native_sessions", None)
                     if token and sessions is not None:

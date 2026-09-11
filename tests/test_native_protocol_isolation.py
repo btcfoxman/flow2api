@@ -215,6 +215,22 @@ class ProtocolIsolationTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FailureAccountingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_unsupported_flow_model_is_terminal_without_account_penalty(self):
+        from src.core.session_availability import SessionAvailability
+        handler, attempted, _ = quota_helpers.QuotaAccountSwitchingTests()._make_handler(quota_token_ids=set())
+        token = SimpleNamespace(id=1, auth_mode='flow', email='test@example.com',
+                                user_paygate_tier='PAYGATE_TIER_ONE')
+        handler.load_balancer.select_token = AsyncMock(return_value=token)
+        handler.token_manager.native_sessions = SessionAvailability()
+        chunks = [c async for c in handler.handle_generation('veo_3_1_t2v_fast_portrait', 'test')]
+        result = json.loads(chunks[-1])
+        self.assertEqual(result['error']['status_code'], 501)
+        self.assertEqual(attempted, [])
+        handler.token_manager.ensure_valid_token.assert_not_awaited()
+        handler.token_manager.record_error.assert_not_awaited()
+        self.assertTrue(handler.token_manager.native_sessions.available(token))
+        handler.load_balancer.release_pending.assert_awaited_once()
+
     async def test_preflight_and_wrapped_upload_do_not_disable_account(self):
         for failure, expected_status in [(AsyncQueueExpired(), 408),
               (NativeSessionError('flow_login_unavailable', protocol='angular'), 503),
