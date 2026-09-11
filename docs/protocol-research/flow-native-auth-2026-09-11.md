@@ -1,4 +1,4 @@
-# Flow 新站认证迁移（本地实测通过，生产待验收）
+# Flow 新站认证迁移（单账号生产 R2V 验收通过）
 
 ## 原因与边界
 
@@ -34,21 +34,21 @@
 
 旧 Labs 客户端不能覆盖已迁移的新站账号。管理端修改新站账号备注/并发不再先调用 ST→AT；手动刷新改为新站预检。其他旧账号和非 native 模式保留显式兼容路径，不能误称为已迁移。
 
-## 尚未完成的验收与接口
+## 验收进展与接口边界
 
-1. 已完成真实源浏览器只读验证及本机独立目标 Profile 的单账号同步、重启验证；3.5 pre 服务器端仍待验收。详见 [独立 Profile 实测](flow-native-verification-2026-09-11.md)。
-2. 后续人工操作已补齐新站图片上传 `maseQ`、项目创建 `jHPbke` 的成功证据并落地适配，详见 [创建/上传/生成链路](flow-image-upload-2026-09-11.md)。部署后仍须验收目标 Profile。
-3. 已捕获 GEM_PIX_2、NARWHAL、Abra 参考/编辑视频协议。NARWHAL 网页人工生成、本地独立目标 Profile 的 FlowClient 文生图及下载均已有成功；生产 API、视频仍待实测。另一次本地图片实测结果不确定，失败记录保留。未捕获模型、图片放大不冒用旧 OAuth 接口。
-4. 尚未 push/部署；桌面批量脚本保持停止。插件本地构建不更新实际已加载目录，须服务端升级和单账号验收后再启用批量。
+1. 已完成真实源浏览器只读验证、本机独立目标 Profile 同步/重启验证，以及 3.5 pre 真实目标同步和容器重启后的会话验证。详见 [独立 Profile 实测](flow-native-verification-2026-09-11.md) 及 [生产验收](pre-flow-native-acceptance-2026-09-11.md)。
+2. 后续人工操作补齐新站图片上传 `maseQ`、项目创建 `jHPbke` 的成功证据并落地适配，详见 [创建/上传/生成链路](flow-image-upload-2026-09-11.md)。生产 R2V 任务已验证参考图上传链路。
+3. NARWHAL 网页人工生成、本地独立目标 Profile 的 FlowClient 文生图及下载已有成功。生产异步 API 已完成 4s/360p R2V 自动验收及三条原用户 10s/720p R2V 任务。另一次本地图片实测结果不确定，失败记录保留。未捕获模型、图片放大不冒用旧 OAuth 接口；未适配规格终止而非反复 503 入队。
+4. Flow2API 已 push/部署 3.5 pre；桌面批量脚本保持停止。插件本地构建没有自动更新实际加载目录，其他未验证账号不能声称恢复。
 
 ## 本地验证记录
 
-- Flow2API：`python -m pytest tests -q --tb=short`，458 passed（本轮最终回归）。
+- Flow2API：`python -m pytest tests -q --tb=short`，460 passed（补充生产队列回归后）。
 - flow2api_tupdater：项目 venv `python -m pytest tests -q --tb=short`，141 passed。
 - 插件：`node --test tests/defaults.test.cjs tests/session_sync.test.cjs`，17 passed；包含无 Labs Cookie 同步、缺失目标确认失败、未确认源身份不发请求。
 - 三库 `git diff --check` 通过；插件和 tupdater 前端 JavaScript 语法检查通过。
 - 插件本地私有构建：工作区 `output/releases/Flow2API-Token-Updater-1.3.0-20260911-131942` 及同名 ZIP。未替换浏览器实际加载目录，缓存配置未动。
-- 已进行两次最多一次尝试的本地图片实测：一次结果不确定，一次生成/下载成功；只读余额始终为 50。未验证 3.5 pre 新路径，不能替代部署后验收。
+- 已进行两次最多一次尝试的本地图片实测：一次结果不确定，一次生成/下载成功；当时余额为 50。其后另行完成生产 4s R2V 验收，消耗 4 积分；三条原用户排队视频消耗 45 积分。两类证据不可混淆。
 
 ## 真实源浏览器只读核验（2026-09-11 13:57，UTC+8）
 
