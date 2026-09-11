@@ -21,7 +21,9 @@ from ..core.async_queue import AsyncQueueExpired, admit_queued_video_submission
 from ..core.credits import is_quota_exhausted_error, normalize_credits_response
 from ..core.media_errors import is_media_policy_error, is_media_traffic_error
 from .browser_cookie_utils import serialize_cookie_header
-from .flow_angular import AngularProtocolError, AngularSubmissionUncertain, build_video_rpc, use_angular_video, video_operations
+from .flow_angular import (AngularProtocolError, AngularSubmissionUncertain, build_video_rpc,
+                          use_angular_video, video_operations, build_image_rpc, image_result, FLOW_RPC_URL,
+                          build_create_project_rpc, created_project, build_image_upload_rpc, uploaded_image_id)
 
 try:
     import httpx
@@ -31,6 +33,28 @@ except ImportError:
 
 class FlowClient:
     """VideoFX API客户端"""
+
+    async def uses_flow_session(self, token_id) -> bool:
+        if not token_id or self.db is None:
+            return False
+        token = await self.db.get_token(token_id)
+        return getattr(token,"auth_mode","labs") == "flow"
+
+    async def _flow_submission_account(self, token_id=None):
+        """Fail closed if a Flow job loses or crosses its captcha browser binding."""
+        fingerprint = self._request_fingerprint_ctx.get()
+        bound_id = fingerprint.get("native_token_id") if isinstance(fingerprint, dict) else None
+        account_id = token_id if token_id is not None else bound_id
+        if not await self.uses_flow_session(account_id):
+            # A stale Flow fingerprint must not be used for a different account.
+            if token_id is not None and bound_id and bound_id != token_id:
+                raise NativeSessionError("flow_browser_account_mismatch", protocol="angular", stage="submission_preflight")
+            return None
+        if config.captcha_method != "native_cdp":
+            raise NativeSessionError("flow_native_transport_required", protocol="angular", stage="submission_preflight")
+        if not bound_id or bound_id != account_id:
+            raise NativeSessionError("flow_browser_context_unavailable", protocol="angular", stage="submission_preflight")
+        return account_id
 
     @staticmethod
     def native_page_protocol(model_key: Optional[str] = None) -> str:
@@ -188,6 +212,8 @@ class FlowClient:
         """Build a Labs Cookie header from a raw ST, Cookie header, or browser cookie JSON."""
         if st_token is None:
             return ""
+        if isinstance(st_token, str) and st_token.strip().startswith("flow:"):
+            raise NativeSessionError("flow_legacy_transport_forbidden", protocol="angular", stage="transport_preflight")
 
         cookie_header = serialize_cookie_header(st_token)
         if cookie_header and "__Secure-next-auth.session-token=" in cookie_header:
@@ -598,6 +624,7 @@ class FlowClient:
         json_data: Dict[str, Any],
         at: str,
         timeout: int,
+        token_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """视频 API 加硬截止，避免 curl_cffi 底层偶发卡住导致整条请求悬挂。"""
         fingerprint = self._request_fingerprint_ctx.get()
@@ -606,6 +633,7 @@ class FlowClient:
         respect_fingerprint_proxy = True
         native_token_id = fingerprint.get("native_token_id") if isinstance(fingerprint, dict) else None
         is_video_submit = "video:" in url and "batchCheckAsyncVideoGenerationStatus" not in url
+        flow_account = await self._flow_submission_account(token_id) if is_video_submit else None
         if is_video_submit:
             await admit_queued_video_submission()
         if captcha_method == "native_cdp" and native_token_id and is_video_submit:
@@ -619,8 +647,9 @@ class FlowClient:
                 service = await BrowserCaptchaService.get_instance(self.db)
                 requests = json_data.get("requests") or []
                 model = requests[0].get("videoModelKey") if len(requests) == 1 else None
-                if use_angular_video(model, models=config.flow_angular_video_models,
-                                     families=config.flow_angular_video_families):
+                if (flow_account
+                        or use_angular_video(model, models=config.flow_angular_video_models,
+                                             families=config.flow_angular_video_families)):
                     rpc_id, payload = build_video_rpc(json_data)
                     response = await service.fetch_json(
                         token_id=int(native_token_id), project_id=project_id,
@@ -894,7 +923,8 @@ class FlowClient:
         url: str,
         json_data: Dict[str, Any],
         at: str,
-        attempt_trace: Optional[Dict[str, Any]] = None
+        attempt_trace: Optional[Dict[str, Any]] = None,
+        token_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """图片生成请求使用更短超时，并在网络超时时快速重试。"""
         request_timeout = config.flow_image_request_timeout
@@ -904,10 +934,17 @@ class FlowClient:
         # 对于浏览器/远程浏览器打码链路，优先保持与打码时一致的出口。
         # 否则在首跳改走媒体代理时，容易触发 reCAPTCHA 校验失败并放大长尾。
         fingerprint = self._request_fingerprint_ctx.get()
+        flow_account = await self._flow_submission_account(token_id)
         has_fingerprint_context = bool(isinstance(fingerprint, dict) and fingerprint)
         if config.captcha_method == "native_cdp" and has_fingerprint_context and fingerprint.get("native_token_id"):
             from .browser_captcha_native_cdp import BrowserCaptchaService
             service = await BrowserCaptchaService.get_instance(self.db)
+            if flow_account:
+                rpc_id, payload = build_image_rpc(json_data)
+                project_id = str((json_data.get("clientContext") or {}).get("projectId") or "")
+                response = await service.fetch_json(token_id=int(fingerprint["native_token_id"]), project_id=project_id,
+                    url=FLOW_RPC_URL, json_data={"rpc_id":rpc_id,"payload":payload}, timeout=request_timeout)
+                return image_result(response["rpc_payload"], project_id)
             return await service.fetch_json(
                 token_id=int(fingerprint["native_token_id"]),
                 project_id=str((json_data.get("clientContext") or {}).get("projectId") or ""),
@@ -1016,6 +1053,8 @@ class FlowClient:
                 "user": {...}
             }
         """
+        if str(st or "").startswith("flow:"):
+            raise NativeSessionError("flow_session_is_not_oauth", protocol="angular")
         url = f"{self.labs_base_url}/auth/session"
         try:
             return await self._make_request(
@@ -1042,6 +1081,17 @@ class FlowClient:
             )
 
     # ========== 项目管理 (使用ST) ==========
+
+    async def create_flow_project(self, token_id: int, title: str) -> dict:
+        """Create once in the account's Flow browser; never use Labs or replay an uncertain mutation."""
+        if config.captcha_method != "native_cdp" or not await self.uses_flow_session(token_id):
+            raise NativeSessionError("native_flow_account_required", protocol="angular")
+        from .browser_captcha_native_cdp import BrowserCaptchaService
+        service = await BrowserCaptchaService.get_instance(self.db)
+        rpc_id, payload = build_create_project_rpc(title)
+        result = await service.fetch_json(token_id=token_id, project_id="", url=FLOW_RPC_URL,
+            json_data={"rpc_id": rpc_id, "payload": payload}, timeout=30)
+        return created_project(result.get("rpc_payload"))
 
     async def create_project(self, st: str, title: str) -> str:
         """创建项目,返回project_id
@@ -1312,6 +1362,30 @@ class FlowClient:
             return f"{text[:max_length]}...(truncated)"
         return text
 
+    async def _upload_flow_image(self, token_id: int, project_id: str, image_bytes: bytes) -> str:
+        """Cookie-only upload in the same native project, with its own captcha action."""
+        if config.captcha_method != "native_cdp" or not project_id:
+            raise NativeSessionError("native_flow_project_required", protocol="angular", stage="image_upload")
+        if not isinstance(image_bytes, bytes) or not image_bytes:
+            raise AngularProtocolError("Image upload requires nonempty bytes")
+        mime_type = self._detect_image_mime_type(image_bytes)
+        if mime_type not in {"image/png", "image/jpeg", "image/webp"}:
+            image_bytes = self._convert_to_jpeg(image_bytes)
+            mime_type = "image/jpeg"
+        extension = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}[mime_type]
+        from .browser_captcha_native_cdp import BrowserCaptchaService
+        service = await BrowserCaptchaService.get_instance(self.db)
+        captcha, _ = await service.get_token(project_id, action="UPLOAD_IMAGE", token_id=token_id, page_protocol="angular")
+        if not captcha:
+            raise NativeSessionError("flow_upload_captcha_unavailable", protocol="angular", stage="image_upload")
+        rpc_id, payload = build_image_upload_rpc(project_id, captcha, image_bytes, mime_type,
+                                                  f"flow2api_upload_{uuid.uuid4()}.{extension}")
+        response = await service.fetch_json(token_id=token_id, project_id=project_id, url=FLOW_RPC_URL,
+            json_data={"rpc_id": rpc_id, "payload": payload}, timeout=max(30, min(int(self.timeout or 120), 90)))
+        # No legacy acknowledgement, OAuth fallback, or automatic replay on an
+        # uncertain upload. A later generation obtains a fresh IMAGE_GENERATION captcha.
+        return uploaded_image_id(response.get("rpc_payload"), project_id)
+
     async def upload_image(
         self,
         at: str,
@@ -1335,6 +1409,8 @@ class FlowClient:
         Returns:
             mediaId
         """
+        if await self.uses_flow_session(token_id):
+            return await self._upload_flow_image(token_id, project_id, image_bytes)
         if st:
             await self.ensure_flow_image_upload_acknowledgement(st, project_id)
 
@@ -1649,7 +1725,7 @@ class FlowClient:
             raise RuntimeError("project_id is required for video upload")
         if not video_bytes:
             raise RuntimeError("video_bytes is required for video upload")
-        if config.captcha_method == "native_cdp" and self.native_page_protocol(model_key) == "angular":
+        if config.captcha_method == "native_cdp" and (await self.uses_flow_session(token_id) or self.native_page_protocol(model_key) == "angular"):
             if not config.flow_native_video_upload or not token_id or not self.db:
                 raise NativeSessionError("angular_video_upload_unavailable", protocol="angular")
             else:
@@ -1936,6 +2012,7 @@ class FlowClient:
                     json_data=json_data,
                     at=at,
                     attempt_trace=attempt_trace,
+                    token_id=token_id,
                 )
                 attempt_trace["success"] = True
                 attempt_trace["duration_ms"] = int((time.time() - attempt_started_at) * 1000)
@@ -1989,6 +2066,8 @@ class FlowClient:
         Returns:
             base64 编码的图片数据
         """
+        if await self.uses_flow_session(token_id):
+            raise NativeSessionError("flow_upsample_transport_unavailable", protocol="angular", stage="model_preflight")
         url = f"{self.api_base_url}/flow/upsampleImage"
 
         # 403/reCAPTCHA/500 重试逻辑 - 使用配置的最大重试次数
@@ -2420,7 +2499,8 @@ class FlowClient:
                     url=url,
                     json_data=json_data,
                     at=at,
-                    timeout=self._get_video_submit_timeout()
+                    timeout=self._get_video_submit_timeout(),
+                    token_id=token_id,
                 )
                 return self._normalize_video_generation_response(result, fallback_project_id=project_id)
             except Exception as e:
@@ -2556,7 +2636,8 @@ class FlowClient:
                     url=url,
                     json_data=json_data,
                     at=at,
-                    timeout=self._get_video_submit_timeout()
+                    timeout=self._get_video_submit_timeout(),
+                    token_id=token_id,
                 )
                 return self._normalize_video_generation_response(result, fallback_project_id=project_id)
             except Exception as e:
@@ -2675,7 +2756,8 @@ class FlowClient:
                     url=url,
                     json_data=json_data,
                     at=at,
-                    timeout=self._get_video_submit_timeout()
+                    timeout=self._get_video_submit_timeout(),
+                    token_id=token_id,
                 )
                 return self._normalize_video_generation_response(result, fallback_project_id=project_id)
             except Exception as e:
@@ -2808,7 +2890,8 @@ class FlowClient:
                     url=url,
                     json_data=json_data,
                     at=at,
-                    timeout=self._get_video_submit_timeout()
+                    timeout=self._get_video_submit_timeout(),
+                    token_id=token_id,
                 )
                 return self._normalize_video_generation_response(result, fallback_project_id=project_id)
             except Exception as e:
@@ -2938,7 +3021,8 @@ class FlowClient:
                     url=url,
                     json_data=json_data,
                     at=at,
-                    timeout=self._get_video_submit_timeout()
+                    timeout=self._get_video_submit_timeout(),
+                    token_id=token_id,
                 )
                 return self._normalize_video_generation_response(result, fallback_project_id=project_id)
             except Exception as e:
@@ -3071,7 +3155,8 @@ class FlowClient:
                     url=url,
                     json_data=json_data,
                     at=at,
-                    timeout=self._get_video_submit_timeout()
+                    timeout=self._get_video_submit_timeout(),
+                    token_id=token_id,
                 )
                 return self._normalize_video_generation_response(result, fallback_project_id=project_id)
             except Exception as e:
@@ -3336,7 +3421,8 @@ class FlowClient:
                     url=url,
                     json_data=json_data,
                     at=at,
-                    timeout=self._get_video_submit_timeout()
+                    timeout=self._get_video_submit_timeout(),
+                    token_id=token_id,
                 )
                 return self._normalize_video_generation_response(result, fallback_project_id=project_id)
             except Exception as e:
@@ -4078,6 +4164,10 @@ class FlowClient:
             - 其他模式: browser_id 为 None
         """
         captcha_method = config.captcha_method
+        flow_account = await self.uses_flow_session(token_id)
+        if flow_account and captcha_method != "native_cdp":
+            self._set_request_fingerprint(None)
+            raise NativeSessionError("flow_native_transport_required", protocol="angular", stage="captcha_preflight")
         debug_logger.log_info(f"[reCAPTCHA] 开始获取 token: method={captcha_method}, project_id={project_id}, action={action}")
 
         if captcha_method == "extension":
@@ -4144,7 +4234,7 @@ class FlowClient:
                     project_id,
                     action,
                     token_id=token_id,
-                    page_protocol=self.native_page_protocol(model_key),
+                    page_protocol="angular" if flow_account else self.native_page_protocol(model_key),
                 )
                 fingerprint = service.get_fingerprint(token_id) if token else None
                 if token:

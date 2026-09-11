@@ -1618,6 +1618,11 @@ class GenerationHandler:
 
         try:
             # 3. 确保AT有效
+            if getattr(token, "auth_mode", "labs") == "flow":
+                from .flow_angular import resolve_video_model, IMAGE_MODELS
+                if (generation_type == "image" and (model_config.get("model_name") not in IMAGE_MODELS or model_config.get("upsample"))
+                        or generation_type == "video" and resolve_video_model(model_config.get("model_key")) is None):
+                    raise NativeSessionError("flow_model_transport_unavailable", protocol="angular", stage="model_preflight")
             debug_logger.log_info(f"[GENERATION] 检查Token AT有效性...")
             if stream:
                 yield self._create_stream_chunk("初始化生成环境...\n")

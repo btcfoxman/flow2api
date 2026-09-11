@@ -4,6 +4,7 @@ Generation is opt-in per model or verified model family.
 Page bootstrap and credentials are read in the same browser that submits the RPC.
 """
 from dataclasses import dataclass
+import base64
 import json
 import re
 import uuid
@@ -18,7 +19,64 @@ class AngularSubmissionUncertain(AngularProtocolError):
     """A launch may exist upstream; do not retry or switch transports."""
 
 
-RPC_IDS = {"MZZa6b", "jIps6", "ogiZ0b", "jwpduf", "as29s", "ngNC2", "UpteDb"}
+RPC_IDS = {"MZZa6b", "jIps6", "ogiZ0b", "jwpduf", "as29s", "ngNC2", "UpteDb", "nzlxg", "jHPbke", "maseQ"}
+MUTATING_RPC_IDS = {"MZZa6b", "jIps6", "ogiZ0b", "jHPbke", "maseQ"}
+IMAGE_MODELS = frozenset({"GEM_PIX_2", "NARWHAL"})
+IMAGE_ASPECT_RATIOS = {"IMAGE_ASPECT_RATIO_SQUARE": 1, "IMAGE_ASPECT_RATIO_PORTRAIT": 2,
+                      "IMAGE_ASPECT_RATIO_LANDSCAPE": 3, "IMAGE_ASPECT_RATIO_PORTRAIT_THREE_FOUR": 4,
+                      "IMAGE_ASPECT_RATIO_LANDSCAPE_FOUR_THREE": 5}
+FLOW_RPC_URL = "https://flow.google.com/_/AiSandboxAngularFrontend/data/batchexecute"
+FLOW_IDENTITY_EXPRESSION = """(() => {
+  const w = window.WIZ_global_data || {};
+  return {origin: location.origin, path: location.pathname,
+    bootstrap: !!(w.SNlM0e && w.cfb2h && w.FdrFJe), email: w.oPEP7c || ''};
+})()"""
+
+
+def verified_flow_email(snapshot, expected_email=""):
+    """Identity comes from the target's authenticated page, never client claims."""
+    if (not isinstance(snapshot, dict) or snapshot.get("origin") != "https://flow.google.com"
+            or not snapshot.get("bootstrap") or str(snapshot.get("path", "")).startswith("/about")):
+        raise AngularProtocolError("Flow login unavailable")
+    email = str(snapshot.get("email") or "").strip().lower()
+    if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email) or len(email) > 320:
+        raise AngularProtocolError("Flow account identity unavailable")
+    if expected_email and email != expected_email.strip().lower():
+        raise AngularProtocolError("Flow account identity mismatch")
+    return email
+
+
+def flow_credits(payload):
+    """Current GetCredits proto: credits=1, paygate tier=2, SKU=3.
+
+    From the 2026-09-11 frontend service (nzlxg). Protobuf omits zero;
+    require an authenticated tier so an arbitrary empty response fails closed.
+    """
+    tiers = {5: "ZERO", 1: "ONE", 7: "GEMNOVA", 2: "TWO", 3: "NOT_PAID",
+             4: "UNSUBSCRIBED_WITH_CREDITS", 6: "EXEMPT", 8: "TIER1P5"}
+    if (not isinstance(payload, list) or len(payload) < 2 or isinstance(payload[1], bool)
+            or not isinstance(payload[1], int) or payload[1] not in tiers):
+        raise AngularProtocolError("Unrecognized Flow credit response")
+    credits = payload[0] if payload[0] is not None else 0
+    if isinstance(credits, bool) or not isinstance(credits, (int, float)) or not 0 <= credits < 10**12:
+        raise AngularProtocolError("Invalid Flow credit balance")
+    return {"credits": int(credits), "userPaygateTier": "PAYGATE_TIER_" + tiers[payload[1]]}
+
+
+def flow_projects(payload):
+    if not isinstance(payload, list):
+        raise AngularProtocolError("Invalid Flow project list")
+    rows = payload[0] if payload and payload[0] is not None else []
+    if not isinstance(rows, list):
+        raise AngularProtocolError("Invalid Flow project list")
+    projects = []
+    for row in rows:
+        if (not isinstance(row, list) or len(row) < 2 or not isinstance(row[0], str)
+                or not re.fullmatch(r"[A-Za-z0-9_-]{1,160}", row[0])
+                or not isinstance(row[1], list) or not row[1] or not isinstance(row[1][0], str)):
+            raise AngularProtocolError("Unrecognized Flow project entry")
+        projects.append({"project_id": row[0], "project_name": row[1][0]})
+    return projects
 VIDEO_FAMILIES = frozenset({"abra_r2v", "abra_edit"})
 VIDEO_RESOLUTIONS = {"VIDEO_RESOLUTION_360P": 4, "VIDEO_RESOLUTION_720P": 1}
 VIDEO_ASPECT_RATIOS = {"VIDEO_ASPECT_RATIO_LANDSCAPE": 2, "VIDEO_ASPECT_RATIO_PORTRAIT": 1}
@@ -100,6 +158,49 @@ def parse_rpc_response(text: str, rpc_id: str):
 
 def project_context(project_id, captcha):
     return [None, 22, None, None, None, project_id, None, None, None, None, [captcha, 1]]
+
+
+def build_create_project_rpc(title):
+    if not isinstance(title, str) or not title.strip() or len(title) > 256:
+        raise AngularProtocolError("Invalid Flow project title")
+    return "jHPbke", ["projects/*", [None, [title.strip()]], [None, 22]]
+
+
+def created_project(payload):
+    try:
+        projects = flow_projects([[payload]])
+    except AngularProtocolError:
+        raise AngularSubmissionUncertain("Flow project creation result is unconfirmed; do not automatically recreate") from None
+    if len(projects) != 1:
+        raise AngularSubmissionUncertain("Flow project creation result is unconfirmed")
+    return projects[0]
+
+
+def build_image_upload_rpc(project_id, captcha, image_bytes, mime_type, filename):
+    """maseQ /FlowService.UploadImage, observed and source-checked 2026-09-11."""
+    if not project_id or not captcha:
+        raise AngularProtocolError("Image upload requires a project and fresh UPLOAD_IMAGE captcha")
+    if not isinstance(image_bytes, bytes) or not image_bytes:
+        raise AngularProtocolError("Image upload requires nonempty image bytes")
+    if mime_type not in {"image/png", "image/jpeg", "image/webp"}:
+        raise AngularProtocolError("Unsupported Flow upload image type")
+    if not isinstance(filename, str) or not filename or any(c in filename for c in ("/", "\\", "\x00")):
+        raise AngularProtocolError("Invalid Flow upload filename")
+    return "maseQ", [project_context(project_id, captcha), base64.b64encode(image_bytes).decode("ascii"),
+                     mime_type, 1, None, None, None, None, filename, None,
+                     str(uuid.uuid4()).upper(), str(uuid.uuid4()).upper()]
+
+
+def uploaded_image_id(payload, project_id):
+    if not isinstance(payload, list) or len(payload) < 2:
+        raise AngularSubmissionUncertain("Flow image upload result is unconfirmed")
+    media, workflow = payload[:2]
+    if (not isinstance(media, list) or len(media) < 7 or not isinstance(media[0], str) or not media[0]
+            or media[1] != project_id or not isinstance(workflow, list) or len(workflow) < 5
+            or not isinstance(media[2], str) or not media[2] or media[2] != workflow[0]
+            or workflow[4] != project_id):
+        raise AngularSubmissionUncertain("Flow image upload account/project binding is unconfirmed")
+    return media[0]
 
 
 def build_video_rpc(rest):
@@ -211,6 +312,63 @@ def video_operations(payload, *, token_id, project_id, expected_ids=None):
     if expected_ids is not None and {op["mediaName"] for op in operations} != set(expected_ids):
         raise AngularProtocolError("Flow polling response is incomplete")
     return {"operations": operations}
+
+
+def build_image_rpc(rest):
+    requests = rest.get("requests") or []
+    if len(requests) != 1 or requests[0].get("imageModelName") not in IMAGE_MODELS:
+        raise AngularProtocolError("Flow image model wire shape is not verified")
+    request = requests[0]
+    aspect = IMAGE_ASPECT_RATIOS.get(request.get("imageAspectRatio"))
+    if aspect is None:
+        raise AngularProtocolError("Unsupported Flow image aspect ratio")
+    context = rest.get("clientContext") or {}
+    project = context.get("projectId")
+    captcha = (context.get("recaptchaContext") or {}).get("token")
+    if not project or not captcha:
+        raise AngularProtocolError("Fresh Flow project captcha is required")
+    parts = request.get("structuredPrompt", {}).get("parts", [])
+    if not parts or any(set(p) != {"text"} or not isinstance(p["text"],str) for p in parts):
+        raise AngularProtocolError("Unsupported Flow image prompt")
+    refs = []
+    for item in request.get("imageInputs", []):
+        if not item.get("name") or item.get("imageInputType") != "IMAGE_INPUT_TYPE_REFERENCE":
+            raise AngularProtocolError("Unsupported Flow image reference")
+        refs.append([item["name"],None,None,None,1])
+    ctx = project_context(project,captcha)
+    entry = [None,None,refs,request.get("seed"),aspect,request["imageModelName"],None,ctx,
+             [[["".join(p["text"] for p in parts)]]],None,None,None,str(uuid.uuid4()),str(uuid.uuid4())]
+    batch = (rest.get("mediaGenerationContext") or {}).get("batchId") or str(uuid.uuid4())
+    return "ogiZ0b", [None,[entry],1,ctx,[batch]]
+
+
+def image_result(payload, project_id):
+    """Translate the captured synchronous image response, preserving signed URLs."""
+    if (not isinstance(payload,list) or len(payload) < 2
+            or not isinstance(payload[0],list) or not isinstance(payload[1],list)):
+        raise AngularSubmissionUncertain("Flow image response is unrecognized; automatic resubmission is disabled")
+    workflows = {w[0] for w in payload[1] if isinstance(w,list) and len(w)>4
+                 and isinstance(w[0],str) and w[4] == project_id}
+    images = []
+    for row in payload[0]:
+        if (not isinstance(row,list) or len(row)<7 or not isinstance(row[0],str)
+                or not row[0] or not isinstance(row[2],str) or row[2] not in workflows):
+            raise AngularSubmissionUncertain("Flow image project binding is unconfirmed")
+        try:
+            url = row[6][0][13]
+            if not isinstance(url, str):
+                raise ValueError()
+            parsed = urlsplit(url)
+            if (parsed.scheme != "https" or parsed.netloc != "flow-content.google"
+                    or parsed.path != "/image/" + quote(row[0],safe="")
+                    or not {"Expires","KeyName","Signature"} <= {k for k,_ in parse_qsl(parsed.query)}):
+                raise ValueError()
+        except (IndexError,TypeError,ValueError):
+            raise AngularSubmissionUncertain("Flow image result URL is unconfirmed") from None
+        images.append({"name":row[0],"image":{"generatedImage":{"fifeUrl":url}}})
+    if not images:
+        raise AngularSubmissionUncertain("Flow image response contains no generated images")
+    return {"media":images,"transport":"angular"}
 
 
 def rpc_fetch_expression(rpc_id, payload, timeout):

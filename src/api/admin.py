@@ -599,7 +599,7 @@ class AddTokenRequest(BaseModel):
 
 
 class UpdateTokenRequest(BaseModel):
-    st: str  # Session Token (必填，用于刷新AT)
+    st: Optional[str] = None  # Legacy accounts require ST; Flow accounts edit metadata without OAuth.
     project_id: Optional[str] = None  # 用户可选输入project_id
     project_name: Optional[str] = None
     remark: Optional[str] = None
@@ -801,6 +801,7 @@ async def get_tokens(token: str = Depends(verify_admin_token)):
         "id": row.get("id"),
         "st": row.get("st"),  # Session Token for editing
         "at": row.get("at"),  # Access Token for editing (从ST转换而来)
+        "auth_mode": row.get("auth_mode", "labs"),
         "at_expires": to_iso(row.get("at_expires")) if row.get("at_expires") else None,  # 🆕 AT过期时间
         "at_expired": bool(normalize_dt(row.get("at_expires")) and normalize_dt(row.get("at_expires")) <= now),
         "at_expiring_within_1h": bool(
@@ -889,26 +890,33 @@ async def update_token(
     request: UpdateTokenRequest,
     token: str = Depends(verify_admin_token)
 ):
-    """Update token - 使用ST自动刷新AT"""
+    """Edit account settings using the account's explicit authentication mode."""
     try:
-        # 先ST转AT
-        result = await token_manager.flow_client.st_to_at(request.st)
-        at = result["access_token"]
-        expires = result.get("expires")
-
-        # 解析过期时间
-        from datetime import datetime
+        existing = await token_manager.get_token(token_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Account not found")
+        is_flow = getattr(existing, "auth_mode", "labs") == "flow"
+        at = None
         at_expires = None
-        if expires:
-            try:
-                at_expires = datetime.fromisoformat(expires.replace('Z', '+00:00'))
-            except:
-                pass
+        if is_flow:
+            if request.st and request.st != existing.st:
+                raise HTTPException(status_code=400, detail="Flow 新站账号无需 ST，请通过新版同步端更新会话")
+        else:
+            if not request.st:
+                raise HTTPException(status_code=400, detail="Legacy account requires session token")
+            result = await token_manager.flow_client.st_to_at(request.st)
+            at = result["access_token"]
+            expires = result.get("expires")
+            if expires:
+                try:
+                    at_expires = datetime.fromisoformat(expires.replace('Z', '+00:00'))
+                except (ValueError, TypeError):
+                    pass
 
         # 更新token (包含AT、ST、AT过期时间、project_id和project_name)
         await token_manager.update_token(
             token_id=token_id,
-            st=request.st,
+            st=None if is_flow else request.st,
             at=at,
             at_expires=at_expires,  # 🆕 更新AT过期时间
             project_id=request.project_id,
@@ -933,6 +941,8 @@ async def update_token(
                 )
 
         return {"success": True, "message": "Token更新成功"}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1011,7 +1021,7 @@ async def refresh_at(
             # 获取更新后的token信息
             updated_token = await token_manager.get_token(token_id)
             
-            message = "AT刷新成功"
+            message = "Flow 新站会话验证成功" if getattr(updated_token, "auth_mode", "labs") == "flow" else "AT刷新成功"
             if config.captcha_method == "personal":
                 message += "（支持ST自动刷新）"
             
@@ -1023,6 +1033,7 @@ async def refresh_at(
                 "token": {
                     "id": updated_token.id,
                     "email": updated_token.email,
+                    "auth_mode": getattr(updated_token, "auth_mode", "labs"),
                     "at_expires": updated_token.at_expires.isoformat() if updated_token.at_expires else None
                 }
             }
@@ -1030,7 +1041,10 @@ async def refresh_at(
             debug_logger.log_error(f"[API] AT 刷新失败: token_id={token_id}")
             
             error_detail = "AT刷新失败"
-            if config.captcha_method != "personal":
+            current = await token_manager.get_token(token_id)
+            if current and getattr(current, "auth_mode", "labs") == "flow":
+                error_detail = "Flow 新站会话验证未通过，请检查目标代理和登录态；不需要 Labs 授权"
+            elif config.captcha_method != "personal":
                 error_detail += f"（当前打码模式: {config.captcha_method}，ST自动刷新仅在 personal 模式下可用）"
             
             raise HTTPException(status_code=500, detail=error_detail)
@@ -1110,6 +1124,10 @@ async def import_tokens(
 
                 # 使用邮箱检查是否已存在
                 existing = existing_by_email.get(email)
+
+                if existing and getattr(existing, "auth_mode", "labs") == "flow":
+                    errors.append(f"第{idx+1}项: Flow 新站账号不能由旧 ST 导入覆盖，请使用新版同步端")
+                    continue
 
                 if existing:
                     # 更新现有Token
@@ -2507,9 +2525,14 @@ async def plugin_check_tokens(request: dict, authorization: Optional[str] = Head
             or expires is None or expires < refresh_before
             or (native and not has_complete_flow_cookies(token.google_cookies))
         )
+        if getattr(token, "auth_mode", "labs") == "flow":
+            needs_refresh = (not native or not token.is_active
+                             or not has_complete_flow_cookies(token.google_cookies)
+                             or not token_manager.native_sessions.available(token))
         # Explicit allowlist: no credentials, proxy URLs or project data in this response.
         status = {"email": email, "is_active": bool(token.is_active),
                   "needs_refresh": bool(needs_refresh and sync_allowed), "sync_allowed": sync_allowed}
+        status["auth_mode"] = getattr(token, "auth_mode", "labs")
         if not sync_allowed:
             status["sync_block_reason"] = "independent_login"
         statuses.append(status)
@@ -2521,6 +2544,10 @@ async def plugin_update_token(request: dict, authorization: Optional[str] = Head
     """Receive token update from Chrome extension using its connection token."""
     plugin_config = await _authenticate_plugin(authorization)
 
+    auth_mode = request.get("auth_mode", "labs")
+    if not isinstance(auth_mode, str) or auth_mode not in {"labs", "flow"}:
+        raise HTTPException(status_code=400, detail={"code": "unsupported_auth_mode", "message": "Unsupported authentication mode"})
+
     captcha_proxy_url, proxy_provided = _normalize_plugin_captcha_proxy_url(request)
     cookies_provided = "google_cookies" in request
     google_cookies = None
@@ -2531,6 +2558,34 @@ async def plugin_update_token(request: dict, authorization: Optional[str] = Head
                 raise ValueError("Google/Flow 会话 Cookie 不完整：需同时包含 .google.com SID 和 Flow OSID，只有 Secure PSID 不足；请升级并重新加载同步插件、批准 Google HTTP/HTTPS 域权限后重新同步")
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
+
+    if auth_mode == "flow":
+        if config.captcha_method != "native_cdp":
+            raise HTTPException(status_code=409, detail={"code": "native_cdp_required", "message": "Flow session sync requires native_cdp"})
+        if not cookies_provided or not proxy_provided:
+            raise HTTPException(status_code=400, detail={"code": "flow_session_fields_required", "message": "google_cookies and captcha_proxy_url are required"})
+        expected_email = request.get("email", "")
+        if not isinstance(expected_email, str) or len(expected_email) > 320:
+            raise HTTPException(status_code=400, detail={"code": "invalid_identity", "message": "Invalid expected account identity"})
+        try:
+            result = await token_manager.sync_flow_session(google_cookies, captcha_proxy_url,
+                expected_email=expected_email, auto_enable=plugin_config.auto_enable_on_update)
+        except NativeSessionError as exc:
+            codes = {
+                "local_session_external_sync_forbidden": (409, "账号使用服务器独立登录，外部同步不能覆盖"),
+                "flow_account_busy": (409, "账号正在执行任务，请等待任务完成后同步"),
+                "flow_identity_mismatch": (400, "Flow 登录账号与预期账号不一致"),
+                "flow_identity_unavailable": (400, "目标无法确认 Flow 登录身份，请检查源登录态与同出口代理"),
+                "flow_login_unavailable": (400, "目标 Flow 登录态不可用"),
+                "project_context_unavailable": (400, "目标 Flow 登录态不可用"),
+            }
+            status, message = codes.get(exc.reason, (503, "目标暂时无法验证 Flow 会话，请检查同出口代理"))
+            raise HTTPException(status_code=status, detail={"code": exc.reason, "message": message}) from None
+        except Exception:
+            raise HTTPException(status_code=503, detail={"code": "flow_verification_unavailable", "message": "Flow 会话验证未完成；请核查账号状态，勿反复同步"}) from None
+        return {"success": True, **result, "message": f"Flow session {result['action']} for {result['email']}",
+                "oauth_verified": False, "cookies_updated": True, "proxy_updated": True,
+                "proxy_configured": True, **google_cookie_status(google_cookies)}
 
     # Extract session token from request
     session_token = request.get("session_token")
@@ -2594,6 +2649,9 @@ async def _sync_plugin_token_on_bound_proxy(
 
     # Step 2: Check if token with this email exists
     existing_token = await db.get_token_by_email(email)
+
+    if existing_token and getattr(existing_token, "auth_mode", "labs") == "flow":
+        raise HTTPException(status_code=409, detail={"code": "flow_auth_mode_required", "message": "该账号已使用 Flow 新站登录，请升级同步端；旧 Labs 同步不能覆盖新站会话"})
 
     if (existing_token and config.captcha_method == 'native_cdp'
             and local_session_state(existing_token.id)):

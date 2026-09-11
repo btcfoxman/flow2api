@@ -1,6 +1,7 @@
 import unittest
 import base64
 from io import BytesIO
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from PIL import Image
@@ -40,7 +41,7 @@ class FlowClientUploadImageTests(unittest.IsolatedAsyncioTestCase):
     async def test_native_cdp_upload_uses_bound_real_project_page(self):
         original_method = config.captcha_method
         config.set_captcha_method("native_cdp")
-        client = FlowClient(proxy_manager=None, db=object())
+        client = FlowClient(proxy_manager=None, db=SimpleNamespace(get_token=AsyncMock(return_value=SimpleNamespace(auth_mode="labs"))))
 
         class FakeNativeBrowserCaptchaService:
             def __init__(self):

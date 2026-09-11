@@ -12,6 +12,7 @@ class Token(BaseModel):
 
     # 认证信息 (核心)
     st: str  # Session Token (__Secure-next-auth.session-token)
+    auth_mode: Literal["labs", "flow"] = "labs"  # Flow uses Google cookies, not OAuth AT.
     at: Optional[str] = None  # Access Token (从ST转换而来)
     at_expires: Optional[datetime] = None  # AT过期时间
 

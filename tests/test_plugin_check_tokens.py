@@ -47,7 +47,7 @@ class PluginCheckTokensTests(unittest.TestCase):
         response = self.check()
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"success": True, "tokens": [{"email":"account@example.com",
-            "is_active":True, "needs_refresh":False, "sync_allowed":True}]})
+            "is_active":True, "needs_refresh":False, "sync_allowed":True, "auth_mode":"labs"}]})
         for secret in ("private-st", "private-at", "private-cookie", "private-pass", "private-connection"):
             self.assertNotIn(secret, response.text)
         self.database.get_all_tokens.assert_awaited_once_with()

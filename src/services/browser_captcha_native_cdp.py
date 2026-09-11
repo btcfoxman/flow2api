@@ -11,6 +11,8 @@ import random
 import shutil
 import subprocess
 import time
+import tempfile
+from types import SimpleNamespace
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,7 +26,9 @@ from ..core.generation_errors import NativeSessionError
 from ..core.native_session_state import local_session_state, validate_local_session_proxy
 from ..core.browser_profile import configure_web_only_profile
 from ..core.media_errors import is_media_traffic_error
-from .flow_angular import AngularProtocolError, AngularSubmissionUncertain, parse_rpc_response, rpc_fetch_expression
+from .flow_angular import (AngularProtocolError, AngularSubmissionUncertain, parse_rpc_response,
+                          rpc_fetch_expression, FLOW_IDENTITY_EXPRESSION, verified_flow_email,
+                          flow_credits, flow_projects, MUTATING_RPC_IDS, RPC_IDS, FLOW_RPC_URL)
 
 
 FLOW_PROJECT_BASE_URL = "https://labs.google/fx/zh/tools/flow"
@@ -798,7 +802,8 @@ class NativeCdpAccountBrowser:
             # from the external updater may replace its locally rotated session.
             return False
         token = await self.db.get_token(self.token_id)
-        session_token = str(getattr(token, "st", "") or "").strip() if token else ""
+        session_token = (str(getattr(token, "st", "") or "").strip()
+                         if token and getattr(token, "auth_mode", "labs") != "flow" else "")
         raw_cookies = (str(getattr(token, "google_cookies", "") or "")
                        if token and page_protocol == "angular" else "")
         if raw_cookies and not has_complete_flow_cookies(raw_cookies):
@@ -1022,6 +1027,35 @@ class NativeCdpAccountBrowser:
                     debug_logger.log_runtime_event("native_sync_preflight_failed", token_id=self.token_id, **exc.diagnostic())
                 raise
 
+    async def flow_account_snapshot(self, expected_email: str = "") -> Dict[str, Any]:
+        """Read identity, credits and existing projects in one authenticated Flow page."""
+        async with self.solve_lock:
+            await self._prepare_profile(for_solve=False)
+            _, session_id = await self._get_or_create_project_session("", "angular")
+            try:
+                identity = await self._evaluate(session_id, FLOW_IDENTITY_EXPRESSION)
+                email = verified_flow_email(identity, expected_email)
+            except AngularProtocolError as exc:
+                reason = "flow_identity_mismatch" if "mismatch" in str(exc) else "flow_identity_unavailable"
+                raise NativeSessionError(reason, protocol="angular", stage="account_identity") from None
+            async def rpc(rpc_id, payload):
+                result = await self._evaluate(session_id, rpc_fetch_expression(rpc_id, payload, 20),
+                                              await_promise=True, timeout=25)
+                if not isinstance(result, dict) or result.get("status") != 200:
+                    raise NativeSessionError("flow_account_probe_failed", protocol="angular", stage="account_verification")
+                return parse_rpc_response(result.get("text", ""), rpc_id)
+            credits = flow_credits(await rpc("nzlxg", []))
+            projects = flow_projects(await rpc("UpteDb", ["projects/*", 21, None, None, None, None, [1]]))
+            # Recheck identity after the requests (account switch/navigation races).
+            verified_flow_email(await self._evaluate(session_id, FLOW_IDENTITY_EXPRESSION), email)
+            jar = await self.connection.send("Network.getCookies", {"urls": [
+                "https://google.com/", "http://google.com/", "https://flow.google.com/",
+                "https://accounts.google.com/", "https://www.google.com/"]}, session_id=session_id, timeout=5)
+            cookies = normalize_google_cookies(jar.get("cookies", []))
+            if not has_complete_flow_cookies(cookies):
+                raise NativeSessionError("google_session_cookies_incomplete", protocol="angular")
+            return {"email": email, **credits, "projects": projects, "google_cookies": cookies}
+
     async def _discard_project_session(self, project_id: Optional[str], page_protocol: str = "labs") -> None:
         if page_protocol == "labs" and self._legacy_migrated:
             page_protocol = "angular"
@@ -1186,6 +1220,10 @@ class NativeCdpAccountBrowser:
         """Execute an API request in the token's persistent real Flow project page."""
         async with self.solve_lock:
             self.busy_count += 1
+            rpc_id = (json_data or {}).get("rpc_id") if url == FLOW_RPC_URL else None
+            rpc_status = None
+            rpc_failure_reason = "rpc_preflight_failed"
+            rpc_started = time.monotonic()
             try:
                 await self._prepare_profile(for_solve=False)
                 angular_request = urlparse(url).hostname == "flow.google.com"
@@ -1195,20 +1233,30 @@ class NativeCdpAccountBrowser:
                     page_protocol = "angular"
                 if url == "https://flow.google.com/_/AiSandboxAngularFrontend/data/batchexecute":
                     rpc_id = (json_data or {}).get("rpc_id")
-                    is_submit = rpc_id in {"MZZa6b", "jIps6", "ogiZ0b"}
+                    is_submit = rpc_id in MUTATING_RPC_IDS
                     try:
+                        rpc_failure_reason = "rpc_evaluation_interrupted"
                         rpc_result = await self._evaluate(session_id, rpc_fetch_expression(rpc_id, json_data["payload"], timeout), await_promise=True, timeout=timeout + 5)
+                        rpc_failure_reason = "rpc_result_invalid"
                         if not isinstance(rpc_result, dict):
                             raise AngularProtocolError("Invalid browser RPC result")
+                        rpc_status = int(rpc_result.get("status", 0))
                         if rpc_result.get("preflightError"):
+                            rpc_failure_reason = "rpc_bootstrap_unavailable"
                             raise AngularProtocolError(rpc_result["preflightError"])
                         if rpc_result.get("fetchError"):
+                            rpc_failure_reason = "rpc_fetch_interrupted"
                             raise AngularSubmissionUncertain("Flow launch result is unconfirmed; automatic resubmission is disabled")
-                        if int(rpc_result.get("status", 0)) == 401:
+                        if rpc_status == 401:
+                            rpc_failure_reason = "upstream_authentication_rejected"
                             raise NativeSessionError("upstream_authentication_rejected", protocol="angular", stage="upstream_authentication")
-                        if int(rpc_result.get("status", 0)) >= 400:
-                            raise AngularProtocolError(f"Flow RPC rejected: HTTP {rpc_result['status']}")
+                        if rpc_status >= 400:
+                            rpc_failure_reason = "rpc_http_rejected"
+                            # Use the shared HTTP error spelling so 429 is routed
+                            # to account-egress cooldown, not generic token failure.
+                            raise AngularProtocolError(f"Flow RPC rejected: HTTP Error {rpc_status}")
                         try:
+                            rpc_failure_reason = "rpc_response_unrecognized"
                             parsed = parse_rpc_response(rpc_result.get("text", ""), rpc_id)
                             self.last_error = None
                             self.last_upstream_error = None
@@ -1217,7 +1265,8 @@ class NativeCdpAccountBrowser:
                             if is_submit:
                                 raise AngularSubmissionUncertain("Flow launch response is unrecognized; automatic resubmission is disabled") from None
                             raise
-                    except (asyncio.TimeoutError, CdpProtocolError, ConnectionError):
+                    except (asyncio.TimeoutError, CdpProtocolError, ConnectionError) as exc:
+                        rpc_failure_reason = "rpc_cdp_timeout" if isinstance(exc, asyncio.TimeoutError) else "rpc_cdp_interrupted"
                         if is_submit:
                             raise AngularSubmissionUncertain("Flow launch result is unconfirmed; automatic resubmission is disabled") from None
                         raise
@@ -1299,6 +1348,11 @@ class NativeCdpAccountBrowser:
                 return parsed
             except Exception as exc:
                 self.last_error = f"{type(exc).__name__}: {str(exc)[:240]}"
+                if url == FLOW_RPC_URL:
+                    debug_logger.log_runtime_event("native_rpc_failed", token_id=self.token_id,
+                        stage="rpc_request", protocol="angular", rpc_id=rpc_id if rpc_id in RPC_IDS else "unsupported",
+                        reason=rpc_failure_reason, status_code=rpc_status,
+                        duration_ms=int((time.monotonic() - rpc_started) * 1000))
                 if isinstance(exc, NativeSessionError):
                     debug_logger.log_runtime_event("native_preflight_failed", token_id=self.token_id, **exc.diagnostic())
                 if _is_recaptcha_profile_risk_error(exc):
@@ -1777,6 +1831,53 @@ class BrowserCaptchaService:
             async with self._capacity_condition:
                 self._capacity_condition.notify_all()
 
+    async def flow_account_snapshot(self, token_id: int, expected_email: str) -> Dict[str, Any]:
+        if self._closed:
+            raise RuntimeError("native_cdp service is closed")
+        worker = self._workers.get(int(token_id))
+        if worker is None:
+            worker = NativeCdpAccountBrowser(int(token_id), self.db)
+            self._workers[int(token_id)] = worker
+        worker.busy_count += 1
+        try:
+            await self._ensure_capacity(worker)
+            return await worker.flow_account_snapshot(expected_email)
+        finally:
+            worker.busy_count = max(0, worker.busy_count - 1)
+            worker.last_used_at = time.monotonic()
+            async with self._capacity_condition:
+                self._capacity_condition.notify_all()
+
+    async def verify_flow_import(self, cookies: str, proxy_url: str, expected_email: str = "") -> Dict[str, Any]:
+        """Verify before any account write; never seed an untrusted identity into an existing profile."""
+        if self._closed:
+            raise RuntimeError("native_cdp service is closed")
+        if -1 in self._workers:
+            raise NativeSessionError("flow_account_busy", protocol="angular")
+        candidate = SimpleNamespace(st="", auth_mode="flow", google_cookies=cookies, captcha_proxy_url=proxy_url)
+        async def get_token(_):
+            return candidate
+        root = _profile_root()
+        root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="sync-check-", dir=root) as folder:
+            worker = NativeCdpAccountBrowser(-1, SimpleNamespace(get_token=get_token))
+            worker.profile_dir = Path(folder)
+            worker._profile_reset_pending = False
+            worker.busy_count = 1
+            self._workers[-1] = worker
+            try:
+                async def verify():
+                    await self._ensure_capacity(worker)
+                    return await worker.flow_account_snapshot(expected_email)
+                return await asyncio.wait_for(verify(), timeout=75)
+            finally:
+                try:
+                    await worker.stop(reason="flow_import_verification_complete")
+                finally:
+                    self._workers.pop(-1, None)
+                    async with self._capacity_condition:
+                        self._capacity_condition.notify_all()
+
     async def get_token(
         self,
         project_id: str,
@@ -1831,6 +1932,9 @@ class BrowserCaptchaService:
         worker.busy_count += 1
         if consume_video_reservation:
             worker.consume_video_submit_reservation()
+        tracks_proxy_risk = consume_video_reservation or (
+            url == FLOW_RPC_URL and (json_data or {}).get("rpc_id") in {"MZZa6b", "jIps6", "ogiZ0b"}
+        )
         try:
             await self._ensure_capacity(worker)
             result = await worker.fetch_json(
@@ -1842,7 +1946,7 @@ class BrowserCaptchaService:
                 timeout=timeout,
                 page_protocol=page_protocol,
             )
-            if consume_video_reservation:
+            if tracks_proxy_risk:
                 try:
                     await self._record_proxy_success(
                         token_key,
@@ -1858,7 +1962,7 @@ class BrowserCaptchaService:
                     )
             return result
         except Exception as exc:
-            if consume_video_reservation and is_media_traffic_error(exc):
+            if tracks_proxy_risk and is_media_traffic_error(exc):
                 try:
                     await self._record_proxy_risk(
                         token_key,

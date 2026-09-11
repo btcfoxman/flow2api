@@ -1,5 +1,8 @@
 """Token manager for Flow2API with AT auto-refresh"""
 import asyncio
+import hashlib
+import time
+from contextlib import AsyncExitStack
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List
 from ..core.database import Database
@@ -32,6 +35,83 @@ class TokenManager:
         self._credits_refresh_round_lock = asyncio.Lock()
         self._periodic_credits_refresh_task: Optional[asyncio.Task] = None
         self.native_sessions = SessionAvailability()
+        self._flow_verified = {}
+        self._flow_sync_lock = asyncio.Lock()
+
+    @staticmethod
+    def uses_flow_session(token) -> bool:
+        return getattr(token, "auth_mode", "labs") == "flow"
+
+    def _flow_verification_fresh(self, token) -> bool:
+        revision, checked = self._flow_verified.get(token.id, (None, 0))
+        return revision == self.native_sessions._revision(token) and time.monotonic() - checked < 60
+
+    async def _read_flow_account(self, token):
+        from .browser_captcha_native_cdp import BrowserCaptchaService
+        if config.captcha_method != "native_cdp":
+            raise ValueError("Flow session accounts require native_cdp")
+        service = await BrowserCaptchaService.get_instance(self.db)
+        snapshot = await service.flow_account_snapshot(token.id, token.email)
+        current = await self.db.get_token(token.id)
+        if current is None or self.native_sessions._revision(current) != self.native_sessions._revision(token):
+            raise ValueError("Flow credentials changed during verification")
+        await self.db.update_token(token.id, credits=snapshot["credits"], user_paygate_tier=snapshot["userPaygateTier"])
+        self._flow_verified[token.id] = (self.native_sessions._revision(token), time.monotonic())
+        self.native_sessions.discard(token.id)
+        return snapshot
+
+    async def sync_flow_session(self, cookies, proxy_url, *, expected_email="", auto_enable=True):
+        """New-site-only sync. Identity is verified before looking up/writing an account."""
+        from .browser_captcha_native_cdp import BrowserCaptchaService, NativeCdpAccountBrowser
+        from ..core.native_session_state import local_session_state
+        from ..core.generation_errors import NativeSessionError
+        if self._flow_sync_lock.locked():
+            raise NativeSessionError("flow_account_busy", protocol="angular")
+        async with self._flow_sync_lock:
+            service = await BrowserCaptchaService.get_instance(self.db)
+            snapshot = await service.verify_flow_import(cookies, proxy_url, expected_email)
+            email = snapshot["email"]
+            matches = [t for t in await self.db.get_all_tokens() if str(t.email or "").strip().lower() == email]
+            if len(matches) > 1:
+                raise NativeSessionError("flow_identity_ambiguous", protocol="angular")
+            existing = matches[0] if matches else None
+            if existing and local_session_state(existing.id):
+                raise NativeSessionError("local_session_external_sync_forbidden", protocol="angular")
+            project = snapshot["projects"][0] if snapshot["projects"] else {}
+            identity_key = "flow:" + hashlib.sha256(email.encode()).hexdigest()
+            fields = dict(auth_mode="flow", at=None, at_expires=None, google_cookies=snapshot["google_cookies"],
+                          captcha_proxy_url=proxy_url, credits=snapshot["credits"],
+                          user_paygate_tier=snapshot["userPaygateTier"], is_active=False,
+                          current_project_id=project.get("project_id"), current_project_name=project.get("project_name"))
+            async with AsyncExitStack() as stack:
+                if existing:
+                    token_id = existing.id
+                    worker = service._workers.get(token_id)
+                    if worker is None:
+                        worker = NativeCdpAccountBrowser(token_id, self.db)
+                        service._workers[token_id] = worker
+                    if worker.is_busy:
+                        raise NativeSessionError("flow_account_busy", protocol="angular")
+                    await stack.enter_async_context(worker.solve_lock)
+                    # Do not test is_busy after acquiring our own lock: it includes
+                    # solve_lock.locked(). Keep the lock through the credential write.
+                    if worker.busy_count or worker._video_submit_reservations:
+                        raise NativeSessionError("flow_account_busy", protocol="angular")
+                    await worker.stop(reason="flow_session_import")
+                    await self.db.update_token(token_id, st=identity_key, **fields)
+                else:
+                    # Compatibility with the legacy UNIQUE NOT NULL ST column. This is
+                    # a non-secret database identity, NEVER an OAuth/session credential.
+                    token_id = await self.db.add_token(Token(st=identity_key, email=email, name=email.split("@")[0], **fields))
+            self.native_sessions.discard(token_id)
+            self._flow_verified.pop(token_id, None)
+            verified = await self.verify_native_session(token_id)
+            active = bool(verified and (auto_enable or (existing and existing.is_active)))
+            if active:
+                await self.enable_token(token_id)
+            return {"token_id": token_id, "email": email, "action": "updated" if existing else "added",
+                    "native_session_verified": verified, "account_active": active,
+                    "auth_mode": "flow", "flow_identity_verified": True}
 
     async def _get_token_lock(
         self,
@@ -170,7 +250,14 @@ class TokenManager:
         self.native_sessions.reject(token)
         try:
             service = await BrowserCaptchaService.get_instance(self.db)
-            await asyncio.wait_for(service.verify_session(token.id, token.current_project_id or ""), timeout=45)
+            if self.uses_flow_session(token):
+                async def verify_flow():
+                    snapshot = await self._read_flow_account(token)
+                    if not snapshot["projects"]:
+                        await self.ensure_project_exists(token_id)
+                await asyncio.wait_for(verify_flow(), timeout=60)
+            else:
+                await asyncio.wait_for(service.verify_session(token.id, token.current_project_id or ""), timeout=45)
         except Exception as exc:
             current = await self.db.get_token(token_id)
             if current is not None and self.native_sessions._revision(current) == revision:
@@ -200,6 +287,7 @@ class TokenManager:
 
         await self.db.delete_token(token_id)
         self.native_sessions.discard(token_id)
+        self._flow_verified.pop(token_id, None)
 
         refresh_task = self._refresh_futures.pop(token_id, None)
         if refresh_task and not refresh_task.done():
@@ -440,6 +528,8 @@ class TokenManager:
 
     def _should_refresh_at(self, token: Token) -> bool:
         """根据当前 token 快照判断是否需要刷新 AT。"""
+        if self.uses_flow_session(token):
+            return not self._flow_verification_fresh(token)
         if not token.at:
             debug_logger.log_info(f"[AT_CHECK] Token {token.id}: AT不存在,需要刷新")
             return True
@@ -475,6 +565,23 @@ class TokenManager:
         if not token:
             return None
 
+        if self.uses_flow_session(token):
+            if config.captcha_method != "native_cdp" or not self.native_sessions.available(token):
+                return None
+            if self._flow_verification_fresh(token):
+                return token
+            lock = await self._get_token_lock(self._refresh_locks, self._refresh_lock_guard, token.id)
+            async with lock:
+                try:
+                    if not self._flow_verification_fresh(token):
+                        await self._read_flow_account(token)
+                    return await self.db.get_token(token.id)
+                except Exception as exc:
+                    self.native_sessions.reject(token, exc)
+                    debug_logger.log_runtime_event("flow_session_unavailable", token_id=token.id,
+                                                   stage="account_verification", reason=getattr(exc, "reason", "verification_unavailable"))
+                    return None
+
         if not self._should_refresh_at(token):
             return token
 
@@ -509,6 +616,9 @@ class TokenManager:
             token = await self.db.get_token(token_id)
             if not token:
                 return False
+
+            if self.uses_flow_session(token):
+                return await self.verify_native_session(token_id)
 
             result = await self._do_refresh_at(token_id, token.st)
             if result:
@@ -677,6 +787,29 @@ class TokenManager:
             return None
 
     async def ensure_project_exists(self, token_id: int) -> str:
+        token = await self.db.get_token(token_id)
+        if token and self.uses_flow_session(token):
+            lock = await self._get_token_lock(self._project_locks, self._project_lock_guard, token_id)
+            async with lock:
+                token = await self.db.get_token(token_id)
+                if not token or not self.uses_flow_session(token):
+                    raise ValueError("Flow account changed during project initialization")
+                snapshot = await self._read_flow_account(token)
+                projects = snapshot["projects"]
+                if projects:
+                    selected = next((p for p in projects if p["project_id"] == token.current_project_id), projects[0])
+                else:
+                    # One request, no Labs fallback; list again on a later attempt
+                    # to discover a project whose creation response was interrupted.
+                    selected = await self.flow_client.create_flow_project(token_id, self._build_project_name(1))
+                current = await self.db.get_token(token_id)
+                if current is None or self.native_sessions._revision(current) != self.native_sessions._revision(token):
+                    raise ValueError("Flow credentials changed during project initialization")
+                if not any(p.project_id == selected["project_id"] for p in await self.db.get_projects_by_token(token_id)):
+                    await self.db.add_project(Project(project_id=selected["project_id"], token_id=token_id,
+                                                       project_name=selected["project_name"]))
+                await self.db.update_token(token_id, current_project_id=selected["project_id"], current_project_name=selected["project_name"])
+                return selected["project_id"]
         if config.captcha_method == 'native_cdp':
             async with self.flow_client.native_account_proxy_context(token_id):
                 return await self._ensure_project_exists_on_bound_proxy(token_id)
@@ -809,6 +942,8 @@ class TokenManager:
             # 检查是否已过12小时
             time_since_ban = now - banned_at_aware
             if time_since_ban.total_seconds() >= 12 * 3600:  # 12小时
+                if self.uses_flow_session(token) and not await self.verify_native_session(token.id):
+                    continue
                 debug_logger.log_info(
                     f"[AUTO_UNBAN] 解禁Token {token.id} (禁用时间: {banned_at_aware}, "
                     f"已过 {time_since_ban.total_seconds() / 3600:.1f} 小时)"
@@ -825,6 +960,14 @@ class TokenManager:
     # ========== 余额刷新 ==========
 
     async def _refresh_credits_inner(self, token_id: int) -> tuple[bool, int]:
+        token = await self.db.get_token(token_id)
+        if token and self.uses_flow_session(token):
+            try:
+                snapshot = await self._read_flow_account(token)
+                return True, snapshot["credits"]
+            except Exception as exc:
+                self.native_sessions.reject(token, exc)
+                return False, token.credits
         if config.captcha_method == 'native_cdp':
             async with self.flow_client.native_account_proxy_context(token_id):
                 return await self._refresh_credits_on_bound_proxy(token_id)

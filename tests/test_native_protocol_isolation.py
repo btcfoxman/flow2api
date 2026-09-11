@@ -125,7 +125,7 @@ class ProtocolIsolationTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse((Path(directory)/'.flow2api-google-cookie-seed').exists())
 
     async def test_image_upload_and_captcha_follow_same_model_protocol(self):
-        client = FlowClient(None, db=object())
+        client = FlowClient(None, db=SimpleNamespace(get_token=AsyncMock(return_value=SimpleNamespace(auth_mode='labs'))))
         service = SimpleNamespace(fetch_json=AsyncMock(return_value={'media':{'name':'media'}}),
                                   get_token=AsyncMock(return_value=('captcha','native:1')),
                                   get_fingerprint=lambda _: {})
@@ -142,7 +142,7 @@ class ProtocolIsolationTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(service.get_token.await_args.kwargs['page_protocol'], expected)
 
     async def test_upload_preflight_is_not_rewrapped_or_retried(self):
-        client = FlowClient(None, db=object())
+        client = FlowClient(None, db=SimpleNamespace(get_token=AsyncMock(return_value=SimpleNamespace(auth_mode='labs'))))
         failure = NativeSessionError('flow_login_unavailable', protocol='angular')
         service = SimpleNamespace(fetch_json=AsyncMock(side_effect=failure))
         original = config.captcha_method
@@ -155,14 +155,63 @@ class ProtocolIsolationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(service.fetch_json.await_count, 1)
 
     async def test_video_upload_does_not_switch_on_cookie_presence(self):
-        client = FlowClient(None, db=SimpleNamespace(get_token=AsyncMock()))
+        client = FlowClient(None, db=SimpleNamespace(get_token=AsyncMock(return_value=SimpleNamespace(auth_mode='labs', google_cookies='present'))))
         client._resolve_request_proxy = AsyncMock(side_effect=RuntimeError('legacy route reached'))
         original = config.captcha_method
         config.set_captcha_method('native_cdp')
         self.addCleanup(config.set_captcha_method, original)
         with self.settings(), self.assertRaisesRegex(RuntimeError, 'legacy route reached'):
             await client.upload_video_with_metadata('st', 'p', b'video', token_id=1, model_key='abra_edit_360p')
-        client.db.get_token.assert_not_awaited()
+        client.db.get_token.assert_awaited_once_with(1)
+
+    async def test_flow_captcha_always_uses_new_site_without_model_opt_in(self):
+        client = FlowClient(None, db=SimpleNamespace(get_token=AsyncMock(return_value=SimpleNamespace(auth_mode='flow'))))
+        service = SimpleNamespace(get_token=AsyncMock(return_value=('captcha', 'native:1')),
+                                  get_fingerprint=lambda _: {})
+        original = config.captcha_method
+        config.set_captcha_method('native_cdp')
+        self.addCleanup(config.set_captcha_method, original)
+        with self.settings(), patch('src.services.browser_captcha_native_cdp.BrowserCaptchaService.get_instance', AsyncMock(return_value=service)):
+            for action, model in [('IMAGE_GENERATION', None), ('VIDEO_GENERATION', 'abra_r2v_4s_360p'),
+                                  ('VIDEO_GENERATION', 'abra_r2v_4s_720p')]:
+                await client._get_recaptcha_token('p', action, token_id=1, model_key=model)
+                self.assertEqual(service.get_token.await_args.kwargs['page_protocol'], 'angular')
+
+    async def test_flow_never_uses_other_captcha_providers(self):
+        client = FlowClient(None, db=SimpleNamespace(get_token=AsyncMock(return_value=SimpleNamespace(auth_mode='flow'))))
+        original = config.captcha_method
+        config.set_captcha_method('extension')
+        self.addCleanup(config.set_captcha_method, original)
+        with self.assertRaisesRegex(NativeSessionError, 'flow_native_transport_required'):
+            await client._get_recaptcha_token('p', token_id=1)
+
+    async def test_flow_submission_rejects_missing_or_wrong_browser_binding(self):
+        client = FlowClient(None, db=SimpleNamespace(get_token=AsyncMock(return_value=SimpleNamespace(auth_mode='flow'))))
+        client._make_request = AsyncMock(side_effect=AssertionError('Legacy HTTP must not run'))
+        original = config.captcha_method
+        config.set_captcha_method('native_cdp')
+        self.addCleanup(config.set_captcha_method, original)
+        for fingerprint in [None, {}, {'native_token_id': 2}]:
+            client._set_request_fingerprint(fingerprint)
+            with self.assertRaisesRegex(NativeSessionError, 'flow_browser_context_unavailable'):
+                await client._make_image_generation_request('https://legacy.invalid/image', {}, None, token_id=1)
+            with self.assertRaisesRegex(NativeSessionError, 'flow_browser_context_unavailable'):
+                await client._make_video_api_request('https://legacy.invalid/video:submit', {}, None, 30, token_id=1)
+        client._make_request.assert_not_awaited()
+
+    async def test_flow_transport_capability_error_does_not_block_account(self):
+        from src.core.session_availability import SessionAvailability
+        availability = SessionAvailability()
+        token = SimpleNamespace(id=1, auth_mode='flow')
+        for reason in ['flow_native_transport_required', 'flow_browser_context_unavailable', 'flow_browser_account_mismatch',
+                       'flow_legacy_transport_forbidden']:
+            availability.reject(token, NativeSessionError(reason, protocol='angular'))
+            self.assertTrue(availability.available(token))
+
+    async def test_flow_database_identity_is_never_a_labs_cookie(self):
+        client = FlowClient(None)
+        with self.assertRaisesRegex(NativeSessionError, 'flow_legacy_transport_forbidden'):
+            client._build_labs_cookie_header('flow:non-secret-account-key')
 
 
 class FailureAccountingTests(unittest.IsolatedAsyncioTestCase):
