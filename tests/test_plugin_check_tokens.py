@@ -113,6 +113,22 @@ class PluginCheckTokensTests(unittest.TestCase):
         self.database.get_all_tokens.return_value = []
         self.assertEqual(self.check().json(), {"success":True, "tokens":[]})
 
+    def test_native_refresh_uses_cookie_expiry_not_missing_labs_at(self):
+        manager=SimpleNamespace(native_sessions=SimpleNamespace(available=lambda token:True))
+        for hours,expected in ((2,False),(.5,True)):
+            token=account(auth_mode="flow",at=None,at_expires=None)
+            cookies=json.loads(token.google_cookies)
+            for cookie in cookies:
+                cookie['expires']=(datetime.now(timezone.utc)+timedelta(hours=hours)).timestamp()
+            token.google_cookies=json.dumps(cookies)
+            self.database.get_all_tokens.return_value=[token]
+            with patch.object(admin,'token_manager',manager):
+                response=self.check()
+            result=response.json()['tokens'][0]
+            self.assertEqual(result['needs_refresh'],expected)
+            self.assertTrue(result['flow_cookie_expires_at'])
+            self.assertNotIn('private-cookie',response.text)
+
 
 if __name__ == "__main__":
     unittest.main()

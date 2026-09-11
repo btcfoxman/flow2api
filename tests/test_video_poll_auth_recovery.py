@@ -105,3 +105,23 @@ class VideoPollAuthRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stages, ['video_polling', 'video_postprocessing'])
         self.assertTrue(result['success'])
         self.assertEqual(len(chunks), 1)
+
+    async def test_flow_failed_or_cancelled_operation_ends_polling_without_success(self):
+        for status in ('FAILED', 'CANCELLED'):
+            with self.subTest(status=status):
+                handler = self.handler()
+                operations = [{'operation': {'name': 'task', 'error': {'code': 1, 'message': '视频生成已取消'}},
+                               'status': 'MEDIA_GENERATION_STATUS_' + status}]
+                handler.flow_client.check_video_status.return_value = {'operations': operations}
+                result = {}
+                with patch('src.services.generation_handler.asyncio.sleep', AsyncMock()):
+                    chunks = [chunk async for chunk in handler._poll_video_result(
+                        SimpleNamespace(id=7, at=None, st='flow:user@example.com'), 'project',
+                        operations, False, generation_result=result)]
+                self.assertFalse(result['success'])
+                handler.flow_client.check_video_status.assert_awaited_once()
+                handler._fail_video_task.assert_awaited_once()
+                handler._complete_video_task.assert_not_awaited()
+                handler.watermark_processor.apply_policy.assert_not_awaited()
+                self.assertEqual(handler._finalize_async_video_result_log.await_args.kwargs['status_text'], 'failed')
+                self.assertIn('error', json.loads(chunks[-1]))

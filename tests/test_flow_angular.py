@@ -34,14 +34,21 @@ class AngularCodecTests(unittest.TestCase):
                 parse_rpc_response(raw, "x")
 
     def test_only_confirmed_success_and_matching_media_counts(self):
-        for code, suffix in [(6,"PENDING"),(2,"ACTIVE"),(3,"SUCCESSFUL")]:
+        for code, suffix in [(1,"PENDING"),(6,"PENDING"),(2,"ACTIVE"),(3,"SUCCESSFUL"),
+                             (4,"FAILED"),(7,"FAILED"),(5,"CANCELLED")]:
             response = video_operations([media(code)], token_id=9, project_id="project-test")
             op = response["operations"][0]
             self.assertTrue(op["status"].endswith(suffix))
             self.assertEqual(op["tokenId"], 9)
             self.assertEqual(op["transport"], "angular")
+            if code != 3:
+                self.assertNotIn("metadata", op["operation"])
+            if code in {4,5,7}:
+                self.assertIn("error", op["operation"])
         with self.assertRaises(AngularProtocolError):
             video_operations([media(99)], token_id=9, project_id="project-test")
+        with self.assertRaises(AngularProtocolError):
+            video_operations([media(True)], token_id=9, project_id="project-test")
         with self.assertRaises(AngularProtocolError):
             video_operations([media(3)], token_id=9, project_id="another-project")
         with self.assertRaises(AngularProtocolError):

@@ -3350,7 +3350,7 @@ class GenerationHandler:
                         )
                     return
 
-                elif status == "MEDIA_GENERATION_STATUS_FAILED":
+                elif status in {"MEDIA_GENERATION_STATUS_FAILED", "MEDIA_GENERATION_STATUS_CANCELLED"}:
                     # 生成失败 - 提取错误信息
                     error_info = operation.get("operation", {}).get("error", {})
                     error_code = error_info.get("code", "unknown")

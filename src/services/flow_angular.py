@@ -292,14 +292,19 @@ def video_operations(payload, *, token_id, project_id, expected_ids=None):
             continue
         status = media[5][8] if len(media[5]) > 8 else None
         code = status[0] if isinstance(status, list) and status else None
-        # Unknown failure/cancellation enums must never be counted as success.
-        status_name = {1: "SUCCESSFUL", 2: "ACTIVE", 3: "SUCCESSFUL", 6: "PENDING"}.get(code)
+        # Official frontend nM / vL schema (2026-09-11): 1/2 pending,
+        # 3 success, 4/7 failed, 5 canceled, 6 scheduled. Unknown fails closed.
+        status_name = {1: "PENDING", 2: "ACTIVE", 3: "SUCCESSFUL", 4: "FAILED",
+                       5: "CANCELLED", 6: "PENDING", 7: "FAILED"}.get(code) if type(code) is int else None
         if status_name is None:
             raise AngularProtocolError(f"Unrecognized Flow media status {code}")
-        if code == 1 and expected_ids is None:
-            continue  # User uploads are not newly submitted generation tasks.
         operation = {"name": media_id}
-        if code in {1, 3}:
+        if code in {4, 5, 7}:
+            # Do not expose arbitrary upstream Status text, which may contain
+            # request data. The wire status is sufficient for terminal handling.
+            operation["error"] = {"code": 1 if code == 5 else 13,
+                                  "message": "视频生成已取消" if code == 5 else "视频生成失败，请稍后重试"}
+        if code == 3:
             operation["metadata"] = {"video": {"mediaGenerationId": media_id}}
             video_url = signed_video_url(media)
             if video_url:

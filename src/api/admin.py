@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Header, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Literal
 import secrets
 import time
 import re
@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 from curl_cffi.requests import AsyncSession
 from ..core.auth import AuthManager
 from ..core.database import Database
-from ..core.flow_cookies import normalize_google_cookies, google_cookie_status, has_complete_flow_cookies
+from ..core.flow_cookies import normalize_google_cookies, google_cookie_status, has_complete_flow_cookies, flow_cookie_expiry
 from ..core.native_session_state import local_session_state
 from ..core.generation_errors import NativeSessionError
 from ..core.config import config, get_yescaptcha_min_score, normalize_yescaptcha_task_type
@@ -685,6 +685,8 @@ class ST2ATRequest(BaseModel):
 
 class ImportTokenItem(BaseModel):
     """导入Token项"""
+    auth_mode: Literal["labs", "flow"] = "labs"
+    google_cookies: Optional[str | List[Dict[str, Any]]] = None
     email: Optional[str] = None
     access_token: Optional[str] = None
     session_token: Optional[str] = None
@@ -802,6 +804,7 @@ async def get_tokens(token: str = Depends(verify_admin_token)):
         "st": row.get("st"),  # Session Token for editing
         "at": row.get("at"),  # Access Token for editing (从ST转换而来)
         "auth_mode": row.get("auth_mode", "labs"),
+        **flow_cookie_expiry(row.get("google_cookies") if row.get("auth_mode") == "flow" else None),
         "at_expires": to_iso(row.get("at_expires")) if row.get("at_expires") else None,  # 🆕 AT过期时间
         "at_expired": bool(normalize_dt(row.get("at_expires")) and normalize_dt(row.get("at_expires")) <= now),
         "at_expiring_within_1h": bool(
@@ -1034,7 +1037,9 @@ async def refresh_at(
                     "id": updated_token.id,
                     "email": updated_token.email,
                     "auth_mode": getattr(updated_token, "auth_mode", "labs"),
-                    "at_expires": updated_token.at_expires.isoformat() if updated_token.at_expires else None
+                    "at_expires": updated_token.at_expires.isoformat() if updated_token.at_expires else None,
+                    **flow_cookie_expiry(getattr(updated_token, "google_cookies", None)
+                                         if getattr(updated_token, "auth_mode", "labs") == "flow" else None),
                 }
             }
         else:
@@ -1074,6 +1079,25 @@ async def st_to_at(
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@router.get("/api/tokens/export")
+async def export_tokens(token: str = Depends(verify_admin_token)):
+    """Explicit admin-only credential backup; cookies never enter the list API."""
+    exported = []
+    for account in await token_manager.get_all_tokens():
+        is_flow = getattr(account, "auth_mode", "labs") == "flow"
+        item = {"auth_mode": "flow" if is_flow else "labs", "email": account.email,
+                "session_token": None if is_flow else account.st,
+                "access_token": None if is_flow else account.at,
+                "is_active": account.is_active, "captcha_proxy_url": account.captcha_proxy_url or "",
+                "extension_route_key": account.extension_route_key or "",
+                "image_enabled": account.image_enabled, "video_enabled": account.video_enabled,
+                "image_concurrency": account.image_concurrency, "video_concurrency": account.video_concurrency}
+        if is_flow:
+            item["google_cookies"] = account.google_cookies
+        exported.append(item)
+    return JSONResponse(exported, headers={"Cache-Control": "no-store"})
+
+
 @router.post("/api/tokens/import")
 async def import_tokens(
     request: ImportTokensRequest,
@@ -1093,6 +1117,47 @@ async def import_tokens(
 
     for idx, item in enumerate(request.tokens):
         try:
+            if item.auth_mode == "flow":
+                try:
+                    if config.captcha_method != "native_cdp":
+                        errors.append(f"第{idx+1}项: Flow 新站导入需要 native_cdp")
+                        continue
+                    try:
+                        cookies = normalize_google_cookies(item.google_cookies)
+                    except (TypeError, ValueError):
+                        errors.append(f"第{idx+1}项: Flow 新站 Cookie 格式或有效期无效，请通过新版同步端恢复")
+                        continue
+                    if not has_complete_flow_cookies(cookies):
+                        errors.append(f"第{idx+1}项: Flow 新站 Cookie 不完整，请通过新版同步端恢复")
+                        continue
+                    proxy, _ = _normalize_plugin_captcha_proxy_url({"captcha_proxy_url": item.captcha_proxy_url})
+                    result = await token_manager.sync_flow_session(cookies, proxy,
+                        expected_email=item.email or "", auto_enable=item.is_active)
+                    if not result.get("native_session_verified"):
+                        errors.append(f"第{idx+1}项: 会话已保存，但目标登录预检未通过，未计为成功导入")
+                        continue
+                    await token_manager.update_token(result["token_id"],
+                        extension_route_key=item.extension_route_key,
+                        image_enabled=item.image_enabled, video_enabled=item.video_enabled,
+                        image_concurrency=item.image_concurrency, video_concurrency=item.video_concurrency)
+                    if not item.is_active:
+                        await token_manager.disable_token(result["token_id"])
+                    existing_by_email[result["email"]] = await token_manager.get_token(result["token_id"])
+                    if result["action"] == "added":
+                        added += 1
+                    else:
+                        updated += 1
+                except NativeSessionError as exc:
+                    message = {"local_session_external_sync_forbidden": "目标独立登录账号不能被导入覆盖",
+                               "flow_identity_mismatch": "Flow 登录账号与导入邮箱不一致",
+                               "flow_account_busy": "目标账号正在执行任务，请稍后导入"}.get(exc.reason,
+                                   "目标 Flow 登录验证未通过，请检查源登录态和同出口代理")
+                    errors.append(f"第{idx+1}项: {message}")
+                except HTTPException:
+                    errors.append(f"第{idx+1}项: 请提供目标可访问、与源 Profile 同出口的有效代理")
+                except Exception:
+                    errors.append(f"第{idx+1}项: Flow 新站导入未确认，请检查目标账号状态，勿反复导入")
+                continue
             st = item.session_token
 
             if not st:
@@ -2526,13 +2591,19 @@ async def plugin_check_tokens(request: dict, authorization: Optional[str] = Head
             or (native and not has_complete_flow_cookies(token.google_cookies))
         )
         if getattr(token, "auth_mode", "labs") == "flow":
+            flow_expiry = flow_cookie_expiry(token.google_cookies)
+            cookie_expiring = (flow_expiry["flow_cookie_expires_at"] is not None
+                               and datetime.fromisoformat(flow_expiry["flow_cookie_expires_at"]) < refresh_before)
             needs_refresh = (not native or not token.is_active
+                             or cookie_expiring
                              or not has_complete_flow_cookies(token.google_cookies)
                              or not token_manager.native_sessions.available(token))
         # Explicit allowlist: no credentials, proxy URLs or project data in this response.
         status = {"email": email, "is_active": bool(token.is_active),
                   "needs_refresh": bool(needs_refresh and sync_allowed), "sync_allowed": sync_allowed}
         status["auth_mode"] = getattr(token, "auth_mode", "labs")
+        if status["auth_mode"] == "flow":
+            status.update(flow_expiry)
         if not sync_allowed:
             status["sync_block_reason"] = "independent_login"
         statuses.append(status)

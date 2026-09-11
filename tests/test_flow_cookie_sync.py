@@ -24,6 +24,10 @@ class CookieTests(unittest.TestCase):
         self.assertTrue(google_cookie_status(JAR)["google_session_cookies_configured"])
         self.assertFalse(google_cookie_status([{**JAR[0], "path": "/other"}, JAR[1]])["google_session_cookies_configured"])
 
+    def test_flow_cookie_requires_nonempty_value_and_root_path(self):
+        for change in ({"value":""},{"path":"/other"}):
+            self.assertFalse(google_cookie_status([JAR[0],{**JAR[1],**change}])["flow_cookies_configured"])
+
     def test_preserves_scope_and_expiry(self):
         cookies = json.loads(normalize_google_cookies(JAR + [{**JAR[0], "value": "new", "expirationDate": 4102444800}]))
         self.assertEqual(len(cookies), 2)
@@ -32,6 +36,13 @@ class CookieTests(unittest.TestCase):
         self.assertEqual(cookies[1]["domain"], "flow.google.com")
         self.assertEqual(cookies[1]["sameSite"], "None")
         self.assertTrue(google_cookie_status(cookies)["flow_cookies_configured"])
+
+    def test_expiry_alias_and_zero_are_not_silently_converted_to_session_cookies(self):
+        cookies = json.loads(normalize_google_cookies([{**JAR[0], "expiry": 4102444800}, JAR[1]]))
+        self.assertEqual(cookies[0]["expires"], 4102444800)
+        for expiry in (0, 1, -2):
+            self.assertFalse(google_cookie_status([JAR[0], {**JAR[1], "expires": expiry}])["flow_cookies_configured"])
+        self.assertTrue(google_cookie_status([JAR[0], {**JAR[1], "expires": -1}])["flow_cookies_configured"])
 
     def test_rejects_bad_scope_unscoped_headers_and_partition_loss(self):
         for raw in ["SID=secret", [], [{**JAR[0], "domain": "google.com.evil.test"}],
