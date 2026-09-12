@@ -2,6 +2,7 @@
 import hashlib
 import json
 import time
+from datetime import datetime, timezone
 
 
 class SessionAvailability:
@@ -11,6 +12,7 @@ class SessionAvailability:
 
     def __init__(self):
         self._blocked = {}
+        self._observations = {}
 
     @staticmethod
     def _revision(token):
@@ -43,6 +45,39 @@ class SessionAvailability:
             locally_owned = False
         until = float("inf") if signed_out and not locally_owned else time.monotonic() + self.RETRY_SECONDS
         self._blocked[int(token.id)] = (self._revision(token), until)
+        self._observations[int(token.id)] = (
+            self._revision(token),
+            {"session_status": "refresh_required" if signed_out else "verification_failed",
+             "session_checked_at": datetime.now(timezone.utc).isoformat(),
+             "session_reason": error.reason if isinstance(error, NativeSessionError) else "verification_unavailable"},
+        )
+
+    def verified(self, token):
+        """Record an actual authenticated probe, never a cookie-import receipt."""
+        self._blocked.pop(int(token.id), None)
+        self._observations[int(token.id)] = (
+            self._revision(token),
+            {"session_status": "verified", "session_checked_at": datetime.now(timezone.utc).isoformat(),
+             "session_reason": None},
+        )
+
+    def checking(self, token):
+        previous = self.status(token)
+        self._blocked[int(token.id)] = (self._revision(token), time.monotonic() + self.RETRY_SECONDS)
+        self._observations[int(token.id)] = (self._revision(token), {
+            "session_status": "checking", "session_checked_at": previous["session_checked_at"],
+            "session_reason": None})
+
+    def status(self, token):
+        """Safe runtime metadata; cookie retention is not an authorization deadline."""
+        observation = self._observations.get(int(token.id))
+        result = {"session_status": "unknown", "session_checked_at": None, "session_reason": None,
+                  "session_expires_at": None}
+        if observation and observation[0] == self._revision(token):
+            result.update(observation[1])
+            if result["session_status"] == "checking" and self.available(token):
+                result["session_status"] = "unknown"
+        return result
 
     def available(self, token):
         entry = self._blocked.get(int(token.id))
@@ -50,9 +85,10 @@ class SessionAvailability:
             return True
         revision, until = entry
         if time.monotonic() >= until or revision != self._revision(token):
-            self.discard(token.id)
+            self._blocked.pop(int(token.id), None)
             return True
         return False
 
     def discard(self, token_id):
         self._blocked.pop(int(token_id), None)
+        self._observations.pop(int(token_id), None)

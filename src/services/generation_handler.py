@@ -1530,6 +1530,16 @@ class GenerationHandler:
             )
 
         # 2. 选择Token
+        from .model_capabilities import model_transport_error, supports_flow_model
+        capability_error = await model_transport_error(self.db, model_config)
+        if capability_error:
+            duration = time.time() - start_time
+            record_generation_result(generation_type, "unsupported_model", duration)
+            await self._log_request(token_id=None, operation=request_operation, request_data=request_payload,
+                response_data=capability_error, status_code=501, duration=duration,
+                log_id=request_log_state.get("id"), status_text="failed", progress=100)
+            yield json.dumps(capability_error, ensure_ascii=False)
+            return
         debug_logger.log_info(f"[GENERATION] 正在选择可用Token...")
         token_select_started_at = time.time()
 
@@ -1619,9 +1629,7 @@ class GenerationHandler:
         try:
             # 3. 确保AT有效
             if getattr(token, "auth_mode", "labs") == "flow":
-                from .flow_angular import resolve_video_model, IMAGE_MODELS
-                if (generation_type == "image" and (model_config.get("model_name") not in IMAGE_MODELS or model_config.get("upsample"))
-                        or generation_type == "video" and resolve_video_model(model_config.get("model_key")) is None):
+                if not supports_flow_model(model_config):
                     raise NativeSessionError("flow_model_transport_unavailable", protocol="angular", stage="model_preflight")
             debug_logger.log_info(f"[GENERATION] 检查Token AT有效性...")
             if stream:

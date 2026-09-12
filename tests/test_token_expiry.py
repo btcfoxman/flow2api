@@ -86,6 +86,22 @@ class FlowCookieExpiryTests(unittest.TestCase):
 
 
 class AdminExpiryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_list_exposes_runtime_rejection_despite_future_cookie_retention(self):
+        from src.core.session_availability import SessionAvailability
+        from src.core.generation_errors import NativeSessionError
+        row={"id":1,"auth_mode":"flow","is_active":True,"google_cookies":json.dumps(JAR)}
+        sessions=SessionAvailability()
+        with patch("src.core.native_session_state.local_session_state",return_value=None):
+            sessions.reject(SimpleNamespace(**row),NativeSessionError("project_context_unavailable",page_url="https://flow.google.com/about"))
+        fake=SimpleNamespace(get_all_tokens_with_stats=AsyncMock(return_value=[row]))
+        with patch.object(admin,"db",fake),patch.object(admin,"token_manager",SimpleNamespace(native_sessions=sessions)):
+            result=(await admin.get_tokens(token="admin"))[0]
+        self.assertTrue(result["is_active"])
+        self.assertEqual(result["session_status"],"refresh_required")
+        self.assertIsNone(result["session_expires_at"])
+        self.assertEqual(result["flow_cookie_expiry_status"],"known")
+        self.assertNotIn("test-root-secret",json.dumps(result))
+
     async def test_token_list_adds_new_fields_without_repurposing_legacy_at(self):
         rows = [
             {"id": 1, "auth_mode": "flow", "google_cookies": json.dumps(JAR), "at_expires": None},

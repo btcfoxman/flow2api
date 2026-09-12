@@ -57,7 +57,7 @@ class TokenManager:
             raise ValueError("Flow credentials changed during verification")
         await self.db.update_token(token.id, credits=snapshot["credits"], user_paygate_tier=snapshot["userPaygateTier"])
         self._flow_verified[token.id] = (self.native_sessions._revision(token), time.monotonic())
-        self.native_sessions.discard(token.id)
+        self.native_sessions.verified(token)
         return snapshot
 
     async def sync_flow_session(self, cookies, proxy_url, *, expected_email="", auto_enable=True):
@@ -247,7 +247,7 @@ class TokenManager:
         if token is None:
             return False
         revision = self.native_sessions._revision(token)
-        self.native_sessions.reject(token)
+        self.native_sessions.checking(token)
         try:
             service = await BrowserCaptchaService.get_instance(self.db)
             if self.uses_flow_session(token):
@@ -263,12 +263,13 @@ class TokenManager:
             if current is not None and self.native_sessions._revision(current) == revision:
                 self.native_sessions.reject(token, exc)
             debug_logger.log_runtime_event("sync_session_unverified", token_id=token_id,
-                stage="browser_preflight", reason=exc.reason if isinstance(exc, NativeSessionError) else "verification_unavailable")
+                **(exc.diagnostic() if isinstance(exc, NativeSessionError) else
+                   {"stage": "browser_preflight", "reason": "verification_unavailable"}))
             return False
         current = await self.db.get_token(token_id)
         if current is None or self.native_sessions._revision(current) != revision:
             return False
-        self.native_sessions.discard(token_id)
+        self.native_sessions.verified(current)
         return True
 
     async def delete_token(self, token_id: int):
@@ -966,7 +967,13 @@ class TokenManager:
                 snapshot = await self._read_flow_account(token)
                 return True, snapshot["credits"]
             except Exception as exc:
-                self.native_sessions.reject(token, exc)
+                current = await self.db.get_token(token_id)
+                if current is not None and self.native_sessions._revision(current) == self.native_sessions._revision(token):
+                    self.native_sessions.reject(token, exc)
+                from ..core.generation_errors import NativeSessionError
+                debug_logger.log_runtime_event("native_account_verification_failed", token_id=token_id,
+                    **(exc.diagnostic() if isinstance(exc, NativeSessionError) else
+                       {"stage": "account_verification", "reason": "verification_unavailable"}))
                 return False, token.credits
         if config.captcha_method == 'native_cdp':
             async with self.flow_client.native_account_proxy_context(token_id):

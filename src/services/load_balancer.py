@@ -346,6 +346,12 @@ class LoadBalancer:
                         filtered_reasons[token.id] = "incomplete Google session; waiting for source synchronization"
                         continue
             sessions = getattr(self.token_manager, "native_sessions", None)
+            if model and config.captcha_method == "native_cdp" and getattr(token, "auth_mode", "labs") == "flow":
+                from .generation_handler import MODEL_CONFIG
+                from .model_capabilities import supports_flow_model
+                if model in MODEL_CONFIG and not supports_flow_model(MODEL_CONFIG[model]):
+                    filtered_reasons[token.id] = "model is not supported by this account's Flow protocol"
+                    continue
             if (config.captcha_method == "native_cdp" and sessions is not None
                     and not sessions.available(token)):
                 filtered_reasons[token.id] = "browser session awaiting credentials or next health probe"

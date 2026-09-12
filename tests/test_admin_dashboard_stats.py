@@ -35,6 +35,7 @@ class AdminDashboardStatsTests(unittest.IsolatedAsyncioTestCase):
             "today_failed_tasks": 2,
         }
         fake_db = SimpleNamespace(
+            get_all_tokens=AsyncMock(return_value=[]),
             get_dashboard_stats=AsyncMock(return_value=dashboard_stats),
             get_generation_outcome_stats=AsyncMock(return_value=outcome_stats),
             get_async_task_queue_stats=AsyncMock(return_value=queue_stats),
@@ -59,6 +60,7 @@ class AdminDashboardStatsTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.assertEqual(result["total_tokens"], 8)
+        self.assertEqual(result["native_sessions"], {"enabled": 0})
 
 
 if __name__ == "__main__":

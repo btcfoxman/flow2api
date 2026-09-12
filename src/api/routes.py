@@ -1289,6 +1289,10 @@ async def _create_deferred_async_video_task(
     base_url_override: Optional[str] = None,
 ) -> Dict[str, Any]:
     handler = _ensure_generation_handler()
+    from ..services.model_capabilities import model_transport_error
+    capability_error = await model_transport_error(handler.db, MODEL_CONFIG.get(normalized.model, {}))
+    if capability_error:
+        return capability_error
     local_task_id = _new_deferred_video_task_id()
     enqueued = await handler.db.enqueue_async_task(
         task_id=local_task_id,
@@ -1468,6 +1472,13 @@ async def _process_async_video_queue_item(queue_item: Dict[str, Any]) -> float:
             last_error=f"排队任务使用了已失效的视频模型：{normalized.model}",
             request_payload="{}",
         )
+        return 0.0
+
+    from ..services.model_capabilities import model_transport_error
+    capability_error = await model_transport_error(handler.db, model_config)
+    if capability_error:
+        await handler.db.update_async_task(local_task_id, status="failed",
+            last_error=capability_error["error"]["message"], request_payload="{}")
         return 0.0
 
     required_credits = model_config.get("credit_cost")
@@ -2436,6 +2447,10 @@ async def create_image_response(
         normalized = await _normalize_responses_image_request(payload)
         if MODEL_CONFIG.get(normalized.model, {}).get("type") != "image":
             raise HTTPException(status_code=400, detail=f"Model is not an image model: {normalized.model}")
+        from ..services.model_capabilities import model_transport_error
+        capability_error = await model_transport_error(_ensure_generation_handler().db, MODEL_CONFIG[normalized.model])
+        if capability_error:
+            return _build_openai_json_response(capability_error)
         result = await _create_async_image_response_task(
             normalized=normalized,
             payload=payload,

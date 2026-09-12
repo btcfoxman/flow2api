@@ -15,6 +15,36 @@ def token(token_id=1, **changes):
 
 
 class SessionAvailabilityTests(unittest.TestCase):
+    def test_in_progress_check_is_not_an_actual_failure_or_new_completed_timestamp(self):
+        state=SessionAvailability()
+        state.verified(token())
+        checked_at=state.status(token())["session_checked_at"]
+        state.checking(token())
+        self.assertEqual(state.status(token())["session_status"],"checking")
+        self.assertEqual(state.status(token())["session_checked_at"],checked_at)
+        self.assertFalse(state.available(token()))
+
+    def test_metadata_does_not_claim_cookie_expiry_is_session_expiry(self):
+        state = SessionAvailability()
+        self.assertEqual(state.status(token())["session_status"], "unknown")
+        state.verified(token())
+        self.assertEqual(state.status(token())["session_status"], "verified")
+        self.assertIsNone(state.status(token())["session_expires_at"])
+        self.assertTrue(state.status(token())["session_checked_at"])
+        self.assertEqual(state.status(token(google_cookies="new"))["session_status"], "unknown")
+
+    def test_retry_window_does_not_misreport_a_failed_probe_as_verified(self):
+        state = SessionAvailability()
+        with patch("src.core.session_availability.time.monotonic", return_value=100):
+            state.reject(token())
+        with patch("src.core.session_availability.time.monotonic", return_value=500):
+            self.assertTrue(state.available(token()))
+        self.assertEqual(state.status(token())["session_status"], "verification_failed")
+        state.verified(token())
+        self.assertEqual(state.status(token())["session_status"], "verified")
+        state.discard(1)
+        self.assertEqual(state.status(token())["session_status"], "unknown")
+
     def test_imported_about_page_requires_new_credentials_not_timer_expiry(self):
         from src.core.generation_errors import NativeSessionError
         state = SessionAvailability()
@@ -66,6 +96,17 @@ class SessionAvailabilityTests(unittest.TestCase):
 
 
 class SessionSchedulingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_mixed_protocol_pool_skips_incompatible_native_model_before_credits(self):
+        accounts=[token(1,auth_mode="flow"),token(2,auth_mode="labs")]
+        manager=SimpleNamespace(native_sessions=SessionAvailability(),get_active_tokens=AsyncMock(return_value=accounts),
+            needs_at_refresh=lambda value:False,ensure_valid_token=AsyncMock(side_effect=lambda value:value))
+        balancer=LoadBalancer(manager)
+        balancer._check_extension_route=AsyncMock(return_value=(True,''))
+        with patch('src.services.load_balancer.config',SimpleNamespace(captcha_method='native_cdp',call_logic_mode='random')), \
+             patch('src.services.load_balancer.local_session_state',return_value={'version':1}):
+            selected=await balancer.select_token(for_image_generation=True,model='gemini-3.0-pro-image-portrait-2k',minimum_credits=4)
+        self.assertEqual(selected.id,2)
+
     async def test_missing_snapshot_is_not_sent_to_browser_after_restart(self):
         for raw in (None, "", "[]"):
             manager = SimpleNamespace(native_sessions=SessionAvailability(), get_active_tokens=AsyncMock(return_value=[token(google_cookies=raw)]))

@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Header, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any, Literal
+from types import SimpleNamespace
 import secrets
 import time
 import re
@@ -780,6 +781,16 @@ async def change_password(
 
 # ========== Token Management ==========
 
+def _session_metadata(account):
+    if getattr(account, "auth_mode", "labs") != "flow":
+        return {}
+    state = getattr(token_manager, "native_sessions", None)
+    if state is None or not hasattr(state, "status"):
+        return {"session_status": "unknown", "session_checked_at": None,
+                "session_reason": None, "session_expires_at": None}
+    return state.status(account)
+
+
 @router.get("/api/tokens")
 async def get_tokens(token: str = Depends(verify_admin_token)):
     """Get all tokens with statistics"""
@@ -804,6 +815,7 @@ async def get_tokens(token: str = Depends(verify_admin_token)):
         "st": row.get("st"),  # Session Token for editing
         "at": row.get("at"),  # Access Token for editing (从ST转换而来)
         "auth_mode": row.get("auth_mode", "labs"),
+        **_session_metadata(SimpleNamespace(**row)),
         **flow_cookie_expiry(row.get("google_cookies") if row.get("auth_mode") == "flow" else None),
         "at_expires": to_iso(row.get("at_expires")) if row.get("at_expires") else None,  # 🆕 AT过期时间
         "at_expired": bool(normalize_dt(row.get("at_expires")) and normalize_dt(row.get("at_expires")) <= now),
@@ -1513,12 +1525,20 @@ async def get_stats(token: str = Depends(verify_admin_token)):
     queue_capacity = int(
         getattr(generation_config, "async_task_queue_capacity", 50) or 50
     )
+    accounts = await db.get_all_tokens()
+    enabled_flow = [account for account in accounts
+                    if account.is_active and getattr(account, "auth_mode", "labs") == "flow"]
+    session_counts = {}
+    for account in enabled_flow:
+        status = _session_metadata(account)["session_status"]
+        session_counts[status] = session_counts.get(status, 0) + 1
 
     return {
         **dashboard_stats,
         # Durable terminal outcomes override legacy token usage counters. This
         # excludes accepted/processing async submissions from success totals.
         **outcome_stats,
+        "native_sessions": {"enabled": len(enabled_flow), **session_counts},
         "async_task_queue": {
             **queue_stats,
             "capacity": queue_capacity,
@@ -2597,13 +2617,15 @@ async def plugin_check_tokens(request: dict, authorization: Optional[str] = Head
             needs_refresh = (not native or not token.is_active
                              or cookie_expiring
                              or not has_complete_flow_cookies(token.google_cookies)
-                             or not token_manager.native_sessions.available(token))
+                             or (not token_manager.native_sessions.available(token)
+                                 and _session_metadata(token)["session_status"] != "checking"))
         # Explicit allowlist: no credentials, proxy URLs or project data in this response.
         status = {"email": email, "is_active": bool(token.is_active),
                   "needs_refresh": bool(needs_refresh and sync_allowed), "sync_allowed": sync_allowed}
         status["auth_mode"] = getattr(token, "auth_mode", "labs")
         if status["auth_mode"] == "flow":
             status.update(flow_expiry)
+            status.update(_session_metadata(token))
         if not sync_allowed:
             status["sync_block_reason"] = "independent_login"
         statuses.append(status)

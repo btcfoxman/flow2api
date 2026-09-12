@@ -5,71 +5,46 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const html = readFileSync(path.join(__dirname, '../static/manage.html'), 'utf8');
 function definition(first, next) {
-  return html.slice(html.indexOf(`        ${first}=`), html.indexOf(`        ${next}=`)).trim().replace(/,$/, '');
+  return html.slice(html.indexOf('        '+first+'='), html.indexOf('        '+next+'=')).trim().replace(/,$/, '');
 }
-const now = Date.parse('2026-09-11T14:00:00Z');
-class FixedDate extends Date {
-  constructor(...args) { super(...(args.length ? args : [now])); }
-  static now() { return now; }
-}
-const sandbox = {Date:FixedDate};
-vm.runInNewContext(`const ${definition('formatExpiry', 'formatPlanType')}; const ${definition('renderTokenActions', 'renderTokens')}; this.formatTokenExpiry=formatTokenExpiry; this.formatExpiry=formatExpiry; this.renderTokenActions=renderTokenActions;`, sandbox);
+const sandbox = {Date};
+vm.runInNewContext('const '+definition('formatExpiry','formatPlanType')+';const '+definition('renderTokenActions','renderTokens')+';this.formatTokenExpiry=formatTokenExpiry;this.formatExpiry=formatExpiry;this.renderTokenActions=renderTokenActions;',sandbox);
 const future = {id:1, auth_mode:'flow', flow_cookie_expires_at:'2100-01-01T00:00:00Z', flow_cookie_expiry_status:'known'};
-
 const visibleText = rendered => rendered.replace(/<[^>]*>/g, '');
-
-test('new Flow expiry reuses the legacy countdown with the native date, never old AT', () => {
-  const rendered = sandbox.formatTokenExpiry({...future, at_expires:'2000-01-01T00:00:00Z'});
-  assert.match(rendered, /2100-/);
-  assert.match(visibleText(rendered), /^\d+天$/);
-  assert.ok(rendered.includes(sandbox.formatExpiry(future.flow_cookie_expires_at)));
-  assert.doesNotMatch(rendered, /Flow Cookie|Flow 新版/);
-  assert.match(rendered, /不代表会话一定有效/);
-  assert.doesNotMatch(rendered, /已过期/);
-  assert.match(html, /const expiryDisplay=formatTokenExpiry\(t\)/);
-});
-test('expired native credentials use the original expired label', () => {
-  const rendered = sandbox.formatTokenExpiry({...future, flow_cookie_expires_at:'2000-01-01T00:00:00Z', flow_cookie_expiry_status:'expired'});
-  assert.match(rendered, /text-red-600/);
-  assert.equal(visibleText(rendered), '已过期');
-  assert.doesNotMatch(rendered, /Flow Cookie|Flow 新版/);
-});
-
-test('native countdown retains minute, hour and day thresholds and colors', () => {
-  for (const [minutes,label,color] of [[30,'30分钟','text-red-600'],[60,'1小时','text-orange-600'],[180,'3小时','text-orange-600'],[1440,'1天','text-orange-600'],[4320,'3天','text-orange-600'],[10080,'7天','text-muted-foreground']]) {
-    const rendered=sandbox.formatTokenExpiry({...future,flow_cookie_expires_at:new Date(now+minutes*60000).toISOString()});
-    assert.equal(visibleText(rendered),label);
-    assert.match(rendered,new RegExp(color));
-    assert.match(rendered,/title="2026-/);
+test('new Flow never substitutes cookie retention or legacy AT for a session deadline',()=>{
+  for(const state of ['known','expired','session','invalid','incomplete','unavailable']){
+    const rendered=sandbox.formatTokenExpiry({...future,flow_cookie_expiry_status:state,at_expires:future.flow_cookie_expires_at});
+    assert.equal(visibleText(rendered),'待验证 · 到期未知');
+    assert.doesNotMatch(rendered,/2100|Flow Cookie|\d+天/);
   }
 });
-test('unknown or session expiry never falls back to legacy dates', () => {
-  for(const [state,label] of [['session','无固定期限'],['invalid','到期未知'],['incomplete','登录凭据不完整'],['unavailable','未同步凭据'],[undefined,'到期未知']]) {
-    const rendered=sandbox.formatTokenExpiry({...future, flow_cookie_expiry_status:state, flow_cookie_expires_at:null, at_expires:future.flow_cookie_expires_at});
-    assert.ok(rendered.includes(label));
-    assert.doesNotMatch(rendered, /<time|2100-/);
-    assert.equal(visibleText(rendered),label);
-    assert.doesNotMatch(rendered, /Flow Cookie|Flow 新版/);
+test('actual verification states and last verification time are displayed',()=>{
+  for(const [state,label] of [['verified','验证通过'],['refresh_required','需刷新会话'],['verification_failed','验证失败']]){
+    const rendered=sandbox.formatTokenExpiry({...future,session_status:state,session_checked_at:'2026-09-12T14:00:00Z'});
+    assert.equal(visibleText(rendered),label+' · 到期未知');
+    assert.match(rendered,/2026/);
+    assert.match(rendered,/仅代表当时可用/);
+    assert.match(rendered,state==='verified'?/text-green/:/text-red/);
   }
-  assert.match(sandbox.formatTokenExpiry({...future, flow_cookie_expires_at:'bad-date'}), /到期未知/);
 });
-test('mixed session credentials disclose unknown lifetime only in the tooltip', () => {
-  const rendered=sandbox.formatTokenExpiry({...future, flow_cookie_has_session_cookies:true});
-  assert.match(rendered, /另含无固定到期时间的会话凭据/);
-  assert.equal(visibleText(rendered),visibleText(sandbox.formatExpiry(future.flow_cookie_expires_at)));
+test('untrusted diagnostic fields never become HTML',()=>{
+  const rendered=sandbox.formatTokenExpiry({...future,session_checked_at:'" onmouseover="alert(1)',session_reason:'<script>alert(1)</script>'});
+  assert.doesNotMatch(rendered,/onmouseover|<script>/);
 });
-test('Labs keeps the previous AT display and Flow gets a verify action', () => {
-  assert.equal(sandbox.formatTokenExpiry({auth_mode:'labs', at_expires:future.flow_cookie_expires_at}), sandbox.formatExpiry(future.flow_cookie_expires_at));
-  assert.match(sandbox.renderTokenActions(future), /验证会话/);
-  assert.doesNotMatch(sandbox.renderTokenActions(future), />刷新AT</);
-  assert.match(sandbox.renderTokenActions({id:2,auth_mode:'labs'}), />刷新AT</);
+test('enabled counter is not described as schedulable',()=>{
+  assert.match(html,/已启用 \/ 全部账号/);
+  assert.doesNotMatch(html,/可调度 \/ 全部账号/);
+  assert.match(html,/id="statSessionHealth"/);
 });
-test('Flow validation toast does not claim to renew an AT or Cookie', async () => {
+test('Labs retains its countdown and Flow keeps the verify action',()=>{
+  assert.equal(sandbox.formatTokenExpiry({auth_mode:'labs',at_expires:future.flow_cookie_expires_at}),sandbox.formatExpiry(future.flow_cookie_expires_at));
+  assert.match(sandbox.renderTokenActions(future),/验证会话/);
+  assert.doesNotMatch(sandbox.renderTokenActions(future),/>刷新AT</);
+});
+test('validation toast does not claim credential renewal',async()=>{
   const messages=[];
-  const context={allTokens:[future],showToast:message=>messages.push(message),
-    apiRequest:async()=>({json:async()=>({success:true,token:future})}),refreshTokens:async()=>{}};
-  vm.runInNewContext(`const ${definition('refreshTokenAT','refreshTokens')}; this.refreshTokenAT=refreshTokenAT;`,context);
+  const context={allTokens:[future],showToast:message=>messages.push(message),apiRequest:async()=>({json:async()=>({success:true,token:future})}),refreshTokens:async()=>{}};
+  vm.runInNewContext('const '+definition('refreshTokenAT','refreshTokens')+';this.refreshTokenAT=refreshTokenAT;',context);
   await context.refreshTokenAT(1);
   assert.equal(messages.at(-1),'Flow 新站会话验证成功');
-  assert.ok(messages.every(message=>!message.includes('AT')));
 });

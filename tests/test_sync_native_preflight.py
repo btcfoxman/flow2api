@@ -17,6 +17,21 @@ def account(**changes):
 
 
 class NativeSyncPreflightTests(unittest.IsolatedAsyncioTestCase):
+    async def test_account_probe_failure_records_safe_diagnostics_and_releases_lock(self):
+        worker=NativeCdpAccountBrowser(52,None)
+        worker._flow_account_snapshot_locked=AsyncMock(side_effect=NativeSessionError('project_context_unavailable',
+            protocol='angular',page_url='https://flow.google.com/about?secret=hidden'))
+        with patch('src.services.browser_captcha_native_cdp.debug_logger.log_runtime_event') as event:
+            with self.assertRaises(NativeSessionError):
+                await worker.flow_account_snapshot('test@example.com')
+        self.assertEqual(worker.last_error,'project_context_unavailable')
+        self.assertNotIn('secret',str(event.call_args))
+        self.assertEqual(event.call_args.kwargs['page_path'],'/about')
+        self.assertFalse(worker.solve_lock.locked())
+        worker._flow_account_snapshot_locked=AsyncMock(return_value={'email':'test@example.com'})
+        await worker.flow_account_snapshot('test@example.com')
+        self.assertIsNone(worker.last_error)
+
     async def test_slow_resource_does_not_reject_an_authenticated_exact_project(self):
         worker=NativeCdpAccountBrowser(52,None)
         worker.connection=SimpleNamespace(send=AsyncMock(return_value={}))

@@ -36,6 +36,7 @@ class QuotaAccountSwitchingTests(unittest.IsolatedAsyncioTestCase):
             for token_id in token_ids
         ]
         selection_exclusions = []
+        handler.db = SimpleNamespace(get_active_tokens=AsyncMock(return_value=tokens))
 
         async def select_token(**kwargs):
             excluded = set(kwargs.get("exclude_token_ids") or ())

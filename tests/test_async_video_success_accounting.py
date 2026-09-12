@@ -8,6 +8,7 @@ from src.services.generation_handler import GenerationHandler
 class AsyncVideoSuccessAccountingTests(unittest.IsolatedAsyncioTestCase):
     async def test_accepted_async_submission_is_not_counted_as_completed(self):
         handler = GenerationHandler.__new__(GenerationHandler)
+        handler.db = SimpleNamespace(get_active_tokens=AsyncMock(return_value=[]))
         handler._background_tasks = set()
         handler.flow_client = SimpleNamespace(
             clear_request_fingerprint=MagicMock(),

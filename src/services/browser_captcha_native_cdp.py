@@ -1030,31 +1030,45 @@ class NativeCdpAccountBrowser:
     async def flow_account_snapshot(self, expected_email: str = "") -> Dict[str, Any]:
         """Read identity, credits and existing projects in one authenticated Flow page."""
         async with self.solve_lock:
-            await self._prepare_profile(for_solve=False)
-            _, session_id = await self._get_or_create_project_session("", "angular")
             try:
-                identity = await self._evaluate(session_id, FLOW_IDENTITY_EXPRESSION)
-                email = verified_flow_email(identity, expected_email)
-            except AngularProtocolError as exc:
-                reason = "flow_identity_mismatch" if "mismatch" in str(exc) else "flow_identity_unavailable"
-                raise NativeSessionError(reason, protocol="angular", stage="account_identity") from None
-            async def rpc(rpc_id, payload):
-                result = await self._evaluate(session_id, rpc_fetch_expression(rpc_id, payload, 20),
-                                              await_promise=True, timeout=25)
-                if not isinstance(result, dict) or result.get("status") != 200:
-                    raise NativeSessionError("flow_account_probe_failed", protocol="angular", stage="account_verification")
-                return parse_rpc_response(result.get("text", ""), rpc_id)
-            credits = flow_credits(await rpc("nzlxg", []))
-            projects = flow_projects(await rpc("UpteDb", ["projects/*", 21, None, None, None, None, [1]]))
-            # Recheck identity after the requests (account switch/navigation races).
-            verified_flow_email(await self._evaluate(session_id, FLOW_IDENTITY_EXPRESSION), email)
-            jar = await self.connection.send("Network.getCookies", {"urls": [
-                "https://google.com/", "http://google.com/", "https://flow.google.com/",
-                "https://accounts.google.com/", "https://www.google.com/"]}, session_id=session_id, timeout=5)
-            cookies = normalize_google_cookies(jar.get("cookies", []))
-            if not has_complete_flow_cookies(cookies):
-                raise NativeSessionError("google_session_cookies_incomplete", protocol="angular")
-            return {"email": email, **credits, "projects": projects, "google_cookies": cookies}
+                result = await self._flow_account_snapshot_locked(expected_email)
+                self.last_error = None
+                return result
+            except Exception as exc:
+                # Keep diagnostics even when periodic credit probing runs with
+                # debug logging disabled. Never store page contents or credentials.
+                self.last_error = exc.reason if isinstance(exc, NativeSessionError) else type(exc).__name__
+                debug_logger.log_runtime_event("native_account_probe_failed", token_id=self.token_id,
+                    **(exc.diagnostic() if isinstance(exc, NativeSessionError) else
+                       {"stage": "account_verification", "reason": "verification_unavailable"}))
+                raise
+
+    async def _flow_account_snapshot_locked(self, expected_email: str) -> Dict[str, Any]:
+        await self._prepare_profile(for_solve=False)
+        _, session_id = await self._get_or_create_project_session("", "angular")
+        try:
+            identity = await self._evaluate(session_id, FLOW_IDENTITY_EXPRESSION)
+            email = verified_flow_email(identity, expected_email)
+        except AngularProtocolError as exc:
+            reason = "flow_identity_mismatch" if "mismatch" in str(exc) else "flow_identity_unavailable"
+            raise NativeSessionError(reason, protocol="angular", stage="account_identity") from None
+        async def rpc(rpc_id, payload):
+            result = await self._evaluate(session_id, rpc_fetch_expression(rpc_id, payload, 20),
+                                          await_promise=True, timeout=25)
+            if not isinstance(result, dict) or result.get("status") != 200:
+                raise NativeSessionError("flow_account_probe_failed", protocol="angular", stage="account_verification")
+            return parse_rpc_response(result.get("text", ""), rpc_id)
+        credits = flow_credits(await rpc("nzlxg", []))
+        projects = flow_projects(await rpc("UpteDb", ["projects/*", 21, None, None, None, None, [1]]))
+        # Recheck identity after the requests (account switch/navigation races).
+        verified_flow_email(await self._evaluate(session_id, FLOW_IDENTITY_EXPRESSION), email)
+        jar = await self.connection.send("Network.getCookies", {"urls": [
+            "https://google.com/", "http://google.com/", "https://flow.google.com/",
+            "https://accounts.google.com/", "https://www.google.com/"]}, session_id=session_id, timeout=5)
+        cookies = normalize_google_cookies(jar.get("cookies", []))
+        if not has_complete_flow_cookies(cookies):
+            raise NativeSessionError("google_session_cookies_incomplete", protocol="angular")
+        return {"email": email, **credits, "projects": projects, "google_cookies": cookies}
 
     async def _discard_project_session(self, project_id: Optional[str], page_protocol: str = "labs") -> None:
         if page_protocol == "labs" and self._legacy_migrated:

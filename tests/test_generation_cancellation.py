@@ -9,6 +9,7 @@ from src.services.generation_handler import GenerationHandler
 class GenerationCancellationTests(unittest.IsolatedAsyncioTestCase):
     async def test_cancelled_image_request_is_finalized_instead_of_left_processing(self):
         handler = GenerationHandler.__new__(GenerationHandler)
+        handler.db = SimpleNamespace(get_active_tokens=AsyncMock(return_value=[]))
         handler._background_tasks = set()
         handler.flow_client = SimpleNamespace(
             clear_request_fingerprint=MagicMock(),

@@ -15,6 +15,7 @@ TRAFFIC_ERROR = (
 class TrafficAccountSwitchingTests(unittest.IsolatedAsyncioTestCase):
     def _make_handler(self, *, failing_token_ids, token_ids=(1, 2, 3)):
         handler = GenerationHandler.__new__(GenerationHandler)
+        handler.db = SimpleNamespace(get_active_tokens=AsyncMock(return_value=[]))
         handler._background_tasks = set()
         handler.flow_client = SimpleNamespace(
             clear_request_fingerprint=MagicMock(),
