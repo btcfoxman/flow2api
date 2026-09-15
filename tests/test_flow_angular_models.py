@@ -123,7 +123,7 @@ class AngularModelTests(unittest.TestCase):
 
     def test_unknown_models_and_other_families_are_not_enrolled_by_prefix(self):
         for model in [None, "abra_r2v_5s", "abra_r2v_10s_1080p", "abra_edit_4k",
-                      "abra_t2v_4s", "abra_i2v_4s_360p", "omni_flash_i2v_4s_first_last", "abra_edit_future"]:
+                      "abra_t2v_5s", "abra_i2v_4s_360p", "omni_flash_i2v_4s_first_last", "abra_edit_future"]:
             with self.subTest(model=model):
                 self.assertIsNone(resolve_video_model(model))
                 self.assertFalse(use_angular_video(model, families=["abra_r2v", "abra_edit", "abra"]))

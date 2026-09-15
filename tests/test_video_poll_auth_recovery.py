@@ -52,6 +52,20 @@ class VideoPollAuthRecoveryTests(unittest.IsolatedAsyncioTestCase):
         handler._get_base_url = lambda _: 'http://localhost'
         return handler
 
+    async def test_protocol_poll_failure_does_not_become_account_failure(self):
+        from src.services.flow_angular import AngularProtocolError
+        handler = self.handler()
+        handler.flow_client.check_video_status.side_effect = AngularProtocolError("Unknown media schema")
+        result = {}
+        with patch.dict(config._config, {'flow': {**config._config['flow'], 'max_poll_attempts': 10, 'poll_interval': 1}}), \
+             patch('src.services.generation_handler.asyncio.sleep', AsyncMock()):
+            _ = [chunk async for chunk in handler._poll_video_result(
+                SimpleNamespace(id=7, at='old', st='old'), 'project', [{'operation': {'name': 'task'}}],
+                False, generation_result=result)]
+        self.assertTrue(result['account_error_exempt'])
+        self.assertFalse(result['success'])
+        handler._fail_video_task.assert_awaited_once()
+
     async def test_same_account_refresh_recovers_after_more_than_three_401s(self):
         handler = self.handler()
         handler.flow_client.check_video_status.side_effect = [NativeSessionError('upstream_authentication_rejected')] * 3 + [

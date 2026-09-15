@@ -36,6 +36,8 @@ class TokenManager:
         self._periodic_credits_refresh_task: Optional[asyncio.Task] = None
         self.native_sessions = SessionAvailability()
         self._flow_verified = {}
+        self._flow_account_reads: dict[tuple[int, bytes], asyncio.Task] = {}
+        self._flow_account_waiters: dict[asyncio.Task, int] = {}
         self._flow_sync_lock = asyncio.Lock()
 
     @staticmethod
@@ -47,6 +49,33 @@ class TokenManager:
         return revision == self.native_sessions._revision(token) and time.monotonic() - checked < 60
 
     async def _read_flow_account(self, token):
+        """Share only in-flight probes of the same account/credential revision.
+
+        One cancelled caller must not cancel another caller's verification. The
+        last departing caller still cancels and awaits browser work, so timeouts
+        and shutdown cannot leave detached probes running.
+        """
+        key = (token.id, self.native_sessions._revision(token))
+        task = self._flow_account_reads.get(key)
+        if task is None or task.done():
+            task = asyncio.create_task(self._read_flow_account_once(token))
+            self._flow_account_reads[key] = task
+        self._flow_account_waiters[task] = self._flow_account_waiters.get(task, 0) + 1
+        try:
+            return await asyncio.shield(task)
+        finally:
+            remaining = self._flow_account_waiters[task] - 1
+            if remaining:
+                self._flow_account_waiters[task] = remaining
+            else:
+                self._flow_account_waiters.pop(task, None)
+                if self._flow_account_reads.get(key) is task:
+                    self._flow_account_reads.pop(key, None)
+                if not task.done():
+                    task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    async def _read_flow_account_once(self, token):
         from .browser_captcha_native_cdp import BrowserCaptchaService
         if config.captcha_method != "native_cdp":
             raise ValueError("Flow session accounts require native_cdp")
@@ -289,6 +318,12 @@ class TokenManager:
         await self.db.delete_token(token_id)
         self.native_sessions.discard(token_id)
         self._flow_verified.pop(token_id, None)
+
+        probes = [task for key, task in self._flow_account_reads.items() if key[0] == token_id]
+        for task in probes:
+            task.cancel()
+        if probes:
+            await asyncio.gather(*probes, return_exceptions=True)
 
         refresh_task = self._refresh_futures.pop(token_id, None)
         if refresh_task and not refresh_task.done():
@@ -573,12 +608,27 @@ class TokenManager:
                 return token
             lock = await self._get_token_lock(self._refresh_locks, self._refresh_lock_guard, token.id)
             async with lock:
+                # Another scheduler/probe may have rejected or replaced this
+                # session while we waited. Never re-probe a stale candidate.
+                current = await self.db.get_token(token.id)
+                if (current is None or not current.is_active
+                        or self.native_sessions._revision(current) != self.native_sessions._revision(token)
+                        or not self.native_sessions.available(current)):
+                    return None
+                token = current
                 try:
                     if not self._flow_verification_fresh(token):
                         await self._read_flow_account(token)
-                    return await self.db.get_token(token.id)
+                    current = await self.db.get_token(token.id)
+                    if (current is not None and current.is_active
+                            and self.native_sessions._revision(current) == self.native_sessions._revision(token)
+                            and self.native_sessions.available(current)):
+                        return current
+                    return None
                 except Exception as exc:
-                    self.native_sessions.reject(token, exc)
+                    current = await self.db.get_token(token.id)
+                    if current is not None and self.native_sessions._revision(current) == self.native_sessions._revision(token):
+                        self.native_sessions.reject(token, exc)
                     debug_logger.log_runtime_event("flow_session_unavailable", token_id=token.id,
                                                    stage="account_verification", reason=getattr(exc, "reason", "verification_unavailable"))
                     return None
@@ -1054,16 +1104,33 @@ class TokenManager:
             refresh_concurrency = 3
 
         async with self._credits_refresh_round_lock:
-            tokens = [
+            active_tokens = [
                 token
                 for token in await self.get_active_tokens()
                 if token.id is not None
             ]
+            # Confirmed rejected imported sessions need a source sync, not a
+            # new Chromium every balance-poll round. Manual refresh is unchanged;
+            # changed credentials and locally-owned retry windows remain eligible.
+            def skip_session(token):
+                return (self.uses_flow_session(token)
+                        and not self.native_sessions.available(token)
+                        and self.native_sessions.status(token)["session_status"] in {"refresh_required", "checking"})
+
+            tokens = self.native_sessions.prioritize_preflight([
+                token for token in active_tokens if not skip_session(token)
+            ])
+            skipped = len(active_tokens) - len(tokens)
             semaphore = asyncio.Semaphore(refresh_concurrency)
 
-            async def refresh_one(token_id: int) -> bool:
+            async def refresh_one(token_id: int) -> Optional[bool]:
                 async with semaphore:
                     try:
+                        # Eligibility can change while waiting behind other
+                        # browser probes. Re-read both credentials and status.
+                        token = await self.db.get_token(token_id)
+                        if token is None or not token.is_active or skip_session(token):
+                            return None
                         success, _ = await self._refresh_credits_with_status(token_id)
                         return success
                     except asyncio.CancelledError:
@@ -1084,16 +1151,18 @@ class TokenManager:
             results = await asyncio.gather(
                 *(refresh_one(int(token.id)) for token in tokens)
             )
-            succeeded = sum(1 for result in results if result)
+            succeeded = sum(1 for result in results if result is True)
+            skipped += sum(1 for result in results if result is None)
             summary = {
-                "total": len(tokens),
+                "total": len(active_tokens),
                 "succeeded": succeeded,
-                "failed": len(tokens) - succeeded,
+                "failed": sum(1 for result in results if result is False),
+                "skipped": skipped,
             }
             debug_logger.log_info(
                 "[CREDITS] Periodic active-token refresh completed: "
                 f"total={summary['total']}, succeeded={summary['succeeded']}, "
-                f"failed={summary['failed']}"
+                f"failed={summary['failed']}, skipped={summary['skipped']}"
             )
             return summary
 

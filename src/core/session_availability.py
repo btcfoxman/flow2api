@@ -92,3 +92,27 @@ class SessionAvailability:
     def discard(self, token_id):
         self._blocked.pop(int(token_id), None)
         self._observations.pop(int(token_id), None)
+
+    def prioritize_preflight(self, tokens):
+        """Use recency only as a cold-start probe hint, never as authentication.
+
+        Reorder unknown Flow slots only: observed sessions and legacy accounts
+        retain their position, preserving normal warm-state scheduling fairness.
+        """
+        result = list(tokens)
+        positions = [i for i, token in enumerate(result)
+                     if getattr(token, "auth_mode", "labs") == "flow"
+                     and self.status(token)["session_status"] == "unknown"]
+
+        def priority(token):
+            used = getattr(token, "last_used_at", None)
+            if not isinstance(used, datetime):
+                return (1, 0)
+            if used.tzinfo is None:
+                used = used.replace(tzinfo=timezone.utc)
+            return (0, -used.timestamp())
+
+        ordered = sorted((result[i] for i in positions), key=priority)
+        for index, token in zip(positions, ordered):
+            result[index] = token
+        return result

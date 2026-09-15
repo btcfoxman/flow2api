@@ -2,6 +2,8 @@ version: '3.8'
 
 services:
   flow2api:
+    init: true
+    stop_grace_period: "120s"
     image: ${IMAGE_REGISTRY:-ghcr.io}/${IMAGE_NAMESPACE:-btcfoxman}/${IMAGE_REPOSITORY:-flow2api}:${IMAGE_TAG:-latest}
     container_name: ${FLOW2API_CONTAINER_NAME:-flow2api}
     env_file:

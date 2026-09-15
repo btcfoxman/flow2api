@@ -121,8 +121,9 @@ jobs:
           cat > docker-compose.pre-headed.yml <<'YAML'
           services:
             flow2api:
+              init: true
               shm_size: "2gb"
-              stop_grace_period: "60s"
+              stop_grace_period: "120s"
               environment:
                 DISPLAY: ":99"
                 ALLOW_DOCKER_HEADED_CAPTCHA: "true"
@@ -160,6 +161,9 @@ jobs:
         run: |
           set -euo pipefail
           cd "$DEPLOY_DIR"
+
+          # Chromium descendants must be reaped by init, not the Python API.
+          test "$(docker inspect --format='{{.HostConfig.Init}}' flow2api)" = "true"
 
           for i in $(seq 1 30); do
             status="$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' flow2api 2>/dev/null || true)"

@@ -102,6 +102,25 @@ class QuotaAccountSwitchingTests(unittest.IsolatedAsyncioTestCase):
             )
         ]
 
+    async def test_uncertain_launch_does_not_penalize_or_switch_account(self):
+        from src.services.flow_angular import AngularSubmissionUncertain
+        handler, _, exclusions = self._make_handler(quota_token_ids=set())
+
+        async def uncertain(*args, **kwargs):
+            raise AngularSubmissionUncertain("Flow launch response is unrecognized; automatic resubmission is disabled",
+                                             diagnostics={"parse_reason": "payload_not_string"})
+            yield  # async generator interface
+
+        handler._handle_video_generation = uncertain
+        chunks = await self._collect(handler)
+        handler.token_manager.record_error.assert_not_awaited()
+        handler.token_manager.record_usage.assert_not_awaited()
+        handler.token_manager.mark_quota_exhausted.assert_not_awaited()
+        handler.load_balancer.release_pending.assert_awaited_once()
+        self.assertEqual(exclusions, [set()])
+        self.assertEqual(json.loads(chunks[-1])["error"]["status_code"], 500)
+        self.assertEqual(handler._log_request.await_args.args[3]["rpc_diagnostic"]["parse_reason"], "payload_not_string")
+
     async def test_switches_twice_then_submits_with_third_account(self):
         handler, attempted, exclusions = self._make_handler(
             quota_token_ids={1, 2},

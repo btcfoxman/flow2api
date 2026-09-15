@@ -21,7 +21,7 @@ from ..core.async_queue import AsyncQueueExpired, admit_queued_video_submission
 from ..core.credits import is_quota_exhausted_error, normalize_credits_response
 from ..core.media_errors import is_media_policy_error, is_media_traffic_error
 from .browser_cookie_utils import serialize_cookie_header
-from .flow_angular import (AngularProtocolError, AngularSubmissionUncertain, build_video_rpc,
+from .flow_angular import (AngularProtocolError, AngularSubmissionUncertain, AngularRpcRejected, build_video_rpc,
                           use_angular_video, video_operations, build_image_rpc, image_result, FLOW_RPC_URL,
                           build_create_project_rpc, created_project, build_image_upload_rpc, uploaded_image_id)
 
@@ -659,8 +659,12 @@ class FlowClient:
                     )
                     try:
                         return video_operations(response["rpc_payload"], token_id=int(native_token_id), project_id=project_id)
-                    except AngularProtocolError:
-                        raise AngularSubmissionUncertain("Flow launch media is unrecognized; automatic resubmission is disabled") from None
+                    except AngularProtocolError as exc:
+                        debug_logger.log_runtime_event("native_media_response_unrecognized", token_id=int(native_token_id),
+                            stage="video_submit", protocol="angular", rpc_id=rpc_id,
+                            reason="media_payload_unrecognized", **exc.diagnostics)
+                        raise AngularSubmissionUncertain("Flow launch media is unrecognized; automatic resubmission is disabled",
+                                                         diagnostics=exc.diagnostics) from None
                 return await asyncio.wait_for(
                     service.fetch_json(
                         token_id=int(native_token_id),
@@ -3703,7 +3707,7 @@ class FlowClient:
     ) -> bool:
         """统一处理生成链路的重试判定与打码自愈通知。"""
         error_str = str(error)
-        if isinstance(error, (AngularSubmissionUncertain, AsyncQueueExpired)) or is_native_session_error(error):
+        if isinstance(error, (AngularSubmissionUncertain, AngularRpcRejected, AsyncQueueExpired)) or is_native_session_error(error):
             return False
         if is_media_traffic_error(error_str):
             if str(getattr(config, "captcha_method", "") or "").strip().lower() == "native_cdp":

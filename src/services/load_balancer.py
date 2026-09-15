@@ -496,8 +496,13 @@ class LoadBalancer:
 
         ready_candidates = [item for item in available_tokens if not item["needs_refresh"]]
         refresh_candidates = [item for item in available_tokens if item["needs_refresh"]]
-        if ready_candidates and refresh_candidates:
-            available_tokens = ready_candidates + refresh_candidates
+        sessions = getattr(self.token_manager, "native_sessions", None)
+        if sessions is not None and refresh_candidates:
+            by_id = {item["token"].id: item for item in refresh_candidates}
+            refresh_candidates = [by_id[token.id] for token in sessions.prioritize_preflight(
+                [item["token"] for item in refresh_candidates]
+            )]
+        available_tokens = ready_candidates + refresh_candidates
 
         debug_logger.log_info("[LOAD_BALANCER] 候选Token负载:")
         for item in available_tokens:

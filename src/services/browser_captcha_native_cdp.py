@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import time
 import tempfile
+from collections import deque
 from types import SimpleNamespace
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -26,9 +27,10 @@ from ..core.generation_errors import NativeSessionError
 from ..core.native_session_state import local_session_state, validate_local_session_proxy
 from ..core.browser_profile import configure_web_only_profile
 from ..core.media_errors import is_media_traffic_error
-from .flow_angular import (AngularProtocolError, AngularSubmissionUncertain, parse_rpc_response,
+from .flow_angular import (AngularProtocolError, AngularSubmissionUncertain, AngularRpcRejected, parse_rpc_response,
                           rpc_fetch_expression, FLOW_IDENTITY_EXPRESSION, verified_flow_email,
-                          flow_credits, flow_projects, MUTATING_RPC_IDS, RPC_IDS, FLOW_RPC_URL)
+                          flow_credits, flow_projects, MUTATING_RPC_IDS, RPC_IDS, FLOW_RPC_URL,
+                          GENERATION_RPC_IDS)
 
 
 FLOW_PROJECT_BASE_URL = "https://labs.google/fx/zh/tools/flow"
@@ -423,6 +425,7 @@ class NativeCdpAccountBrowser:
         self.db = db
         self.profile_dir = _profile_root() / f"token-{self.token_id}"
         self.process: Optional[subprocess.Popen] = None
+        self._stop_task: Optional[asyncio.Task] = None
         self.connection: Optional[CdpConnection] = None
         self.proxy_binding: Optional[ProxyBinding] = None
         self.proxy_extension_dir: Optional[Path] = None
@@ -582,6 +585,8 @@ class NativeCdpAccountBrowser:
         raise TimeoutError("timed out waiting for Chromium DevToolsActivePort")
 
     async def start(self) -> None:
+        if self._stop_task is not None:
+            await self.stop(reason="await_previous_shutdown")
         proxy_binding = await self._resolve_proxy()
         validate_local_session_proxy(local_session_state(self.token_id, self.profile_dir), proxy_binding.url)
         if self.is_running and self.proxy_binding and self.proxy_binding.signature == proxy_binding.signature:
@@ -664,59 +669,90 @@ class NativeCdpAccountBrowser:
         creation_flags = 0
         if os.name == "nt":
             creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        self.process = subprocess.Popen(
-            args,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=creation_flags,
-        )
         try:
+            self.process = subprocess.Popen(
+                args,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=creation_flags,
+            )
             websocket_url = await self._wait_for_devtools_endpoint()
             connection = CdpConnection(websocket_url)
+            # Own the partially connected socket too, so startup failure/cancel
+            # cannot orphan its reader or the Chromium process.
+            self.connection = connection
             await connection.connect()
             await connection.send("Target.setDiscoverTargets", {"discover": True})
-            self.connection = connection
             self.proxy_binding = proxy_binding
             self.last_started_at = time.monotonic()
             self.last_error = None
-        except Exception:
+        except BaseException:
             await self.stop(reason="startup_failed")
             raise
 
     async def stop(self, *, reason: str) -> None:
+        # Shutdown may race with cancellation of the idle reaper or an account
+        # probe. Share and finish the cleanup before propagating cancellation.
+        task = self._stop_task
+        if task is None:
+            task = asyncio.create_task(self._stop_resources(reason=reason))
+            self._stop_task = task
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await asyncio.shield(task)
+            raise
+        finally:
+            if task.done() and self._stop_task is task:
+                self._stop_task = None
+
+    async def _stop_resources(self, *, reason: str) -> None:
         connection = self.connection
         process = self.process
+        proxy_extension_dir = self.proxy_extension_dir
         self.connection = None
         self.process = None
+        self.proxy_extension_dir = None
         self._project_sessions.clear()
         self._session_auth_signatures.clear()
         self._video_submit_reservations.clear()
-        if connection:
-            try:
-                await connection.send("Browser.close", timeout=3)
-            except Exception:
-                pass
-            await connection.close()
-        if process and process.poll() is None:
-            try:
-                # Browser.close starts asynchronous shutdown. Give Chromium time
-                # to flush Cookies/session state before escalating to OS signals.
-                # Use Popen's bounded wait so timeout leaves no waiting thread.
-                await asyncio.to_thread(process.wait, timeout=8)
-            except subprocess.TimeoutExpired:
-                process.terminate()
+        try:
+            if connection:
                 try:
-                    await asyncio.to_thread(process.wait, timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    await asyncio.to_thread(process.wait, timeout=3)
-                debug_logger.log_runtime_event(
-                    "native_browser_forced_shutdown", token_id=self.token_id,
-                    stage="browser_shutdown", reason="graceful_shutdown_timeout",
-                )
-        if self.proxy_extension_dir and self.proxy_extension_dir.exists():
-            shutil.rmtree(self.proxy_extension_dir, ignore_errors=True)
-        self.proxy_extension_dir = None
+                    await connection.send("Browser.close", timeout=3)
+                except Exception:
+                    pass
+                try:
+                    await connection.close()
+                except Exception:
+                    pass
+        finally:
+            try:
+                if process and process.poll() is None:
+                    try:
+                        # Allow credential stores to flush. Init reaps orphaned
+                        # descendants; do not steal unrelated Popen wait statuses.
+                        await asyncio.to_thread(process.wait, timeout=8)
+                    except subprocess.TimeoutExpired:
+                        try:
+                            process.terminate()
+                        except ProcessLookupError:
+                            pass
+                        try:
+                            await asyncio.to_thread(process.wait, timeout=5)
+                        except subprocess.TimeoutExpired:
+                            try:
+                                process.kill()
+                            except ProcessLookupError:
+                                pass
+                            await asyncio.to_thread(process.wait, timeout=3)
+                        debug_logger.log_runtime_event(
+                            "native_browser_forced_shutdown", token_id=self.token_id,
+                            stage="browser_shutdown", reason="graceful_shutdown_timeout",
+                        )
+            finally:
+                if proxy_extension_dir and proxy_extension_dir.exists():
+                    shutil.rmtree(proxy_extension_dir, ignore_errors=True)
         debug_logger.log_info(
             f"[NativeCDP] stopped token={self.token_id}, reason={reason}, profile_preserved=true"
         )
@@ -1237,6 +1273,7 @@ class NativeCdpAccountBrowser:
             rpc_id = (json_data or {}).get("rpc_id") if url == FLOW_RPC_URL else None
             rpc_status = None
             rpc_failure_reason = "rpc_preflight_failed"
+            rpc_diagnostics = {}
             rpc_started = time.monotonic()
             try:
                 await self._prepare_profile(for_solve=False)
@@ -1275,9 +1312,18 @@ class NativeCdpAccountBrowser:
                             self.last_error = None
                             self.last_upstream_error = None
                             return {"rpc_payload": parsed}
-                        except AngularProtocolError:
+                        except AngularRpcRejected as exc:
+                            rpc_failure_reason = "rpc_rejected"
+                            rpc_diagnostics = exc.diagnostics
+                            if exc.grpc_code == 16:
+                                raise NativeSessionError("upstream_authentication_rejected", protocol="angular",
+                                                         stage="upstream_authentication") from None
+                            raise
+                        except AngularProtocolError as exc:
+                            rpc_diagnostics = exc.diagnostics
                             if is_submit:
-                                raise AngularSubmissionUncertain("Flow launch response is unrecognized; automatic resubmission is disabled") from None
+                                raise AngularSubmissionUncertain("Flow launch response is unrecognized; automatic resubmission is disabled",
+                                                                 diagnostics=rpc_diagnostics) from None
                             raise
                     except (asyncio.TimeoutError, CdpProtocolError, ConnectionError) as exc:
                         rpc_failure_reason = "rpc_cdp_timeout" if isinstance(exc, asyncio.TimeoutError) else "rpc_cdp_interrupted"
@@ -1366,7 +1412,7 @@ class NativeCdpAccountBrowser:
                     debug_logger.log_runtime_event("native_rpc_failed", token_id=self.token_id,
                         stage="rpc_request", protocol="angular", rpc_id=rpc_id if rpc_id in RPC_IDS else "unsupported",
                         reason=rpc_failure_reason, status_code=rpc_status,
-                        duration_ms=int((time.monotonic() - rpc_started) * 1000))
+                        duration_ms=int((time.monotonic() - rpc_started) * 1000), **rpc_diagnostics)
                 if isinstance(exc, NativeSessionError):
                     debug_logger.log_runtime_event("native_preflight_failed", token_id=self.token_id, **exc.diagnostic())
                 if _is_recaptcha_profile_risk_error(exc):
@@ -1505,6 +1551,7 @@ class BrowserCaptchaService:
         self._risk_history_lock = asyncio.Lock()
         self._capacity_lock = asyncio.Lock()
         self._capacity_condition = asyncio.Condition()
+        self._capacity_waiters = deque()
         self._queued = 0
         self._closed = False
         self._reaper_task = asyncio.create_task(self._idle_reaper())
@@ -1794,23 +1841,37 @@ class BrowserCaptchaService:
         return [worker for worker in self._workers.values() if worker.is_running]
 
     async def _ensure_capacity(self, worker: NativeCdpAccountBrowser) -> None:
+        if worker.is_running:
+            return
+        # Reserve a turn before awaiting the capacity lock. Without admission
+        # order, each new background probe can evict an idle browser ahead of a
+        # generation that has already been waiting for capacity for minutes.
+        ticket = object()
+        self._capacity_waiters.append(ticket)
         queued = False
         try:
             while not worker.is_running:
+                if self._closed:
+                    raise RuntimeError("native_cdp service is closed")
                 async with self._capacity_lock:
-                    running = self._running_workers()
-                    if len(running) < self._browser_limit():
-                        await worker.start()
+                    if self._closed:
+                        raise RuntimeError("native_cdp service is closed")
+                    if worker.is_running:
                         return
-                    idle_candidates = [
-                        candidate
-                        for candidate in running
-                        if candidate.token_id != worker.token_id and not candidate.is_busy
-                    ]
-                    if idle_candidates:
-                        victim = min(idle_candidates, key=lambda item: item.last_used_at)
-                        await victim.stop(reason=f"capacity_for_token_{worker.token_id}")
-                        continue
+                    if self._capacity_waiters[0] is ticket:
+                        running = self._running_workers()
+                        if len(running) < self._browser_limit():
+                            await worker.start()
+                            return
+                        idle_candidates = [
+                            candidate
+                            for candidate in running
+                            if candidate.token_id != worker.token_id and not candidate.is_busy
+                        ]
+                        if idle_candidates:
+                            victim = min(idle_candidates, key=lambda item: item.last_used_at)
+                            await victim.stop(reason=f"capacity_for_token_{worker.token_id}")
+                            continue
                 if not queued:
                     queued = True
                     self._queued += 1
@@ -1824,8 +1885,11 @@ class BrowserCaptchaService:
                     except asyncio.TimeoutError:
                         pass
         finally:
+            self._capacity_waiters.remove(ticket)
             if queued:
                 self._queued = max(0, self._queued - 1)
+            async with self._capacity_condition:
+                self._capacity_condition.notify_all()
 
     async def verify_session(self, token_id: int, project_id: str) -> None:
         """Use the production profile and proxy without solving or generating."""
@@ -1947,7 +2011,7 @@ class BrowserCaptchaService:
         if consume_video_reservation:
             worker.consume_video_submit_reservation()
         tracks_proxy_risk = consume_video_reservation or (
-            url == FLOW_RPC_URL and (json_data or {}).get("rpc_id") in {"MZZa6b", "jIps6", "ogiZ0b"}
+            url == FLOW_RPC_URL and (json_data or {}).get("rpc_id") in GENERATION_RPC_IDS
         )
         try:
             await self._ensure_capacity(worker)

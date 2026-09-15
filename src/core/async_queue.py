@@ -23,6 +23,11 @@ def normalize_queue_timeout(value) -> int:
 
 
 _submission_guard = ContextVar("async_queue_submission_guard", default=None)
+_queued_task_id = ContextVar("async_queue_task_id", default=None)
+
+
+def queued_task_id():
+    return _queued_task_id.get()
 
 
 @dataclass
@@ -32,12 +37,14 @@ class _SubmissionGuard:
 
 
 @contextmanager
-def queue_submission_guard(guard):
+def queue_submission_guard(guard, *, task_id=None):
     token = _submission_guard.set(_SubmissionGuard(guard))
+    task_token = _queued_task_id.set(task_id)
     try:
         yield
     finally:
         _submission_guard.reset(token)
+        _queued_task_id.reset(task_token)
 
 
 async def admit_queued_video_submission():

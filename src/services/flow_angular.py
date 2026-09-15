@@ -9,18 +9,46 @@ import json
 import re
 import uuid
 from urllib.parse import quote, urlsplit, parse_qsl
+from .flow_rpc_errors import decode_rpc_status, POLICY_ERRORS, TRAFFIC_ERRORS
 
 
 class AngularProtocolError(RuntimeError):
-    pass
+    def __init__(self, message, *, diagnostics=None):
+        super().__init__(message)
+        self.diagnostics = dict(diagnostics or {})
 
 
 class AngularSubmissionUncertain(AngularProtocolError):
     """A launch may exist upstream; do not retry or switch transports."""
 
 
-RPC_IDS = {"MZZa6b", "jIps6", "ogiZ0b", "jwpduf", "as29s", "ngNC2", "UpteDb", "nzlxg", "jHPbke", "maseQ"}
-MUTATING_RPC_IDS = {"MZZa6b", "jIps6", "ogiZ0b", "jHPbke", "maseQ"}
+class AngularRpcRejected(AngularProtocolError):
+    """One unambiguous RPC error frame with a definitive rejection status."""
+
+    def __init__(self, diagnostic):
+        self.grpc_code = diagnostic['grpc_code']
+        self.public_error = diagnostic.get('public_error')
+        self.status_code = {3: 400, 5: 404, 7: 403, 8: 429, 9: 400, 11: 400, 12: 501, 16: 401}[self.grpc_code]
+        if self.public_error in POLICY_ERRORS:
+            self.status_code = 400
+        elif self.public_error in TRAFFIC_ERRORS:
+            self.status_code = 429
+        elif self.public_error == 'PUBLIC_ERROR_USER_QUOTA_REACHED':
+            self.status_code = 503
+        elif self.public_error in {'PUBLIC_ERROR_PER_MODEL_DAILY_QUOTA_REACHED',
+                                   'PUBLIC_ERROR_PER_MODEL_DAILY_QUOTA_REACHED_UPGRADEABLE',
+                                   'PUBLIC_ERROR_MODEL_ACCESS_DENIED'}:
+            # A per-model limit must not quarantine every model on this proxy,
+            # nor overwrite the account's remaining credits with zero.
+            self.status_code = 403
+        super().__init__(f"Flow RPC rejected: HTTP Error {self.status_code}; "
+                         f"{self.public_error or 'RPC_REJECTED'}", diagnostics=diagnostic)
+
+
+VIDEO_GENERATION_RPC_IDS = frozenset({"YhhmEf", "MZZa6b", "jIps6"})
+GENERATION_RPC_IDS = VIDEO_GENERATION_RPC_IDS | {"ogiZ0b"}
+MUTATING_RPC_IDS = GENERATION_RPC_IDS | {"jHPbke", "maseQ"}
+RPC_IDS = MUTATING_RPC_IDS | {"jwpduf", "as29s", "ngNC2", "UpteDb", "nzlxg"}
 IMAGE_MODELS = frozenset({"GEM_PIX_2", "NARWHAL"})
 IMAGE_ASPECT_RATIOS = {"IMAGE_ASPECT_RATIO_SQUARE": 1, "IMAGE_ASPECT_RATIO_PORTRAIT": 2,
                       "IMAGE_ASPECT_RATIO_LANDSCAPE": 3, "IMAGE_ASPECT_RATIO_PORTRAIT_THREE_FOUR": 4,
@@ -77,7 +105,7 @@ def flow_projects(payload):
             raise AngularProtocolError("Unrecognized Flow project entry")
         projects.append({"project_id": row[0], "project_name": row[1][0]})
     return projects
-VIDEO_FAMILIES = frozenset({"abra_r2v", "abra_edit"})
+VIDEO_FAMILIES = frozenset({"abra_t2v", "abra_r2v", "abra_edit"})
 VIDEO_RESOLUTIONS = {"VIDEO_RESOLUTION_360P": 4, "VIDEO_RESOLUTION_720P": 1}
 VIDEO_ASPECT_RATIOS = {"VIDEO_ASPECT_RATIO_LANDSCAPE": 2, "VIDEO_ASPECT_RATIO_PORTRAIT": 1}
 
@@ -94,14 +122,14 @@ def resolve_video_model(model):
     """Resolve public aliases without expanding beyond the supported catalog."""
     if not isinstance(model, str):
         return None
-    match = re.fullmatch(r"(abra_r2v_(?:4|6|8|10)s|abra_edit)(?:_(360p|720p))?", model)
+    match = re.fullmatch(r"(abra_(?:t2v|r2v)_(?:4|6|8|10)s|abra_edit)(?:_(360p|720p))?", model)
     if match:
         base, resolution = match.groups()
-        family = "abra_edit" if base == "abra_edit" else "abra_r2v"
+        family = "abra_edit" if base == "abra_edit" else base.rsplit("_", 1)[0]
         return VideoModel(
             model_key=base + ("_360p" if resolution == "360p" else ""),
             family=family,
-            rpc_id="jIps6" if family == "abra_edit" else "MZZa6b",
+            rpc_id={"abra_edit": "jIps6", "abra_r2v": "MZZa6b", "abra_t2v": "YhhmEf"}[family],
             resolution=4 if resolution == "360p" else 1,
         )
     if model == "veo_3_1_r2v_fast_portrait":
@@ -122,14 +150,34 @@ def use_angular_video(model, *, models=(), families=()):
     return any(resolve_video_model(enabled) == spec for enabled in models)
 
 
+def wire_shape(value, depth=0):
+    """Bounded type-only evidence; never retain scalar values or object keys."""
+    if isinstance(value, list):
+        if depth >= 2:
+            return f"list({len(value)})"
+        return f"list({len(value)})[" + ",".join(wire_shape(v, depth + 1) for v in value[:12]) + "]"
+    return {str: "str", int: "int", float: "float", bool: "bool",
+            dict: "object", type(None): "null"}.get(type(value), "other")
+
+
 def parse_rpc_response(text: str, rpc_id: str):
     # Decode JSON rather than slicing by character count: frame lengths count
     # UTF-8 bytes, and captured/redacted fixtures can change the declared length.
+    diagnostics = {"response_bytes": len(text.encode("utf-8")) if isinstance(text, str) else 0,
+                   "frame_count": 0, "matching_rows": 0}
+
+    def fail(reason, message, value=None):
+        raise AngularProtocolError(message, diagnostics={
+            **diagnostics, "parse_reason": reason, "wire_shape": wire_shape(value)}) from None
+
+    if not isinstance(text, str):
+        fail("response_type_invalid", "Invalid Flow RPC response")
     raw = text.lstrip()
     if raw.startswith(")]}'"):
         raw = raw[4:]
     decoder = json.JSONDecoder()
     payloads = []
+    error_rows = []
     while raw.strip():
         raw = raw.lstrip()
         length = re.match(r"\d+\r?\n", raw)
@@ -138,21 +186,40 @@ def parse_rpc_response(text: str, rpc_id: str):
         try:
             frame, end = decoder.raw_decode(raw)
         except ValueError:
-            raise AngularProtocolError("Malformed Flow RPC response") from None
+            fail("frame_json_invalid", "Malformed Flow RPC response")
         raw = raw[end:]
+        diagnostics["frame_count"] += 1
         if not isinstance(frame, list):
-            raise AngularProtocolError("Invalid Flow RPC frame")
+            fail("frame_type_invalid", "Invalid Flow RPC frame", frame)
         for row in frame:
             if not isinstance(row, list) or len(row) < 3 or row[:2] != ["wrb.fr", rpc_id]:
                 continue
+            diagnostics["matching_rows"] += 1
             if not isinstance(row[2], str):
-                raise AngularProtocolError(f"Flow RPC {rpc_id} returned an error envelope")
+                error_rows.append(row)
+                continue
+            if len(row) > 5 and row[5] is not None:
+                fail("payload_ambiguous", "Flow RPC contains both data and error", row)
             try:
                 payloads.append(json.loads(row[2]))
             except ValueError:
-                raise AngularProtocolError("Malformed Flow RPC payload") from None
-    if len(payloads) != 1:
-        raise AngularProtocolError(f"Flow RPC {rpc_id} response missing or ambiguous")
+                fail("payload_json_invalid", "Malformed Flow RPC payload", row)
+    if diagnostics["matching_rows"] != 1:
+        fail("payload_missing" if not diagnostics["matching_rows"] else "payload_ambiguous",
+             "Flow RPC response missing or ambiguous")
+    if error_rows:
+        row = error_rows[0]
+        # Dq/wrb.fr is a sentinel-prefixed proto: field 5 is row[5].
+        status = decode_rpc_status(row[5]) if row[2] is None and len(row) > 5 else {}
+        diagnostic = {**diagnostics, 'parse_reason': 'rpc_error_status',
+                      'wire_shape': wire_shape(row), **status}
+        # DEADLINE_EXCEEDED, UNKNOWN, INTERNAL, UNAVAILABLE and ALREADY_EXISTS
+        # can describe an accepted operation. Never blindly resubmit those.
+        if status.get('grpc_code') in {3, 5, 7, 8, 9, 11, 12, 16} and not status.get('reason_conflict'):
+            raise AngularRpcRejected(diagnostic)
+        if status:
+            raise AngularProtocolError("Flow RPC outcome is unconfirmed", diagnostics=diagnostic)
+        fail("payload_not_string", "Flow RPC returned an error envelope", row)
     return payloads[0]
 
 
@@ -211,6 +278,9 @@ def build_video_rpc(rest):
     spec = resolve_video_model(request.get("videoModelKey"))
     if spec is None:
         raise AngularProtocolError("Angular model wire shape is not verified")
+    if spec.family == "abra_t2v" and any(request.get(key) for key in
+            ("referenceImages", "videoInput", "startImage", "endImage", "imageInputs")):
+        raise AngularProtocolError("Text video RPC does not accept image or video inputs")
     output = request.get("outputSpec")
     if output is not None:
         if not isinstance(output, dict) or set(output) - {"resolution"}:
@@ -229,14 +299,20 @@ def build_video_rpc(rest):
     if not project or not captcha:
         raise AngularProtocolError("Flow project and fresh captcha are required")
     parts = request.get("textInput", {}).get("structuredPrompt", {}).get("parts", [])
-    if not parts or any(set(part) != {"text"} for part in parts):
+    if not parts or any(not isinstance(part, dict) or set(part) != {"text"}
+                        or not isinstance(part["text"], str) for part in parts):
         raise AngularProtocolError("Unsupported Angular prompt shape")
     prompt = "".join(part["text"] for part in parts)
     refs = [[None, item["mediaId"]] for item in request.get("referenceImages", [])]
     batch = (rest.get("mediaGenerationContext") or {}).get("batchId") or str(uuid.uuid4())
     ids = [None, None, None, None, str(uuid.uuid4()), str(uuid.uuid4())]
     text_input = [None, None, [[[prompt]]]]
-    if spec.family == "abra_edit":
+    if spec.family == "abra_t2v":
+        # YhhmEf / BatchAsyncGenerateVideoText, captured 2026-09-15.
+        # Text/model/aspect/metadata are fields 1/2/3/5; no reference slot.
+        item = [text_input, spec.model_key, aspect, None, ids]
+        output_index = 7
+    elif spec.family == "abra_edit":
         video = request.get("videoInput") or {}
         if not video.get("mediaId") or not video.get("endFrameIndex"):
             raise AngularProtocolError("Video edit requires media ID and end frame")
@@ -249,8 +325,8 @@ def build_video_rpc(rest):
         item = [text_input, refs, spec.model_key, aspect, None, ids]
         output_index = 11
     # Current frontend omits OutputSpec for default 720p (enum 1), and sets
-    # field 12 (references) / 13 (edit) to [4] for 360p. Do not copy the
-    # captured 360p tail to every resolution. See the 2026-09-09 source record.
+    # field 8 (text) / 12 (references) / 13 (edit) to [4] for 360p.
+    # See the 2026-09-09 and 2026-09-15 source records.
     if spec.resolution != 1:
         item.extend([None] * (output_index - len(item)))
         item.append([spec.resolution])
@@ -297,13 +373,23 @@ def video_operations(payload, *, token_id, project_id, expected_ids=None):
         status_name = {1: "PENDING", 2: "ACTIVE", 3: "SUCCESSFUL", 4: "FAILED",
                        5: "CANCELLED", 6: "PENDING", 7: "FAILED"}.get(code) if type(code) is int else None
         if status_name is None:
-            raise AngularProtocolError(f"Unrecognized Flow media status {code}")
+            raise AngularProtocolError("Unrecognized Flow media status", diagnostics={
+                "parse_reason": "media_status_unrecognized", "wire_shape": wire_shape(status)})
         operation = {"name": media_id}
         if code in {4, 5, 7}:
             # Do not expose arbitrary upstream Status text, which may contain
             # request data. The wire status is sufficient for terminal handling.
             operation["error"] = {"code": 1 if code == 5 else 13,
-                                  "message": "视频生成已取消" if code == 5 else "视频生成失败，请稍后重试"}
+                                  "message": "视频生成已取消" if code == 5 else "视频生成失败，请稍后重试",
+                                  "code_source": "local_normalization", "wire_status": code,
+                                  "wire_shape": wire_shape(status)}
+            detail = decode_rpc_status(status[1] if len(status) > 1 else None)
+            if detail:
+                operation["error"].update(detail)
+                operation["error"]["code"] = detail['grpc_code']
+                operation["error"]["code_source"] = "google_rpc_status"
+                if detail.get('public_error'):
+                    operation["error"]["message"] = detail['public_error']
         if code == 3:
             operation["metadata"] = {"video": {"mediaGenerationId": media_id}}
             video_url = signed_video_url(media)

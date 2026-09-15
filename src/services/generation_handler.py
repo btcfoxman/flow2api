@@ -8,7 +8,8 @@ from typing import Optional, AsyncGenerator, List, Dict, Any, Set
 from ..core.logger import debug_logger
 from ..core.generation_errors import NativeSessionError, is_native_session_error, is_upstream_authentication_error
 from ..core.config import config
-from ..core.async_queue import AsyncQueueExpired, QUEUE_TIMEOUT_MESSAGE
+from ..core.async_queue import AsyncQueueExpired, QUEUE_TIMEOUT_MESSAGE, queued_task_id
+from .flow_angular import AngularProtocolError, AngularRpcRejected
 from ..core.credits import (
     is_quota_exhausted_error,
     quota_exhausted_message,
@@ -1310,6 +1311,10 @@ class GenerationHandler:
         error_message: Any,
         status_code: Optional[int] = None,
     ) -> bool:
+        # A transport/decoder failure is not evidence that an account is bad.
+        # In particular an uncertain launch must not disable it or be retried.
+        if isinstance(error_message, AngularProtocolError):
+            return False
         text = str(error_message or "").strip()
         lowered = text.lower()
         numeric_status_code = None
@@ -1530,9 +1535,10 @@ class GenerationHandler:
             )
 
         # 2. 选择Token
-        from .model_capabilities import model_transport_error, supports_flow_model
+        from .model_capabilities import model_transport_error, supports_flow_model, log_capability_rejection
         capability_error = await model_transport_error(self.db, model_config)
         if capability_error:
+            log_capability_rejection(model, MODEL_CONFIG, stage="generation_entry", request_id=request_id)
             duration = time.time() - start_time
             record_generation_result(generation_type, "unsupported_model", duration)
             await self._log_request(token_id=None, operation=request_operation, request_data=request_payload,
@@ -1742,7 +1748,7 @@ class GenerationHandler:
                     error_msg,
                     response_status_code,
                 )
-                if token and self._should_record_token_error(error_msg, response_status_code):
+                if token and not generation_result.get("account_error_exempt") and self._should_record_token_error(error_msg, response_status_code):
                     await self.token_manager.record_error(token.id)
                 elif token:
                     debug_logger.log_info(
@@ -1977,6 +1983,11 @@ class GenerationHandler:
                     generation_type,
                     raw_error_msg,
                 )
+            elif isinstance(e, AngularRpcRejected):
+                response_status_code = e.status_code
+                error_msg = ("提示词、参考素材或请求条件不符合要求，请调整后重试。"
+                             if response_status_code == 400 else
+                             "当前模型或请求暂不可用，请更换模型或联系管理员。")
             else:
                 error_msg = f"生成失败: {raw_error_msg}"
                 response_status_code = 500
@@ -1985,7 +1996,7 @@ class GenerationHandler:
                 response_status_code,
             )
             debug_logger.log_error(f"[GENERATION] ❌ {error_msg}")
-            if token and not isinstance(e, AsyncQueueExpired) and self._should_record_token_error(raw_error_msg, response_status_code):
+            if token and not isinstance(e, AsyncQueueExpired) and self._should_record_token_error(e, response_status_code):
                 # 记录错误（所有错误统一处理，不再特殊处理429）
                 await self.token_manager.record_error(token.id)
             elif token:
@@ -2005,7 +2016,8 @@ class GenerationHandler:
                 request_operation if generation_type else "generate_unknown",
                 request_payload if 'request_payload' in locals() else {"model": model},
                 {"error": error_msg, "performance": perf_trace,
-                 **({"internal_failure": e.diagnostic()} if isinstance(e, NativeSessionError) else {})},
+                 **({"internal_failure": e.diagnostic()} if isinstance(e, NativeSessionError) else {}),
+                 **({"rpc_diagnostic": e.diagnostics} if isinstance(e, AngularProtocolError) else {})},
                 response_status_code,
                 duration,
                 log_id=request_log_state.get("id"),
@@ -2929,7 +2941,7 @@ class GenerationHandler:
                     "failed",
                     max(0.0, time.time() - terminal_started_at),
                 )
-                if self._should_record_token_error(error_msg, status_code):
+                if not generation_result.get("account_error_exempt") and self._should_record_token_error(error_msg, status_code):
                     await self.token_manager.record_error(token.id)
                 else:
                     debug_logger.log_info(
@@ -3000,6 +3012,7 @@ class GenerationHandler:
             "request_id": request_id,
             "watermark": watermark,
             "async_video_task": True,
+            "queue_task_id": queued_task_id(),
         }
         response_data = {
             "status": "processing",
@@ -3363,6 +3376,13 @@ class GenerationHandler:
                     error_info = operation.get("operation", {}).get("error", {})
                     error_code = error_info.get("code", "unknown")
                     error_message = error_info.get("message", "未知错误")
+                    angular_wire_status = error_info.get("wire_status") if operation.get("transport") == "angular" else None
+                    if type(angular_wire_status) is int and angular_wire_status in {4, 5, 7}:
+                        debug_logger.log_runtime_event("native_media_terminal_failed", token_id=token.id,
+                            protocol="angular", stage="video_poll", reason="media_terminal_failed",
+                            wire_status=angular_wire_status, code_source=error_info.get("code_source"),
+                            wire_shape=error_info.get("wire_shape"), grpc_code=error_info.get("grpc_code"),
+                            public_error=error_info.get("public_error"))
                     friendly_error, response_status_code = _video_generation_failure_response(error_message)
                     failure_reason = media_generation_failure_reason(error_message)
                     
@@ -3370,7 +3390,8 @@ class GenerationHandler:
                     # task payloads sanitize it through _public_video_task_error_message.
                     await self._fail_video_task(
                         checked_operations,
-                        f"{error_message} (code: {error_code})",
+                        (f"{error_message} (wire_status: {angular_wire_status})" if angular_wire_status is not None
+                         else f"{error_message} (code: {error_code})"),
                     )
                     
                     # Task-level policy/traffic results are client/upstream control
@@ -3389,6 +3410,15 @@ class GenerationHandler:
                     }
                     if failure_reason:
                         failure_response["failure_reason"] = failure_reason
+                    if angular_wire_status is not None:
+                        failure_response.pop("upstream_code", None)
+                        failure_response.update(wire_status=angular_wire_status,
+                                                normalized_error_code=error_code,
+                                                code_source=error_info.get("code_source", "local_normalization"))
+                        if error_info.get("code_source") == "google_rpc_status":
+                            failure_response.pop("normalized_error_code", None)
+                            failure_response.update(upstream_code=error_code,
+                                                    public_error=error_info.get("public_error"))
                     await self._finalize_async_video_result_log(
                         request_log_state,
                         token_id=token.id,
@@ -3468,6 +3498,8 @@ class GenerationHandler:
                     error_msg = f"视频状态查询失败: {self._normalize_error_message(e)}"
                     await self._fail_video_task(operations, error_msg)
                     self._mark_generation_failed(generation_result, error_msg)
+                    if isinstance(generation_result, dict) and isinstance(e, AngularProtocolError):
+                        generation_result["account_error_exempt"] = True
                     await self._finalize_async_video_result_log(
                         request_log_state,
                         token_id=token.id,
@@ -3498,6 +3530,8 @@ class GenerationHandler:
             error_msg = f"视频生成超时 (已轮询 {max_attempts} 次)"
         await self._fail_video_task(operations, error_msg)
         self._mark_generation_failed(generation_result, error_msg, status_code=poll_status_code)
+        if isinstance(generation_result, dict) and isinstance(last_poll_error, AngularProtocolError):
+            generation_result["account_error_exempt"] = True
         await self._finalize_async_video_result_log(
             request_log_state,
             token_id=token.id,
@@ -3793,6 +3827,11 @@ class GenerationHandler:
                 effective_progress = 100 if status_code == 200 else 0 if status_code >= 400 else 0
             effective_progress = max(0, min(100, int(effective_progress)))
 
+            queue_id = queued_task_id() or request_data.get("queue_task_id")
+            if queue_id:
+                request_data = {**request_data, "queue_task_id": queue_id}
+                if status_code in {429, 503} and operation != "generate_video_async_result":
+                    effective_status_text = "retrying"
             request_body = json.dumps(request_data, ensure_ascii=False)
             response_body = json.dumps(response_data, ensure_ascii=False)
 

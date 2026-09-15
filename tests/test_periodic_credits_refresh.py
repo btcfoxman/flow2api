@@ -2,10 +2,11 @@ import asyncio
 import unittest
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from src.core.config import Config
 from src.core.models import Token
+from src.core.generation_errors import NativeSessionError
 from src.services.token_manager import TokenManager
 
 
@@ -56,7 +57,8 @@ class PeriodicCreditsRefreshTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_refresh_all_active_tokens_isolates_single_token_failure(self):
         tokens = [make_token(1), make_token(2), make_token(3)]
-        db = SimpleNamespace(get_active_tokens=AsyncMock(return_value=tokens))
+        db = SimpleNamespace(get_active_tokens=AsyncMock(return_value=tokens),
+                             get_token=AsyncMock(side_effect=lambda token_id: tokens[token_id - 1]))
         manager = TokenManager(db, SimpleNamespace())
 
         async def refresh_with_status(token_id):
@@ -70,7 +72,7 @@ class PeriodicCreditsRefreshTests(unittest.IsolatedAsyncioTestCase):
 
         summary = await manager.refresh_all_active_credits(concurrency=2)
 
-        self.assertEqual(summary, {"total": 3, "succeeded": 2, "failed": 1})
+        self.assertEqual(summary, {"total": 3, "succeeded": 2, "failed": 1, "skipped": 0})
         self.assertEqual(
             sorted(call.args[0] for call in manager._refresh_credits_with_status.await_args_list),
             [1, 2, 3],
@@ -78,7 +80,8 @@ class PeriodicCreditsRefreshTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cancelled_removed_token_does_not_stop_refresh_round(self):
         tokens = [make_token(1), make_token(2)]
-        db = SimpleNamespace(get_active_tokens=AsyncMock(return_value=tokens))
+        db = SimpleNamespace(get_active_tokens=AsyncMock(return_value=tokens),
+                             get_token=AsyncMock(side_effect=lambda token_id: tokens[token_id - 1]))
         manager = TokenManager(db, SimpleNamespace())
 
         async def refresh_with_status(token_id):
@@ -92,7 +95,47 @@ class PeriodicCreditsRefreshTests(unittest.IsolatedAsyncioTestCase):
 
         summary = await manager.refresh_all_active_credits(concurrency=2)
 
-        self.assertEqual(summary, {"total": 2, "succeeded": 1, "failed": 1})
+        self.assertEqual(summary, {"total": 2, "succeeded": 1, "failed": 1, "skipped": 0})
+
+    async def test_confirmed_signed_out_flow_is_skipped_until_new_credentials(self):
+        expired, legacy, transient = [make_token(i) for i in (1, 2, 3)]
+        expired.auth_mode = transient.auth_mode = "flow"
+        manager = TokenManager(SimpleNamespace(get_active_tokens=AsyncMock(
+            return_value=[expired, legacy, transient]), get_token=AsyncMock(
+                side_effect=lambda token_id: [expired, legacy, transient][token_id - 1])), SimpleNamespace())
+        with patch("src.core.native_session_state.local_session_state", return_value=None):
+            for token in (expired, legacy):
+                manager.native_sessions.reject(token, NativeSessionError("flow_login_unavailable"))
+        manager.native_sessions.reject(transient, RuntimeError("temporary transport failure"))
+        manager._refresh_credits_with_status = AsyncMock(return_value=(True, 100))
+
+        for _ in range(2):
+            manager._refresh_credits_with_status.reset_mock()
+            result = await manager.refresh_all_active_credits()
+            self.assertEqual(result, {"total": 3, "succeeded": 2, "failed": 0, "skipped": 1})
+            self.assertEqual(sorted(c.args[0] for c in
+                manager._refresh_credits_with_status.await_args_list), [2, 3])
+
+        expired.google_cookies = "new-credential-snapshot"
+        manager._refresh_credits_with_status.reset_mock()
+        result = await manager.refresh_all_active_credits()
+        self.assertEqual(result["skipped"], 0)
+        self.assertEqual(manager._refresh_credits_with_status.await_count, 3)
+
+    async def test_locally_owned_session_rechecks_after_bounded_retry_window(self):
+        token = make_token(1)
+        token.auth_mode = "flow"
+        manager = TokenManager(SimpleNamespace(get_active_tokens=AsyncMock(
+            return_value=[token]), get_token=AsyncMock(return_value=token)), SimpleNamespace())
+        with patch("src.core.native_session_state.local_session_state", return_value={"version": 1}), \
+             patch("src.core.session_availability.time", SimpleNamespace(monotonic=lambda: 100)):
+            manager.native_sessions.reject(token, NativeSessionError("flow_login_unavailable"))
+        manager._refresh_credits_with_status = AsyncMock(return_value=(True, 100))
+        with patch("src.core.session_availability.time", SimpleNamespace(monotonic=lambda: 200)):
+            self.assertEqual((await manager.refresh_all_active_credits())["skipped"], 1)
+        with patch("src.core.session_availability.time", SimpleNamespace(monotonic=lambda: 401)):
+            self.assertEqual((await manager.refresh_all_active_credits())["succeeded"], 1)
+        manager._refresh_credits_with_status.assert_awaited_once_with(1)
 
     async def test_periodic_task_refreshes_immediately_and_stops_cleanly(self):
         manager = TokenManager(SimpleNamespace(), SimpleNamespace())

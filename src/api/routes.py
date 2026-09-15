@@ -40,6 +40,9 @@ from ..services.generation_handler import (
     _validate_reference_video_duration,
 )
 from ..services.browser_captcha_extension import ExtensionCaptchaService
+from ..services.model_capabilities import (
+    log_capability_rejection, supports_flow_model, uses_flow_only_protocol,
+)
 
 router = APIRouter()
 
@@ -237,7 +240,7 @@ def _build_model_description(model_config: Dict[str, Any]) -> str:
     return description
 
 
-def _get_openai_model_catalog() -> List[Dict[str, str]]:
+def _get_openai_model_catalog(*, flow_only: bool = False) -> List[Dict[str, str]]:
     """Collect OpenAI-compatible model list entries."""
     return [
         {
@@ -245,18 +248,36 @@ def _get_openai_model_catalog() -> List[Dict[str, str]]:
             "description": _build_model_description(model_config),
         }
         for model_id, model_config in MODEL_CONFIG.items()
+        if not flow_only or supports_flow_model(model_config)
     ]
 
 
-def _get_gemini_model_catalog() -> Dict[str, str]:
+def _get_model_alias_catalog(*, flow_only: bool = False) -> Dict[str, str]:
+    aliases = get_base_model_aliases()
+    if not flow_only:
+        return aliases
+    result = {}
+    for alias, description in aliases.items():
+        resolved = resolve_model_name(alias, model_config=MODEL_CONFIG)
+        model_config = MODEL_CONFIG.get(resolved)
+        if model_config and supports_flow_model(model_config):
+            # Base aliases remain usable at native output size; do not advertise
+            # 2K/4K upsampling that this protocol cannot execute.
+            if model_config.get("type") == "image":
+                description = description.split("; sizes:", 1)[0] + "; native output only"
+            result[alias] = description
+    return result
+
+
+def _get_gemini_model_catalog(*, flow_only: bool = False) -> Dict[str, str]:
     """Collect Gemini-compatible model metadata for /models endpoints."""
     catalog: Dict[str, str] = {}
 
-    for alias_id, description in get_base_model_aliases().items():
+    for alias_id, description in _get_model_alias_catalog(flow_only=flow_only).items():
         catalog[alias_id] = description
 
-    for model_id, model_config in MODEL_CONFIG.items():
-        catalog.setdefault(model_id, _build_model_description(model_config))
+    for model in _get_openai_model_catalog(flow_only=flow_only):
+        catalog.setdefault(model["id"], model["description"])
 
     return catalog
 
@@ -1292,6 +1313,7 @@ async def _create_deferred_async_video_task(
     from ..services.model_capabilities import model_transport_error
     capability_error = await model_transport_error(handler.db, MODEL_CONFIG.get(normalized.model, {}))
     if capability_error:
+        log_capability_rejection(normalized.model, MODEL_CONFIG, stage="video_queue_entry")
         return capability_error
     local_task_id = _new_deferred_video_task_id()
     enqueued = await handler.db.enqueue_async_task(
@@ -1477,6 +1499,7 @@ async def _process_async_video_queue_item(queue_item: Dict[str, Any]) -> float:
     from ..services.model_capabilities import model_transport_error
     capability_error = await model_transport_error(handler.db, model_config)
     if capability_error:
+        log_capability_rejection(normalized.model, MODEL_CONFIG, stage="video_queue_dispatch")
         await handler.db.update_async_task(local_task_id, status="failed",
             last_error=capability_error["error"]["message"], request_payload="{}")
         return 0.0
@@ -1520,7 +1543,7 @@ async def _process_async_video_queue_item(queue_item: Dict[str, Any]) -> float:
         )
         return ASYNC_TASK_QUEUE_RETRY_SECONDS
 
-    with queue_submission_guard(lambda: handler.db.admit_async_task_submission(local_task_id)):
+    with queue_submission_guard(lambda: handler.db.admit_async_task_submission(local_task_id), task_id=local_task_id):
         try:
             result = await _collect_async_video_task_result(
                 normalized,
@@ -2331,6 +2354,7 @@ async def _iterate_gemini_stream(
 @router.get("/v1/models")
 async def list_models(api_key: str = Depends(verify_api_key_flexible)):
     """List available models."""
+    flow_only = await uses_flow_only_protocol(_ensure_generation_handler().db)
     models = [
         {
             "id": model["id"],
@@ -2338,7 +2362,7 @@ async def list_models(api_key: str = Depends(verify_api_key_flexible)):
             "owned_by": "flow2api",
             "description": model["description"],
         }
-        for model in _get_openai_model_catalog()
+        for model in _get_openai_model_catalog(flow_only=flow_only)
     ]
 
     return {"object": "list", "data": models}
@@ -2347,7 +2371,8 @@ async def list_models(api_key: str = Depends(verify_api_key_flexible)):
 @router.get("/v1/models/aliases")
 async def list_model_aliases(api_key: str = Depends(verify_api_key_flexible)):
     """List simplified model aliases for generationConfig-based resolution."""
-    aliases = get_base_model_aliases()
+    flow_only = await uses_flow_only_protocol(_ensure_generation_handler().db)
+    aliases = _get_model_alias_catalog(flow_only=flow_only)
     alias_models = []
     for alias_id, description in aliases.items():
         alias_models.append(
@@ -2366,7 +2391,8 @@ async def list_model_aliases(api_key: str = Depends(verify_api_key_flexible)):
 @router.get("/models")
 async def list_gemini_models(api_key: str = Depends(verify_api_key_flexible)):
     """List available models using Gemini-compatible response shape."""
-    catalog = _get_gemini_model_catalog()
+    flow_only = await uses_flow_only_protocol(_ensure_generation_handler().db)
+    catalog = _get_gemini_model_catalog(flow_only=flow_only)
     return {
         "models": [
             _build_gemini_model_resource(model_id, description)
@@ -2379,7 +2405,8 @@ async def list_gemini_models(api_key: str = Depends(verify_api_key_flexible)):
 @router.get("/models/{model}")
 async def get_gemini_model(model: str, api_key: str = Depends(verify_api_key_flexible)):
     """Return a single model using Gemini-compatible response shape."""
-    catalog = _get_gemini_model_catalog()
+    flow_only = await uses_flow_only_protocol(_ensure_generation_handler().db)
+    catalog = _get_gemini_model_catalog(flow_only=flow_only)
     description = catalog.get(model)
     if not description:
         return JSONResponse(
@@ -2450,6 +2477,7 @@ async def create_image_response(
         from ..services.model_capabilities import model_transport_error
         capability_error = await model_transport_error(_ensure_generation_handler().db, MODEL_CONFIG[normalized.model])
         if capability_error:
+            log_capability_rejection(normalized.model, MODEL_CONFIG, stage="image_response_entry")
             return _build_openai_json_response(capability_error)
         result = await _create_async_image_response_task(
             normalized=normalized,

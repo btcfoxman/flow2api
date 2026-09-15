@@ -52,7 +52,10 @@ class DebugLogger:
     def log_runtime_event(self, event: str, **fields):
         """Always retain operational reason codes, never request/response bodies."""
         allowed = {"request_id", "token_id", "stage", "reason", "protocol",
-                   "page_origin", "page_path", "status_code", "rpc_id", "duration_ms"}
+                   "page_origin", "page_path", "status_code", "rpc_id", "duration_ms",
+                   "parse_reason", "response_bytes", "frame_count", "matching_rows",
+                   "wire_shape", "wire_status", "code_source", "model",
+                   "grpc_code", "public_error", "reason_conflict"}
         payload = {key: value for key, value in fields.items() if key in allowed}
         line = json.dumps({"event": event, "timestamp": self._format_timestamp(), **payload}, ensure_ascii=True)
         print(line, flush=True)

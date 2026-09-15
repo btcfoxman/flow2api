@@ -3,6 +3,7 @@ version: '3.8'
 services:
   flow2api-headed:
     init: true
+    stop_grace_period: "120s"
     build:
       context: .
       dockerfile: Dockerfile.headed

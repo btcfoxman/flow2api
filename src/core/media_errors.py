@@ -6,6 +6,12 @@ from typing import Any, Optional
 
 
 MEDIA_TRAFFIC_ERROR_KEYWORDS = (
+    "public_error_user_requests_throttled",
+    "public_error_high_traffic",
+    "public_error_model_disabled_due_to_traffic",
+    "public_error_generation_already_in_progress",
+    "public_error_model_overloaded",
+    "public_error_concurrent_limit_reached",
     "public_error_unusual_activity_too_much_traffic",
     "public_error_unusual_activity",
     "too many requests",
@@ -121,6 +127,11 @@ def media_policy_reason(error_message: Any) -> Optional[str]:
         "public_error_unsafe_generation" in error_lower
         or "unsafe_generation" in error_lower
     ):
+        return MEDIA_POLICY_REASON_UNSAFE_GENERATION
+    # Exact public enums decoded from the current frontend, not free-form text.
+    if re.search(r"\bpublic_error_(?:unsafe_(?:image|video)_upload|prominent_people_(?:upload|input_image)|"
+                 r"(?:sexual|minor|photoreal|minor_harm)_upload|(?:minor|photoreal|ip)_input_image|"
+                 r"violence_filter|danger_filter|image_output_ip_filter|vertex_safety_filter_triggered)\b", error_lower):
         return MEDIA_POLICY_REASON_UNSAFE_GENERATION
     return None
 

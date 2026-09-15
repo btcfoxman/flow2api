@@ -1171,6 +1171,7 @@ class Database:
                 "CREATE INDEX IF NOT EXISTS idx_generation_outcomes_completed_at "
                 "ON generation_outcomes(completed_at)"
             )
+            await self._init_async_generation_outcomes(db)
             await self._backfill_generation_outcomes(db)
 
             # Token stats lookup index
@@ -1243,6 +1244,51 @@ class Database:
             print(f"?? request_logs?????: {e}")
             # Continue even if migration fails
 
+    async def _init_async_generation_outcomes(self, db) -> None:
+        """Account for newly accepted queued jobs, not individual submit attempts.
+
+        Triggers share the state-changing transaction (including expiry and crash
+        recovery). The ledger survives queue attachment and request-log cleanup.
+        Historical jobs without a stable log association retain legacy accounting.
+        """
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS async_generation_outcomes (
+                task_id TEXT PRIMARY KEY,
+                generation_type TEXT NOT NULL,
+                outcome TEXT NOT NULL DEFAULT 'pending',
+                completed_at REAL
+            )
+        """)
+        await db.execute("""
+            CREATE TRIGGER IF NOT EXISTS async_outcome_accepted
+            AFTER INSERT ON async_task_queue BEGIN
+                INSERT OR IGNORE INTO async_generation_outcomes (task_id, generation_type)
+                VALUES (NEW.task_id, NEW.task_type);
+            END
+        """)
+        await db.execute("""
+            CREATE TRIGGER IF NOT EXISTS async_outcome_queue_failed
+            AFTER UPDATE OF status ON async_task_queue WHEN NEW.status = 'failed' BEGIN
+                UPDATE async_generation_outcomes
+                SET outcome = 'failed', completed_at = CAST(strftime('%s', 'now') AS REAL)
+                WHERE task_id = NEW.task_id AND outcome = 'pending';
+            END
+        """)
+        for event in ("INSERT", "UPDATE OF status"):
+            suffix = "insert" if event == "INSERT" else "update"
+            await db.execute(f"""
+                CREATE TRIGGER IF NOT EXISTS async_outcome_task_{suffix}
+                AFTER {event} ON tasks WHEN NEW.status IN ('completed', 'failed', 'cancelled') BEGIN
+                    UPDATE async_generation_outcomes
+                    SET outcome = CASE WHEN NEW.status = 'completed' THEN 'completed' ELSE 'failed' END,
+                        completed_at = CASE
+                            WHEN typeof(NEW.completed_at) IN ('integer', 'real') THEN CAST(NEW.completed_at AS REAL)
+                            ELSE COALESCE(CAST(strftime('%s', NEW.completed_at) AS REAL),
+                                          CAST(strftime('%s', 'now') AS REAL)) END
+                    WHERE task_id = NEW.task_id AND outcome = 'pending';
+                END
+            """)
+
     async def _backfill_generation_outcomes(self, db) -> None:
         """Seed the durable outcome ledger from existing terminal request logs."""
         await db.execute(
@@ -1276,6 +1322,11 @@ class Database:
                 'extend_video',
                 'generate_video_async_result'
             )
+              AND NOT EXISTS (
+                SELECT 1 FROM async_generation_outcomes q
+                WHERE q.task_id = CASE WHEN json_valid(request_body)
+                    THEN json_extract(request_body, '$.queue_task_id') END
+              )
               AND (
                 LOWER(TRIM(COALESCE(status_text, ''))) = 'failed'
                 OR (
@@ -1305,7 +1356,7 @@ class Database:
         cursor = await db.execute(
             """
             SELECT operation, status_text, status_code, progress,
-                   created_at, updated_at
+                   created_at, updated_at, request_body
             FROM request_logs
             WHERE id = ?
             """,
@@ -1314,6 +1365,19 @@ class Database:
         row = await cursor.fetchone()
         if row is None:
             return
+
+        try:
+            payload = json.loads(row[6] or '{}')
+            queue_id = payload.get('queue_task_id') if isinstance(payload, dict) else None
+        except (ValueError, TypeError):
+            queue_id = None
+        if isinstance(queue_id, str):
+            tracked = await db.execute("SELECT 1 FROM async_generation_outcomes WHERE task_id = ?", (queue_id,))
+            if await tracked.fetchone():
+                # The stable public job owns the outcome, even for a terminal
+                # async-result log. Never count both the attempt and the job.
+                await db.execute("DELETE FROM generation_outcomes WHERE request_log_id = ?", (log_id,))
+                return
 
         generation_type = self._generation_type_for_operation(row[0])
         final_status = str(row[1] or "").strip().lower()
@@ -1509,7 +1573,12 @@ class Database:
                         WHEN outcome = 'failed'
                          AND DATE(completed_at, 'unixepoch', 'localtime') = ?
                         THEN 1 ELSE 0 END), 0) AS today_failed_tasks
-                FROM generation_outcomes
+                FROM (
+                    SELECT generation_type, outcome, completed_at FROM generation_outcomes
+                    UNION ALL
+                    SELECT generation_type, outcome, completed_at FROM async_generation_outcomes
+                    WHERE outcome IN ('completed', 'failed')
+                )
                 """,
                 (today, today, today, today),
             )

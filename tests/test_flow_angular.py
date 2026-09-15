@@ -20,6 +20,40 @@ def media(status, media_id="media-test"):
 
 
 class AngularCodecTests(unittest.TestCase):
+    def test_parse_diagnostics_are_structural_and_credential_safe(self):
+        cases = [
+            ("private cookie", "frame_json_invalid"),
+            ('{"private": "secret"}', "frame_type_invalid"),
+            ('[["wrb.fr","MZZa6b",null,null,[13,"private credential"]]]', "payload_not_string"),
+            ('[["wrb.fr","MZZa6b","private credential"]]', "payload_json_invalid"),
+            ('[["wrb.fr","other","[]"]]', "payload_missing"),
+            ('[["wrb.fr","MZZa6b","[]"],["wrb.fr","MZZa6b","[]"]]', "payload_ambiguous"),
+        ]
+        for raw, reason in cases:
+            with self.subTest(reason=reason), self.assertRaises(AngularProtocolError) as caught:
+                parse_rpc_response(raw, "MZZa6b")
+            self.assertEqual(caught.exception.diagnostics["parse_reason"], reason)
+            self.assertEqual(caught.exception.diagnostics["response_bytes"], len(raw.encode()))
+            self.assertNotIn("private", str(caught.exception.diagnostics))
+            self.assertNotIn("private", str(caught.exception))
+
+    def test_failed_media_preserves_wire_status_not_arbitrary_status_text(self):
+        for code in [4, 5, 7]:
+            item = media(code)
+            item[5][8].append({"private cookie": "secret prompt"})
+            error = video_operations([item], token_id=1, project_id="project-test")["operations"][0]["operation"]["error"]
+            self.assertEqual(error["wire_status"], code)
+            self.assertEqual(error["code_source"], "local_normalization")
+            self.assertNotIn("private", str(error))
+            self.assertNotIn("secret", str(error))
+
+    def test_protocol_errors_do_not_disable_accounts(self):
+        from src.services.generation_handler import GenerationHandler
+        handler = GenerationHandler.__new__(GenerationHandler)
+        for cls in [AngularProtocolError, AngularSubmissionUncertain]:
+            self.assertFalse(handler._should_record_token_error(cls("decoder failed"), 500))
+        self.assertTrue(handler._should_record_token_error(RuntimeError("other account failure"), 500))
+
     def test_frames_multibyte_text_and_nested_json(self):
         payload = [None, 46, [media(6)]]
         frame = json.dumps([["wrb.fr", "MZZa6b", json.dumps(payload)], ["di", 123]], ensure_ascii=False)
