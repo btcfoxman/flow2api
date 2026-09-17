@@ -134,6 +134,11 @@ MAIN_UP = Gauge(
     "Whether the Flow2API service process is running.",
     registry=MAIN_REGISTRY,
 )
+ACCOUNT_LOGIN_ACTIVE = Gauge(
+    "flow2api_account_login_active",
+    "Whether an interactive account login lease is starting, active, or closing.",
+    registry=MAIN_REGISTRY,
+)
 MAIN_PROCESS_START_TIME = Gauge(
     "flow2api_process_start_time_seconds",
     "Flow2API process start time since unix epoch in seconds.",
@@ -511,8 +516,12 @@ async def update_main_runtime_metrics(db: Any, concurrency_manager: Optional[Any
         REMOTE_BROWSER_TARGET_LATENCY_SECONDS.set(0.0)
 
 
-async def render_main_metrics(db: Any, concurrency_manager: Optional[Any] = None) -> bytes:
+async def render_main_metrics(db: Any, concurrency_manager: Optional[Any] = None,
+                              account_login_manager: Optional[Any] = None) -> bytes:
     await update_main_runtime_metrics(db, concurrency_manager=concurrency_manager)
+    # Read after the awaited collection: no account identifiers or viewer
+    # credentials are exported, only a restart-safety bit for the deploy guard.
+    ACCOUNT_LOGIN_ACTIVE.set(float(account_login_manager is not None and account_login_manager.active is not None))
     return generate_latest(MAIN_REGISTRY)
 
 

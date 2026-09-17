@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>账号登录画面</title><style>body{margin:0;background:#101826;color:#e2e8f0;font:13px system-ui}#status{padding:8px 12px}#screen{height:calc(100vh - 36px)}</style></head>
+<body><div id="status" role="status">正在连接登录浏览器…</div><div id="screen"></div>
+<script type="module">
+const status = document.getElementById('status');
+try {
+  const {default: RFB} = await import('/account-login/novnc/core/rfb.js');
+  const response = await fetch('/account-login/credentials', {cache:'no-store'});
+  if (!response.ok) throw new Error('登录窗口已结束，请返回账号管理重新打开');
+  const credentials = await response.json();
+  const url = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/account-login/websockify`;
+  const rfb = new RFB(document.getElementById('screen'), url, {credentials});
+  rfb.scaleViewport = true;
+  rfb.addEventListener('connect', () => { status.textContent = '已连接 · 完成登录后请点击页面上方“完成登录并验证”'; });
+  rfb.addEventListener('disconnect', () => { status.textContent = '连接已结束；如果正在验证，请等待上方结果。'; });
+  rfb.addEventListener('securityfailure', () => { status.textContent = '画面认证失败，请返回账号管理重新打开'; });
+  window.addEventListener('pagehide', () => rfb.disconnect(), {once:true});
+} catch (error) { status.textContent = error.message; }
+</script></body></html>

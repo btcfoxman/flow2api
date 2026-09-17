@@ -34,8 +34,22 @@ class LoadBalancer:
         self._video_proxy_pending_keys: Dict[int, list[str]] = {}
         self._pending_credits: Dict[int, int] = {}
         self._pending_lock = asyncio.Lock()
+        self._login_paused: set[int] = set()
         self._round_robin_state: Dict[str, Optional[int]] = {"image": None, "video": None, "default": None}
         self._rr_lock = asyncio.Lock()
+
+    async def pause_for_login(self, token_id: int) -> bool:
+        """Include selected-but-not-yet-submitted work in the login admission gate."""
+        async with self._pending_lock:
+            if (token_id in self._login_paused or self._image_pending.get(token_id, 0)
+                    or self._video_pending.get(token_id, 0)):
+                return False
+            self._login_paused.add(token_id)
+            return True
+
+    async def resume_after_login(self, token_id: int):
+        async with self._pending_lock:
+            self._login_paused.discard(token_id)
 
     async def _get_pending_count(self, token_id: int, for_image_generation: bool, for_video_generation: bool) -> int:
         async with self._pending_lock:
@@ -62,6 +76,8 @@ class LoadBalancer:
         """Atomically add pending load and, when known, reserve model credits."""
         normalized_cost = max(0, normalize_credits(credit_cost))
         async with self._pending_lock:
+            if token_id in self._login_paused:
+                return False
             if (
                 for_video_generation
                 and video_proxy_key

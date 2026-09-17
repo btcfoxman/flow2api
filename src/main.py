@@ -1,7 +1,7 @@
 """FastAPI application initialization"""
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, FileResponse, Response
-from fastapi.staticfiles import StaticFiles
+from .core.media_static import MediaStaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -16,6 +16,8 @@ from .services.load_balancer import LoadBalancer
 from .services.concurrency_manager import ConcurrencyManager
 from .services.generation_handler import GenerationHandler
 from .api import routes, admin
+from .api.account_login import register_account_login
+from .services.account_login import AccountLoginManager
 
 
 @asynccontextmanager
@@ -201,6 +203,7 @@ async def lifespan(app: FastAPI):
     print(f"✓ Server running on http://{config.server_host}:{config.server_port}")
     print("=" * 60)
 
+    account_login_manager.start_maintenance()
     yield
 
     # Shutdown
@@ -216,6 +219,7 @@ async def lifespan(app: FastAPI):
         pass
     # Stop balance refresh before browser services because AT/ST recovery may use them.
     await token_manager.stop_periodic_credits_refresh()
+    await account_login_manager.close()
     # Close browser if initialized
     if browser_service:
         await browser_service.close()
@@ -245,6 +249,9 @@ generation_handler = GenerationHandler(
 # Set dependencies
 routes.set_generation_handler(generation_handler)
 admin.set_dependencies(token_manager, proxy_manager, db, concurrency_manager)
+account_login_manager = AccountLoginManager(db, token_manager, concurrency_manager,
+                                           lambda token: token in admin.active_admin_tokens, load_balancer)
+admin.account_login_manager = account_login_manager
 
 # Create FastAPI app
 app = FastAPI(
@@ -266,11 +273,12 @@ app.add_middleware(
 # Include routers
 app.include_router(routes.router)
 app.include_router(admin.router)
+register_account_login(app, account_login_manager)
 
 # Static files - serve tmp directory for cached files
 tmp_dir = Path(__file__).parent.parent / "tmp"
 tmp_dir.mkdir(exist_ok=True)
-app.mount("/tmp", StaticFiles(directory=str(tmp_dir)), name="tmp")
+app.mount("/tmp", MediaStaticFiles(directory=str(tmp_dir)), name="tmp")
 
 # HTML routes for frontend
 static_path = Path(__file__).parent.parent / "static"
@@ -321,5 +329,6 @@ async def healthz_check():
 @app.get("/metrics")
 async def metrics():
     """Prometheus metrics endpoint for the main Flow2API service."""
-    payload = await render_main_metrics(db, concurrency_manager=concurrency_manager)
+    payload = await render_main_metrics(db, concurrency_manager=concurrency_manager,
+                                        account_login_manager=account_login_manager)
     return Response(content=payload, media_type=CONTENT_TYPE_LATEST)

@@ -274,6 +274,10 @@ VIDEO_BASE_MODELS = {
         "portrait": "veo_3_1_interpolation_lite_6s_portrait",
     },
     # R2V models
+    "veo_3_1_r2v_lite": {
+        "landscape": "veo_3_1_r2v_lite_landscape",
+        "portrait": "veo_3_1_r2v_lite_portrait",
+    },
     "veo_3_1_r2v_fast": {
         "landscape": "veo_3_1_r2v_fast",
         "portrait": "veo_3_1_r2v_fast_portrait",

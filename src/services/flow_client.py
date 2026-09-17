@@ -2796,6 +2796,8 @@ class FlowClient:
         user_paygate_tier: str = "PAYGATE_TIER_ONE",
         token_id: Optional[int] = None,
         token_video_concurrency: Optional[int] = None,
+        start_crop: Optional[Dict[str, float]] = None,
+        end_crop: Optional[Dict[str, float]] = None,
     ) -> dict:
         """收尾帧生成视频,返回task_id
 
@@ -2879,6 +2881,10 @@ class FlowClient:
                     "sceneId": scene_id
                 }
             }
+            if start_crop is not None:
+                request_data["startImage"]["cropCoordinates"] = start_crop
+            if end_crop is not None:
+                request_data["endImage"]["cropCoordinates"] = end_crop
             if output_resolution:
                 request_data["outputSpec"] = {"resolution": output_resolution}
             json_data = {

@@ -17,6 +17,20 @@ class ConcurrencyManager:
         self._image_inflight: Dict[int, int] = {}
         self._video_inflight: Dict[int, int] = {}
         self._lock = asyncio.Lock()  # Protect concurrent access
+        self._login_paused: set[int] = set()
+
+    async def pause_for_login(self, token_id: int) -> bool:
+        """Reserve only an idle account; acquisition and reservation share a lock."""
+        async with self._lock:
+            if (token_id in self._login_paused or self._image_inflight.get(token_id, 0)
+                    or self._video_inflight.get(token_id, 0)):
+                return False
+            self._login_paused.add(token_id)
+            return True
+
+    async def resume_after_login(self, token_id: int):
+        async with self._lock:
+            self._login_paused.discard(token_id)
 
     async def initialize(self, tokens: list):
         """
@@ -55,6 +69,8 @@ class ConcurrencyManager:
             True if token has available image concurrency, False if concurrency is 0
         """
         async with self._lock:
+            if token_id in self._login_paused:
+                return False
             limit = self._image_limits.get(token_id)
             # Missing limit means unlimited (-1)
             if limit is None:
@@ -80,6 +96,8 @@ class ConcurrencyManager:
             True if token has available video concurrency, False if concurrency is 0
         """
         async with self._lock:
+            if token_id in self._login_paused:
+                return False
             limit = self._video_limits.get(token_id)
             # Missing limit means unlimited (-1)
             if limit is None:
@@ -105,6 +123,8 @@ class ConcurrencyManager:
             True if acquired, False if not available
         """
         async with self._lock:
+            if token_id in self._login_paused:
+                return False
             limit = self._image_limits.get(token_id)
             inflight = self._image_inflight.get(token_id, 0)
 
@@ -164,6 +184,8 @@ class ConcurrencyManager:
             True if acquired, False if not available
         """
         async with self._lock:
+            if token_id in self._login_paused:
+                return False
             limit = self._video_limits.get(token_id)
             inflight = self._video_inflight.get(token_id, 0)
 

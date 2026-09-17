@@ -9,7 +9,7 @@ from ..core.logger import debug_logger
 from ..core.generation_errors import NativeSessionError, is_native_session_error, is_upstream_authentication_error
 from ..core.config import config
 from ..core.async_queue import AsyncQueueExpired, QUEUE_TIMEOUT_MESSAGE, queued_task_id
-from .flow_angular import AngularProtocolError, AngularRpcRejected
+from .flow_angular import AngularProtocolError, AngularRpcRejected, video_frame_crop
 from ..core.credits import (
     is_quota_exhausted_error,
     quota_exhausted_message,
@@ -997,6 +997,20 @@ def _apply_veo_3_1_model_updates():
         add_alias(f"veo_3_1_t2v_landscape_{resolution_name}", f"veo_3_1_t2v_{resolution_name}")
         add_alias(f"veo_3_1_i2v_s_landscape_{resolution_name}", f"veo_3_1_i2v_s_{resolution_name}")
 
+    # Native MZZa6b requires reference images; use T2V for prompt-only tasks.
+    for name, cfg in MODEL_CONFIG.items():
+        if name.startswith("veo_3_1_r2v_fast"):
+            cfg["min_images"] = 1
+    # Captured on 2026-09-17: Lite ingredients video, 8s / default 720p,
+    # shared upstream key for both aspect ratios, no tier-key substitution.
+    for orientation, aspect in (("landscape", landscape), ("portrait", portrait)):
+        MODEL_CONFIG[f"veo_3_1_r2v_lite_{orientation}"] = {
+            "type": "video", "video_type": "r2v", "model_key": "veo_3_1_r2v_lite",
+            "aspect_ratio": aspect, "supports_images": True, "min_images": 1, "max_images": 3,
+            "output_resolution": "VIDEO_RESOLUTION_720P", "credit_cost": 10,
+            "use_v2_model_config": True, "allow_tier_upgrade": False,
+        }
+    add_alias("veo_3_1_r2v_lite", "veo_3_1_r2v_lite_landscape")
     add_alias("veo_3_1_r2v_fast_landscape", "veo_3_1_r2v_fast")
     add_alias("veo_3_1_r2v_fast_landscape_ultra", "veo_3_1_r2v_fast_ultra")
     add_alias("veo_3_1_r2v_fast_landscape_ultra_relaxed", "veo_3_1_r2v_fast_ultra_relaxed")
@@ -2450,6 +2464,13 @@ class GenerationHandler:
                     return
 
             # ========== 上传图片 ==========
+            frame_crops = {}
+            if (video_type == "i2v" and model_key.startswith("omni_flash_i2v_")
+                    and image_count == 2 and await self.flow_client.uses_flow_session(token.id)):
+                frame_crops = {
+                    "start_crop": video_frame_crop(images[0], model_config["aspect_ratio"]),
+                    "end_crop": video_frame_crop(images[1], model_config["aspect_ratio"]),
+                }
             start_media_id = None
             end_media_id = None
             reference_images = []
@@ -2635,6 +2656,7 @@ class GenerationHandler:
                         aspect_ratio=model_config["aspect_ratio"],
                         start_media_id=start_media_id,
                         end_media_id=end_media_id,
+                        **frame_crops,
                         use_v2_model_config=use_v2_model_config,
                         output_resolution=model_config.get("output_resolution"),
                         user_paygate_tier=normalized_tier,

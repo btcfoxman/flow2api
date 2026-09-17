@@ -97,6 +97,11 @@ class TokenManager:
         if self._flow_sync_lock.locked():
             raise NativeSessionError("flow_account_busy", protocol="angular")
         async with self._flow_sync_lock:
+            if expected_email:
+                candidates = await self.db.get_all_tokens()
+                if any(str(t.email or '').strip().lower() == expected_email.strip().lower()
+                       and local_session_state(t.id) for t in candidates):
+                    raise NativeSessionError("local_session_external_sync_forbidden", protocol="angular")
             service = await BrowserCaptchaService.get_instance(self.db)
             snapshot = await service.verify_flow_import(cookies, proxy_url, expected_email)
             email = snapshot["email"]
@@ -505,6 +510,14 @@ class TokenManager:
 
         当用户编辑保存token时，如果token未过期，自动清空429禁用状态
         """
+        from ..core.native_session_state import local_session_state, validate_local_session_proxy
+        from ..core.generation_errors import NativeSessionError
+        ownership = local_session_state(token_id)
+        if ownership:
+            if captcha_proxy_url is not None:
+                validate_local_session_proxy(ownership, captcha_proxy_url)
+            if any(value is not None for value in (st, at, at_expires, google_cookies)):
+                raise NativeSessionError("local_session_external_sync_forbidden", protocol="angular")
         update_fields = {}
         if credits is not None:
             update_fields["credits"] = credits

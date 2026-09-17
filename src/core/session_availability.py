@@ -28,6 +28,7 @@ class SessionAvailability:
         from .generation_errors import NativeSessionError
         from .native_session_state import local_session_state
         if isinstance(error, NativeSessionError) and error.reason in {
+            "flow_account_busy",
             "flow_model_transport_unavailable", "flow_image_upload_not_verified",
             "flow_upsample_transport_unavailable", "flow_project_required",
             "flow_native_transport_required", "flow_browser_context_unavailable", "flow_browser_account_mismatch",
@@ -75,6 +76,10 @@ class SessionAvailability:
                   "session_expires_at": None}
         if observation and observation[0] == self._revision(token):
             result.update(observation[1])
+            if result["session_status"] == "verified":
+                checked = datetime.fromisoformat(result["session_checked_at"])
+                if (datetime.now(timezone.utc) - checked).total_seconds() > 900:
+                    result["session_status"] = "stale"
             if result["session_status"] == "checking" and self.available(token):
                 result["session_status"] = "unknown"
         return result

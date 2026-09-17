@@ -22,6 +22,8 @@
 - ⏳ **异步排队超时** - 按视频超时配置计算固定等待期限，到期自动失败并释放容量，不再提交生成；[行为说明](docs/async-task-queue-timeout.md)
 - 🌐 **代理支持** - 支持 HTTP/SOCKS5 代理
 - 📱 **Web 管理界面** - 直观的 Token 和配置管理
+- 🔐 **服务器统一账号登录** - 控制台内远程登录、定时检测与生成共用同一 Profile，无需独立 tupdater；[使用与迁移说明](docs/integrated-account-login.md)
+- 🔎 **新版协议记录** - [Veo Fast/Lite 参考图、Omni 首尾帧及查询链路核对](docs/flow-video-protocol-20260917.md)（含实测与支持范围）
 - 🎨 **图片生成连续对话**
 - 🧩 **Gemini 官方请求体兼容** - 支持 `generateContent` / `streamGenerateContent`、`systemInstruction`、`contents.parts.text/inlineData/fileData`
 - ✅ **Gemini 官方格式已实测出图** - 已使用真实 Token 验证 `/models/{model}:generateContent` 可正常返回官方 `candidates[].content.parts[].inlineData`

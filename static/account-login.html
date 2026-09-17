@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>账号登录 · Flow2API</title>
+  <style>
+    :root{color-scheme:light;--ink:#172033;--muted:#64748b;--line:#e2e8f0;--accent:#1d4ed8}
+    *{box-sizing:border-box}body{margin:0;background:#f8fafc;color:var(--ink);font:14px/1.6 system-ui,-apple-system,"Microsoft YaHei",sans-serif}
+    header{background:white;border-bottom:1px solid var(--line);padding:18px 28px;display:flex;justify-content:space-between;align-items:center;gap:20px}
+    a{color:var(--accent);text-decoration:none}header a{white-space:nowrap}h1{font-size:19px;margin:0}h2{font-size:15px;margin:0 0 12px}p{margin:8px 0;color:var(--muted)}
+    main{display:grid;grid-template-columns:300px minmax(0,1fr);gap:20px;padding:24px;max-width:1800px;margin:auto}
+    section,aside{border:1px solid var(--line);border-radius:10px;background:white;overflow:hidden}aside{padding:22px;height:fit-content}
+    label{display:block;font-size:12px;font-weight:600;margin:14px 0 6px}input,select{width:100%;padding:10px;border:1px solid #cbd5e1;border-radius:6px;background:white;color:inherit}
+    button{border:1px solid var(--line);background:white;border-radius:6px;padding:9px 13px;color:var(--ink);font:inherit;cursor:pointer}button:hover{background:#f1f5f9}button:disabled{opacity:.5;cursor:not-allowed}
+    button.primary{background:var(--accent);color:white;border-color:var(--accent)}button.primary:hover{background:#1e40af}button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid #93c5fd;outline-offset:2px}
+    .actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:16px}.wide{width:100%}.hint{font-size:12px;line-height:1.7}.divider{border-top:1px solid var(--line);margin:22px 0}
+    details summary{cursor:pointer;font-weight:600}.toolbar{padding:18px 22px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+    .toolbar .actions{margin:0}.badge{display:inline-block;padding:3px 8px;background:#f1f5f9;border-radius:5px;font-size:12px;font-weight:600;margin-top:5px}
+    #message{padding:12px 22px;white-space:pre-wrap;overflow-wrap:anywhere;border-bottom:1px solid var(--line);color:var(--muted)}#message[data-error="true"]{background:#fef2f2;color:#b91c1c}
+    #screen{height:calc(100vh - 230px);min-height:400px;display:grid;place-items:center;background:#f1f5f9}#screen iframe{width:100%;height:100%;border:0;background:#101826}#empty{max-width:420px;padding:32px;text-align:center}
+    #accountState{white-space:pre-line;overflow-wrap:anywhere}small{color:var(--muted)}[hidden]{display:none!important}
+    @media(max-width:900px){main{grid-template-columns:1fr;padding:12px}header{padding:14px}aside{padding:16px}#screen{height:65vh;min-height:330px}}
+  </style>
+</head>
+<body>
+  <header><div><h1>账号登录</h1><small>Flow2API · 登录、检测与生成共用同一份浏览器 Profile</small></div><a href="/manage">返回控制台 →</a></header>
+  <main>
+    <aside>
+      <h2>选择账号</h2>
+      <label for="account">账号邮箱</label><select id="account"><option value="">正在加载…</option></select>
+      <p id="accountState" class="hint">读取会话状态…</p>
+      <button class="primary wide" id="start">打开登录窗口</button>
+      <p class="hint">打开后，此账号暂停接单。请登录所选邮箱，再点击“完成登录并验证”。验证通过才会恢复调度，不消耗生成积分。</p>
+      <div class="divider"></div>
+      <details id="newAccount"><summary>新增服务器账号</summary>
+        <form id="createForm">
+          <label for="email">Google 账号邮箱</label><input id="email" type="email" autocomplete="off" required maxlength="254" placeholder="name@gmail.com">
+          <label for="proxy">此服务器可访问的账号代理</label><input id="proxy" required autocomplete="off" maxlength="2048" placeholder="socks5://host:port">
+          <label for="remark">备注（可选）</label><input id="remark" maxlength="500">
+          <div class="actions"><button type="submit" id="create">创建待登录账号</button></div>
+        </form>
+      </details>
+      <p class="hint">代理与 Profile 绑定。不会启动本机脚本，不再依赖 tupdater 或插件复制凭据。Google 要求重新认证时，仍需在此人工登录。</p>
+    </aside>
+    <section>
+      <div class="toolbar"><div><h2 id="title">远程登录工作台</h2><span class="badge" id="phase">未打开</span></div>
+        <div class="actions"><button id="resume" hidden>显示登录画面</button><button id="cancel" disabled>结束并保持暂停</button><button id="finish" class="primary" disabled>完成登录并验证</button></div>
+      </div>
+      <div id="message" role="status" aria-live="polite">正在连接账号管理服务…</div>
+      <div id="screen"><div id="empty"><h2>只展示当前账号的浏览器</h2><p>选择账号后打开登录窗口。窗口有效期 20 分钟，其他账号的生成任务不受影响。</p><p class="hint">关闭本页面不会立即结束服务器窗口；请使用“结束并保持暂停”释放，或在有效期内回来继续。</p></div><iframe id="viewer" title="当前账号的远程登录浏览器" hidden></iframe></div>
+    </section>
+  </main>
+  <script src="/account-login/app.js" defer></script>
+</body>
+</html>

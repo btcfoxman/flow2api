@@ -431,6 +431,8 @@ class NativeCdpAccountBrowser:
         self.proxy_extension_dir: Optional[Path] = None
         self.solve_lock = asyncio.Lock()
         self.busy_count = 0
+        self.interactive_login = False
+        self.display_override: Optional[str] = None
         self.last_used_at = time.monotonic()
         self.last_started_at: Optional[float] = None
         self.last_error: Optional[str] = None
@@ -471,7 +473,8 @@ class NativeCdpAccountBrowser:
     def is_busy(self) -> bool:
         self._prune_video_submit_reservations()
         return (
-            self.busy_count > 0
+            self.interactive_login
+            or self.busy_count > 0
             or self.solve_lock.locked()
             or bool(self._video_submit_reservations)
         )
@@ -675,6 +678,7 @@ class NativeCdpAccountBrowser:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 creationflags=creation_flags,
+                env={**os.environ, "DISPLAY": self.display_override} if self.display_override else None,
             )
             websocket_url = await self._wait_for_devtools_endpoint()
             connection = CdpConnection(websocket_url)
@@ -1899,6 +1903,8 @@ class BrowserCaptchaService:
         if worker is None:
             worker = NativeCdpAccountBrowser(int(token_id), self.db)
             self._workers[int(token_id)] = worker
+        if getattr(worker, "interactive_login", False):
+            raise NativeSessionError("flow_account_busy", protocol="angular")
         worker.busy_count += 1
         try:
             await self._ensure_capacity(worker)
@@ -1916,6 +1922,8 @@ class BrowserCaptchaService:
         if worker is None:
             worker = NativeCdpAccountBrowser(int(token_id), self.db)
             self._workers[int(token_id)] = worker
+        if getattr(worker, "interactive_login", False):
+            raise NativeSessionError("flow_account_busy", protocol="angular")
         worker.busy_count += 1
         try:
             await self._ensure_capacity(worker)
@@ -1972,6 +1980,8 @@ class BrowserCaptchaService:
         if worker is None:
             worker = NativeCdpAccountBrowser(token_key, self.db)
             self._workers[token_key] = worker
+        if getattr(worker, "interactive_login", False):
+            raise NativeSessionError("flow_account_busy", protocol="angular")
         worker.busy_count += 1
         try:
             await self._ensure_capacity(worker)
@@ -2007,6 +2017,8 @@ class BrowserCaptchaService:
         if worker is None:
             worker = NativeCdpAccountBrowser(token_key, self.db)
             self._workers[token_key] = worker
+        if getattr(worker, "interactive_login", False):
+            raise NativeSessionError("flow_account_busy", protocol="angular")
         worker.busy_count += 1
         if consume_video_reservation:
             worker.consume_video_submit_reservation()

@@ -38,6 +38,7 @@ token_manager: TokenManager = None
 proxy_manager: ProxyManager = None
 db: Database = None
 concurrency_manager: Optional[ConcurrencyManager] = None
+account_login_manager = None
 
 # Store active admin session tokens (in production, use Redis or database)
 active_admin_tokens = set()
@@ -781,6 +782,16 @@ async def change_password(
 
 # ========== Token Management ==========
 
+async def guard_account_edit(token_id: int, token: str = Depends(verify_admin_token)):
+    """Serialize administrative edits against login ownership transitions."""
+    if account_login_manager is None:
+        yield
+        return
+    async with account_login_manager._lock:
+        if account_login_manager.metadata(token_id)["login_in_progress"]:
+            raise HTTPException(409, "账号正在登录，请先完成或结束登录窗口")
+        yield
+
 def _session_metadata(account):
     if getattr(account, "auth_mode", "labs") != "flow":
         return {}
@@ -788,7 +799,15 @@ def _session_metadata(account):
     if state is None or not hasattr(state, "status"):
         return {"session_status": "unknown", "session_checked_at": None,
                 "session_reason": None, "session_expires_at": None}
-    return state.status(account)
+    result = state.status(account)
+    try:
+        result["session_owner"] = "local" if local_session_state(account.id) else "imported"
+    except NativeSessionError:
+        result.update(session_owner="local", session_status="verification_failed",
+                      session_reason="local_session_state_invalid")
+    if account_login_manager:
+        result.update(account_login_manager.metadata(account.id))
+    return result
 
 
 @router.get("/api/tokens")
@@ -899,7 +918,7 @@ async def add_token(
         raise HTTPException(status_code=500, detail=f"添加Token失败: {str(e)}")
 
 
-@router.put("/api/tokens/{token_id}")
+@router.put("/api/tokens/{token_id}", dependencies=[Depends(guard_account_edit)])
 async def update_token(
     token_id: int,
     request: UpdateTokenRequest,
@@ -958,11 +977,13 @@ async def update_token(
         return {"success": True, "message": "Token更新成功"}
     except HTTPException:
         raise
+    except NativeSessionError:
+        raise HTTPException(409, "本地登录账号不能覆盖凭据或直接变更已绑定的代理，请使用账号登录入口") from None
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.delete("/api/tokens/{token_id}")
+@router.delete("/api/tokens/{token_id}", dependencies=[Depends(guard_account_edit)])
 async def delete_token(
     token_id: int,
     token: str = Depends(verify_admin_token)
@@ -977,17 +998,19 @@ async def delete_token(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/api/tokens/{token_id}/enable")
+@router.post("/api/tokens/{token_id}/enable", dependencies=[Depends(guard_account_edit)])
 async def enable_token(
     token_id: int,
     token: str = Depends(verify_admin_token)
 ):
     """Enable token"""
+    if local_session_state(token_id) and not await token_manager.verify_native_session(token_id):
+        raise HTTPException(409, "会话验证未通过，账号保持暂停，请先完成账号登录")
     await token_manager.enable_token(token_id)
     return {"success": True, "message": "Token已启用"}
 
 
-@router.post("/api/tokens/{token_id}/disable")
+@router.post("/api/tokens/{token_id}/disable", dependencies=[Depends(guard_account_edit)])
 async def disable_token(
     token_id: int,
     token: str = Depends(verify_admin_token)

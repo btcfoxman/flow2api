@@ -45,7 +45,7 @@ class AngularRpcRejected(AngularProtocolError):
                          f"{self.public_error or 'RPC_REJECTED'}", diagnostics=diagnostic)
 
 
-VIDEO_GENERATION_RPC_IDS = frozenset({"YhhmEf", "MZZa6b", "jIps6"})
+VIDEO_GENERATION_RPC_IDS = frozenset({"YhhmEf", "MZZa6b", "jIps6", "nprQif"})
 GENERATION_RPC_IDS = VIDEO_GENERATION_RPC_IDS | {"ogiZ0b"}
 MUTATING_RPC_IDS = GENERATION_RPC_IDS | {"jHPbke", "maseQ"}
 RPC_IDS = MUTATING_RPC_IDS | {"jwpduf", "as29s", "ngNC2", "UpteDb", "nzlxg"}
@@ -132,8 +132,16 @@ def resolve_video_model(model):
             rpc_id={"abra_edit": "jIps6", "abra_r2v": "MZZa6b", "abra_t2v": "YhhmEf"}[family],
             resolution=4 if resolution == "360p" else 1,
         )
-    if model == "veo_3_1_r2v_fast_portrait":
+    # 2026-09-17 MZZa6b captures and HTrJv catalog. Do not enroll
+    # relaxed/low-priority or T2V/I2V models just because they share a prefix.
+    if (model == "veo_3_1_r2v_lite"
+            or re.fullmatch(r"veo_3_1_r2v_fast_(?:landscape|portrait)(?:_ultra)?", model)):
         return VideoModel(model, "veo_reference", "MZZa6b", 1)
+    match = re.fullmatch(r"(omni_flash_i2v_(?:4|6|8|10)s_first_last)(?:_(360p|720p))?", model)
+    if match:
+        base, resolution = match.groups()
+        return VideoModel(base + ("_360p" if resolution == "360p" else ""),
+                          "omni_first_last", "nprQif", 4 if resolution == "360p" else 1)
     return None
 
 
@@ -270,6 +278,52 @@ def uploaded_image_id(payload, project_id):
     return media[0]
 
 
+def video_frame_crop(image_bytes, aspect_ratio):
+    """Website-style centered crop, without decoding/re-encoding image pixels."""
+    from io import BytesIO
+    from PIL import Image
+
+    target = {"VIDEO_ASPECT_RATIO_LANDSCAPE": 16 / 9,
+              "VIDEO_ASPECT_RATIO_PORTRAIT": 9 / 16}.get(aspect_ratio)
+    if target is None:
+        raise AngularProtocolError("Unsupported Angular video aspect ratio")
+    try:
+        with Image.open(BytesIO(image_bytes)) as image:
+            width, height = image.size
+            if image.getexif().get(274) in (5, 6, 7, 8):
+                width, height = height, width
+    except (OSError, ValueError, TypeError):
+        raise AngularProtocolError("Cannot read video frame dimensions") from None
+    crop = {"top": 0, "left": 0, "bottom": 1, "right": 1}
+    ratio = width / height
+    # Generated images can be rounded to latent-grid dimensions (1376x768
+    # in the capture); the website keeps the full frame for this small delta.
+    if abs(ratio / target - 1) <= 0.01:
+        return crop
+    if ratio > target:
+        crop["left"] = (1 - target / ratio) / 2
+        crop["right"] = 1 - crop["left"]
+    else:
+        crop["top"] = (1 - ratio / target) / 2
+        crop["bottom"] = 1 - crop["top"]
+    return crop
+
+
+def video_frame(image):
+    """Start/end image message, including normalized crop (field 6)."""
+    if (not isinstance(image, dict) or set(image) - {"mediaId", "cropCoordinates"}
+            or not isinstance(image.get("mediaId"), str) or not image["mediaId"]):
+        raise AngularProtocolError("First/last video requires both frame media IDs")
+    crop = image.get("cropCoordinates", {"top": 0, "left": 0, "bottom": 1, "right": 1})
+    if not isinstance(crop, dict) or set(crop) != {"top", "left", "bottom", "right"}:
+        raise AngularProtocolError("Invalid video frame crop")
+    values = [crop[key] for key in ("top", "left", "bottom", "right")]
+    if (any(type(v) not in (int, float) or not 0 <= v <= 1 for v in values)
+            or values[0] >= values[2] or values[1] >= values[3]):
+        raise AngularProtocolError("Invalid video frame crop")
+    return [None, image["mediaId"], None, None, None, [v if v else None for v in values]]
+
+
 def build_video_rpc(rest):
     requests = rest.get("requests") or []
     if len(requests) != 1:
@@ -288,11 +342,14 @@ def build_video_rpc(rest):
         resolution = output.get("resolution")
         if resolution is not None and VIDEO_RESOLUTIONS.get(resolution) != spec.resolution:
             raise AngularProtocolError("Angular output resolution does not match the model")
-    default_aspect = ("VIDEO_ASPECT_RATIO_PORTRAIT" if spec.family == "veo_reference"
+    default_aspect = ("VIDEO_ASPECT_RATIO_PORTRAIT" if "_portrait" in spec.model_key
                       else "VIDEO_ASPECT_RATIO_LANDSCAPE")
     aspect = VIDEO_ASPECT_RATIOS.get(request.get("aspectRatio", default_aspect))
     if aspect is None:
         raise AngularProtocolError("Unsupported Angular video aspect ratio")
+    if spec.family == "veo_reference" and "_fast_" in spec.model_key:
+        if aspect != (1 if "_portrait" in spec.model_key else 2):
+            raise AngularProtocolError("Angular aspect ratio does not match the model")
     context = rest.get("clientContext") or {}
     project = context.get("projectId")
     captcha = (context.get("recaptchaContext") or {}).get("token")
@@ -303,7 +360,17 @@ def build_video_rpc(rest):
                         or not isinstance(part["text"], str) for part in parts):
         raise AngularProtocolError("Unsupported Angular prompt shape")
     prompt = "".join(part["text"] for part in parts)
-    refs = [[None, item["mediaId"]] for item in request.get("referenceImages", [])]
+    reference_images = request.get("referenceImages", [])
+    if not isinstance(reference_images, list) or any(
+            not isinstance(item, dict) or not isinstance(item.get("mediaId"), str)
+            or not item["mediaId"] for item in reference_images):
+        raise AngularProtocolError("Invalid reference image media IDs")
+    refs = [[None, item["mediaId"]] for item in reference_images]
+    if spec.family == "veo_reference" and len(refs) > 3:
+        raise AngularProtocolError("Veo reference video accepts at most three images")
+    if spec.family in {"veo_reference", "abra_r2v"} and any(
+            request.get(key) for key in ("startImage", "endImage", "videoInput", "imageInputs")):
+        raise AngularProtocolError("Reference video RPC does not accept frame or video inputs")
     batch = (rest.get("mediaGenerationContext") or {}).get("batchId") or str(uuid.uuid4())
     ids = [None, None, None, None, str(uuid.uuid4()), str(uuid.uuid4())]
     text_input = [None, None, [[[prompt]]]]
@@ -312,6 +379,14 @@ def build_video_rpc(rest):
         # Text/model/aspect/metadata are fields 1/2/3/5; no reference slot.
         item = [text_input, spec.model_key, aspect, None, ids]
         output_index = 7
+    elif spec.family == "omni_first_last":
+        if refs or request.get("videoInput") or request.get("imageInputs"):
+            raise AngularProtocolError("First/last video RPC does not accept reference inputs")
+        # nprQif / BatchAsyncGenerateVideoStartAndEndImage. Unlike Abra
+        # reference/text requests, even 360p omits OutputSpec; model selects it.
+        item = [text_input, spec.model_key, aspect, None,
+                video_frame(request.get("startImage")), video_frame(request.get("endImage")), ids]
+        output_index = None
     elif spec.family == "abra_edit":
         video = request.get("videoInput") or {}
         if not video.get("mediaId") or not video.get("endFrameIndex"):
@@ -327,7 +402,7 @@ def build_video_rpc(rest):
     # Current frontend omits OutputSpec for default 720p (enum 1), and sets
     # field 8 (text) / 12 (references) / 13 (edit) to [4] for 360p.
     # See the 2026-09-09 and 2026-09-15 source records.
-    if spec.resolution != 1:
+    if spec.resolution != 1 and output_index is not None:
         item.extend([None] * (output_index - len(item)))
         item.append([spec.resolution])
     return spec.rpc_id, [[item], project_context(project, captcha), [batch, 2]]

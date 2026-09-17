@@ -7,8 +7,12 @@ UNSUPPORTED_MODEL_MESSAGE = "当前服务暂不支持此模型的生成方式，
 
 
 def supports_flow_model(model_config):
+    # Do not charge for a base generation when its requested upsample stage
+    # has no verified native transport yet.
+    if model_config.get("upsample"):
+        return False
     if model_config.get("type") == "image":
-        return model_config.get("model_name") in IMAGE_MODELS and not model_config.get("upsample")
+        return model_config.get("model_name") in IMAGE_MODELS
     return resolve_video_model(model_config.get("model_key")) is not None
 
 

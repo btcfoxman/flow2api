@@ -37,6 +37,8 @@ jobs:
 
       - name: Verify regression tests before publishing
         run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb x11vnc fluxbox novnc
           python -m pip install -r requirements-test.txt
           python -m pytest -q
 

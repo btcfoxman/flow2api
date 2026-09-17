@@ -16,6 +16,11 @@ def check_metrics(body):
         if not line or line.startswith("#"):
             continue
         name, value, *_ = line.split()
+        # Older deployed versions lack this metric; retain their existing
+        # generation/diagnostic checks during the first upgrade. New versions
+        # must not restart during any phase of an integrated login lease.
+        if name == "flow2api_account_login_active" and float(value) != 0:
+            raise RuntimeError("Interactive account login is active; deployment refused")
         if name in expected:
             seen.add(name)
             if float(value) != 0:
