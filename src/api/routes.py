@@ -19,8 +19,8 @@ from pydantic import AliasChoices, BaseModel, Field
 from ..core.auth import AuthManager, verify_api_key_flexible
 from ..core.config import config
 from ..core.async_queue import (
-    AsyncQueueExpired, QUEUE_TIMEOUT_MESSAGE, QUEUE_SUBMISSION_UNCERTAIN_MESSAGE,
-    queue_submission_guard,
+    AsyncQueueDeferred, AsyncQueueExpired, QUEUE_TIMEOUT_MESSAGE, QUEUE_SUBMISSION_UNCERTAIN_MESSAGE,
+    can_defer_queued_submission, queue_submission_guard,
 )
 from ..core.logger import debug_logger
 from ..core.media_errors import (
@@ -1530,18 +1530,7 @@ async def _process_async_video_queue_item(queue_item: Dict[str, Any]) -> float:
             )
             if reason:
                 unavailable_reason = str(reason)
-        if unavailable_reason != queue_item.get("last_error"):
-            debug_logger.log_warning(
-                f"[ASYNC QUEUE] task={local_task_id} remains queued: "
-                f"{unavailable_reason}"
-            )
-        await handler.db.update_async_task(
-            local_task_id,
-            status="queued",
-            last_error=unavailable_reason,
-            retry_after_seconds=ASYNC_TASK_QUEUE_RETRY_SECONDS,
-        )
-        return ASYNC_TASK_QUEUE_RETRY_SECONDS
+        return await _defer_async_video_queue_item(queue_item, unavailable_reason)
 
     with queue_submission_guard(lambda: handler.db.admit_async_task_submission(local_task_id), task_id=local_task_id):
         try:
@@ -1551,6 +1540,12 @@ async def _process_async_video_queue_item(queue_item: Dict[str, Any]) -> float:
             )
         except AsyncQueueExpired:
             return 0.0
+        except AsyncQueueDeferred as exc:
+            if not can_defer_queued_submission():
+                # Fail closed if a future caller misuses this signal after
+                # admission; worker recovery will preserve submit uncertainty.
+                raise
+            return await _defer_async_video_queue_item(queue_item, str(exc))
     current = await handler.db.get_async_task(local_task_id)
     if current is None or current["status"] == "failed":
         return 0.0
@@ -1619,6 +1614,19 @@ async def _process_async_video_queue_item(queue_item: Dict[str, Any]) -> float:
         )
         return ASYNC_TASK_QUEUE_RETRY_SECONDS
     return 0.0
+
+
+async def _defer_async_video_queue_item(queue_item: Dict[str, Any], reason: str) -> float:
+    """Keep ordinary capacity waits out of failed-generation/retry accounting."""
+    handler = _ensure_generation_handler()
+    task_id = str(queue_item["task_id"])
+    if reason != queue_item.get("last_error"):
+        debug_logger.log_info(f"[ASYNC QUEUE] task={task_id} remains queued: {reason}")
+    # update_async_task atomically honors expiry/terminal state. A deadline
+    # reached during selection must never be revived by this release.
+    await handler.db.update_async_task(task_id, status="queued", last_error=reason,
+                                     retry_after_seconds=ASYNC_TASK_QUEUE_RETRY_SECONDS)
+    return ASYNC_TASK_QUEUE_RETRY_SECONDS
 
 
 async def _attach_queued_video_task(

@@ -8,7 +8,10 @@ from typing import Optional, AsyncGenerator, List, Dict, Any, Set
 from ..core.logger import debug_logger
 from ..core.generation_errors import NativeSessionError, is_native_session_error, is_upstream_authentication_error
 from ..core.config import config
-from ..core.async_queue import AsyncQueueExpired, QUEUE_TIMEOUT_MESSAGE, queued_task_id
+from ..core.async_queue import (
+    AsyncQueueDeferred, AsyncQueueExpired, QUEUE_TIMEOUT_MESSAGE,
+    can_defer_queued_submission, queued_task_id,
+)
 from .flow_angular import AngularProtocolError, AngularRpcRejected, video_frame_crop
 from ..core.credits import (
     is_quota_exhausted_error,
@@ -1594,6 +1597,11 @@ class GenerationHandler:
                     model=model,
                     minimum_credits=required_credits,
                 )
+            if async_video_task and can_defer_queued_submission():
+                # Another dispatcher can reserve the account after the queue's
+                # availability probe. No generation was attempted: keep waiting
+                # without a 503 failure log, retry count or failure metric.
+                raise AsyncQueueDeferred(internal_error_msg or "当前没有可执行该视频任务的账号")
             if internal_error_msg:
                 debug_logger.log_warning(
                     f"[GENERATION] Internal availability reason: {internal_error_msg}"
@@ -1609,7 +1617,9 @@ class GenerationHandler:
                 token_id=request_context.get("last_token_id"),
                 operation=request_operation,
                 request_data=request_payload,
-                response_data={"error": error_msg, "performance": perf_trace},
+                response_data={"error": error_msg, "performance": perf_trace,
+                               "internal_failure": {"stage": "account_selection", "reason": "no_available_account",
+                                                    "detail": internal_error_msg or "No eligible account"}},
                 status_code=503,
                 duration=duration,
                 log_id=request_log_state.get("id"),
@@ -3854,6 +3864,7 @@ class GenerationHandler:
                 request_data = {**request_data, "queue_task_id": queue_id}
                 if status_code in {429, 503} and operation != "generate_video_async_result":
                     effective_status_text = "retrying"
+                    effective_progress = 0
             request_body = json.dumps(request_data, ensure_ascii=False)
             response_body = json.dumps(response_data, ensure_ascii=False)
 

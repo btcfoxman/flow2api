@@ -14,6 +14,14 @@ class AsyncQueueExpired(RuntimeError):
         super().__init__(QUEUE_TIMEOUT_MESSAGE)
 
 
+class AsyncQueueDeferred(RuntimeError):
+    """No account was reserved; return to FIFO waiting, not a failed attempt.
+
+    The reason is an admin-only scheduling diagnostic, never a public error.
+    This signal must not be used after a chargeable submission has started.
+    """
+
+
 def normalize_queue_timeout(value) -> int:
     """Use the existing video timeout range; a queue must never wait forever."""
     try:
@@ -28,6 +36,11 @@ _queued_task_id = ContextVar("async_queue_task_id", default=None)
 
 def queued_task_id():
     return _queued_task_id.get()
+
+
+def can_defer_queued_submission() -> bool:
+    guard = _submission_guard.get()
+    return bool(_queued_task_id.get() and guard is not None and not guard.admitted)
 
 
 @dataclass

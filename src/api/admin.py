@@ -176,6 +176,15 @@ def _log_request_id(log: Dict[str, Any]) -> str:
 
 
 def _filter_superseded_async_video_submit_logs(logs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def queue_id(log):
+        body = _parse_log_json(log.get("request_body"))
+        value = body.get("queue_task_id") if isinstance(body, dict) else None
+        return value if isinstance(value, str) and value else None
+
+    async_result_queue_ids = {
+        queue_id(log) for log in logs
+        if log.get("operation") == "generate_video_async_result" and queue_id(log)
+    }
     async_result_request_ids = {
         request_id
         for log in logs
@@ -183,11 +192,18 @@ def _filter_superseded_async_video_submit_logs(logs: List[Dict[str, Any]]) -> Li
         for request_id in [_log_request_id(log)]
         if request_id
     }
-    if not async_result_request_ids:
+    if not async_result_request_ids and not async_result_queue_ids:
         return logs
 
     filtered: List[Dict[str, Any]] = []
     for log in logs:
+        # A queue job can have several different request_ids while waiting.
+        # Prefer its current result record, not an obsolete capacity/retry
+        # attempt. Original rows remain available through the detail endpoint.
+        if (log.get("operation") in {"generate_video", "extend_video"}
+                and log.get("status_text") == "retrying"
+                and queue_id(log) in async_result_queue_ids):
+            continue
         if (
             log.get("operation") == "generate_video"
             and (log.get("status_text") or "") == "video_submitted"
@@ -1595,7 +1611,7 @@ async def get_logs(
             "status_code": status_code if status_code is not None else raw_status_code,
             "duration": log.get("duration"),
             "status_text": log.get("status_text") or "",
-            "progress": log.get("progress") or 0,
+            "progress": 0 if log.get("status_text") == "retrying" else log.get("progress") or 0,
             "created_at": log.get("created_at"),
             "updated_at": log.get("updated_at"),
             "error_summary": _extract_error_summary(log.get("response_body_excerpt")) if status_code is not None and status_code >= 400 else "",
@@ -1624,7 +1640,7 @@ async def get_log_detail(
         "status_code": log.get("status_code"),
         "duration": log.get("duration"),
         "status_text": log.get("status_text") or "",
-        "progress": log.get("progress") or 0,
+        "progress": 0 if log.get("status_text") == "retrying" else log.get("progress") or 0,
         "created_at": log.get("created_at"),
         "updated_at": log.get("updated_at"),
         "error_summary": error_summary,

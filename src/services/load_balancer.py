@@ -348,6 +348,9 @@ class LoadBalancer:
 
         for token in active_tokens:
             video_proxy_state = None
+            if token.id in self._login_paused:
+                filtered_reasons[token.id] = "account paused for interactive login"
+                continue
             if config.captcha_method == "native_cdp":
                 raw_cookies = getattr(token, "google_cookies", None)
                 if not has_complete_flow_cookies(raw_cookies):
@@ -540,6 +543,17 @@ class LoadBalancer:
             token = await self.token_manager.ensure_valid_token(token)
             if not token:
                 debug_logger.log_info(f"[LOAD_BALANCER] 跳过 Token {token_id}: AT无效或已过期")
+                continue
+
+            # Verification can refresh the balance/tier and yield to a login
+            # or another reservation. The candidate snapshot is no longer an
+            # admission decision, including non-reserving queue probes.
+            effective_credits = max(0, normalize_credits(token.credits) - await self._get_pending_credits(token.id))
+            if (not token.is_active or token.id in self._login_paused
+                    or not has_minimum_generation_credits(effective_credits, minimum_credits)
+                    or (for_video_generation and not token.video_enabled)
+                    or (for_image_generation and not token.image_enabled)
+                    or (model and not supports_model_for_tier(model, normalize_user_paygate_tier(token.user_paygate_tier)))):
                 continue
 
             if track_pending:

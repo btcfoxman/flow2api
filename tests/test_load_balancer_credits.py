@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import AsyncMock
 
 from src.core.config import config
 from src.core.credits import (
@@ -56,6 +57,48 @@ class LoadBalancerCreditsTests(unittest.IsolatedAsyncioTestCase):
     async def test_default_minimum_generation_credits_is_fifteen(self):
         self.assertEqual(DEFAULT_MIN_GENERATION_CREDITS, 15)
         self.assertEqual(get_minimum_generation_credits(), 15)
+
+    async def test_refreshed_insufficient_balance_is_not_selected_or_reserved(self):
+        config.set_captcha_method("personal")
+        for track_pending in (False, True):
+            with self.subTest(track_pending=track_pending):
+                original = make_token(1, 30)
+                manager = FakeTokenManager([original])
+                manager.ensure_valid_token = AsyncMock(return_value=original.model_copy(update={"credits": 6}))
+                balancer = LoadBalancer(manager)
+                self.assertIsNone(await balancer.select_token(for_video_generation=True,
+                    model="abra_r2v_10s", minimum_credits=15, track_pending=track_pending))
+                self.assertEqual(balancer._video_pending, {})
+                self.assertEqual(balancer._pending_credits, {})
+
+    async def test_interactive_login_pause_is_filtered_even_for_queue_probe(self):
+        manager = FakeTokenManager([make_token(1, 30)])
+        balancer = LoadBalancer(manager)
+        self.assertTrue(await balancer.pause_for_login(1))
+        self.assertIsNone(await balancer.select_token(for_video_generation=True, minimum_credits=15))
+        self.assertEqual(manager.ensure_calls, [])
+
+    async def test_login_pause_during_verification_cannot_be_selected(self):
+        config.set_captcha_method("personal")
+        manager = FakeTokenManager([make_token(1, 30)])
+        balancer = LoadBalancer(manager)
+        async def verify(token):
+            await balancer.pause_for_login(token.id)
+            return token
+        manager.ensure_valid_token = verify
+        self.assertIsNone(await balancer.select_token(for_video_generation=True, minimum_credits=15))
+
+    async def test_disabled_account_after_verification_cannot_be_reserved(self):
+        config.set_captcha_method("personal")
+        for changed in ({"is_active": False}, {"video_enabled": False}):
+            with self.subTest(changed=changed):
+                original = make_token(1, 30)
+                manager = FakeTokenManager([original])
+                manager.ensure_valid_token = AsyncMock(return_value=original.model_copy(update=changed))
+                balancer = LoadBalancer(manager)
+                self.assertIsNone(await balancer.select_token(for_video_generation=True,
+                    minimum_credits=15, track_pending=True))
+                self.assertEqual(balancer._video_pending, {})
 
     async def test_quota_message_accepts_exact_model_credit_cost(self):
         self.assertIn("6", quota_exhausted_message(6))

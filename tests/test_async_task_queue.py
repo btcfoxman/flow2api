@@ -1,4 +1,5 @@
 import asyncio
+import json
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -7,6 +8,11 @@ from unittest.mock import AsyncMock, patch
 from src.api import routes
 from src.core.database import Database
 from src.core.models import Task, Token
+from src.core.async_queue import (
+    AsyncQueueDeferred, QUEUE_TIMEOUT_MESSAGE, admit_queued_video_submission,
+    can_defer_queued_submission, queue_submission_guard,
+)
+from src.services.generation_handler import GenerationHandler
 
 
 class AsyncTaskQueueTests(unittest.IsolatedAsyncioTestCase):
@@ -150,6 +156,99 @@ class AsyncTaskQueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(current["request_payload"], "{}")
         self.assertEqual((await self.db.claim_next_async_task())["task_id"], "next")
         collect.assert_awaited_once()
+
+    async def test_capacity_lost_after_probe_is_waiting_not_failed_generation(self):
+        normalized = routes.NormalizedGenerationRequest(model="abra_r2v_10s", prompt="test", images=[])
+        payload = routes._serialize_normalized_generation_request(normalized)
+        added = await self.db.enqueue_async_task(task_id="race", task_type="video", model=normalized.model,
+            prompt=normalized.prompt, request_payload=payload, base_url_override=None, capacity=50)
+        await self._enqueue("next")
+        claimed = await self.db.claim_next_async_task()
+        handler = GenerationHandler.__new__(GenerationHandler)
+        handler.db = self.db
+        handler.flow_client = SimpleNamespace()
+        handler._log_request = AsyncMock()
+        handler.load_balancer = SimpleNamespace(
+            select_token=AsyncMock(side_effect=[SimpleNamespace(id=1), None]),
+            get_unavailable_reason=AsyncMock(return_value="proxy already reserved"))
+        with patch.object(routes, "generation_handler", handler), patch(
+                "src.services.generation_handler.record_generation_result") as record:
+            delay = await routes._process_async_video_queue_item(claimed)
+        queued = await self.db.get_async_task("race")
+        self.assertGreater(delay, 0)
+        self.assertEqual(queued["status"], "queued")
+        self.assertEqual(queued["attempt_count"], 0)
+        self.assertEqual(queued["request_payload"], payload)
+        self.assertEqual(queued["expires_at"], added["expires_at"])
+        self.assertIsNone(queued["submission_started_at"])
+        self.assertEqual(await self.db.get_async_task_position("race"), 1)
+        self.assertIsNone(await self.db.claim_next_async_task())
+        handler._log_request.assert_not_awaited()
+        record.assert_not_called()
+        self.assertEqual((await self.db.get_generation_outcome_stats())["total_failed_tasks"], 0)
+        self.assertFalse(can_defer_queued_submission())
+
+    async def test_deferred_account_wait_does_not_revive_expired_queue(self):
+        normalized = routes.NormalizedGenerationRequest(model="abra_r2v_10s", prompt="test", images=[])
+        await self.db.enqueue_async_task(task_id="expired-race", task_type="video", model=normalized.model,
+            prompt=normalized.prompt, request_payload=routes._serialize_normalized_generation_request(normalized),
+            base_url_override=None, capacity=50)
+        claimed = await self.db.claim_next_async_task()
+        async def collect(*args):
+            async with self.db._connect(write=True) as connection:
+                await connection.execute("UPDATE async_task_queue SET expires_at=1 WHERE task_id='expired-race'")
+                await connection.commit()
+            raise AsyncQueueDeferred("no account")
+        handler = SimpleNamespace(db=self.db, load_balancer=SimpleNamespace(
+            select_token=AsyncMock(return_value=SimpleNamespace(id=1))))
+        with patch.object(routes, "generation_handler", handler), patch.object(
+                routes, "_collect_async_video_task_result", collect):
+            await routes._process_async_video_queue_item(claimed)
+        expired = await self.db.get_async_task("expired-race")
+        self.assertEqual(expired["status"], "failed")
+        self.assertEqual(expired["last_error"], QUEUE_TIMEOUT_MESSAGE)
+        self.assertEqual(expired["request_payload"], "{}")
+        self.assertEqual(expired["attempt_count"], 0)
+
+    async def test_sync_no_account_still_returns_safe_503(self):
+        handler = GenerationHandler.__new__(GenerationHandler)
+        handler.db = self.db
+        handler.flow_client = SimpleNamespace()
+        handler._log_request = AsyncMock()
+        handler.load_balancer = SimpleNamespace(select_token=AsyncMock(return_value=None),
+            get_unavailable_reason=AsyncMock(return_value="private routing diagnostic"))
+        result = [chunk async for chunk in handler.handle_generation(
+            model="abra_r2v_10s", prompt="test", stream=False)]
+        self.assertEqual(json.loads(result[-1])["error"]["status_code"], 503)
+        self.assertNotIn("private routing diagnostic", result[-1])
+        self.assertEqual(handler._log_request.call_args.kwargs["response_data"]["internal_failure"]["reason"],
+                         "no_available_account")
+
+    async def test_defer_guard_only_permits_unsubmitted_queue_work(self):
+        self.assertFalse(can_defer_queued_submission())
+        with queue_submission_guard(AsyncMock(return_value=True), task_id="queued"):
+            self.assertTrue(can_defer_queued_submission())
+            await admit_queued_video_submission()
+            self.assertFalse(can_defer_queued_submission())
+        self.assertFalse(can_defer_queued_submission())
+
+    async def test_defer_signal_after_admission_cannot_requeue_paid_work(self):
+        normalized = routes.NormalizedGenerationRequest(model="abra_r2v_10s", prompt="test", images=[])
+        await self.db.enqueue_async_task(task_id="admitted", task_type="video", model=normalized.model,
+            prompt=normalized.prompt, request_payload=routes._serialize_normalized_generation_request(normalized),
+            base_url_override=None, capacity=50)
+        claimed = await self.db.claim_next_async_task()
+        async def collect(*args):
+            await admit_queued_video_submission()
+            raise AsyncQueueDeferred("invalid late deferral")
+        handler = SimpleNamespace(db=self.db, load_balancer=SimpleNamespace(
+            select_token=AsyncMock(return_value=SimpleNamespace(id=1))))
+        with patch.object(routes, "generation_handler", handler), patch.object(
+                routes, "_collect_async_video_task_result", collect), self.assertRaises(AsyncQueueDeferred):
+            await routes._process_async_video_queue_item(claimed)
+        current = await self.db.get_async_task("admitted")
+        self.assertEqual(current["status"], "submitting")
+        self.assertIsNotNone(current["submission_started_at"])
 
     async def test_upload_timeout_retains_payload_and_queue_position(self):
         from src.core.media_errors import project_image_upload_failure_response

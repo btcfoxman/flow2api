@@ -9,7 +9,7 @@ from src.services.load_balancer import LoadBalancer
 def token(token_id=1, **changes):
     values = dict(id=token_id, st="st", google_cookies="cookies", captcha_proxy_url="same-proxy",
                   at="at", credits=100, user_paygate_tier="PAYGATE_TIER_ONE", image_enabled=True,
-                  video_enabled=True, email="test@example.invalid")
+                  video_enabled=True, is_active=True, email="test@example.invalid")
     values.update(changes)
     return SimpleNamespace(**values)
 

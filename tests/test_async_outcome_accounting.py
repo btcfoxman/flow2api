@@ -43,9 +43,10 @@ class AsyncOutcomeAccountingTests(unittest.IsolatedAsyncioTestCase):
             await self.log("completed", 200, "generate_video_async_result")
         self.assertEqual((await self.db.get_generation_outcome_stats())["total_successes"], 0)
         async with self.db._connect() as conn:
-            row = await (await conn.execute("SELECT status_text,request_body FROM request_logs WHERE id=?", (retry_id,))).fetchone()
+            row = await (await conn.execute("SELECT status_text,request_body,progress FROM request_logs WHERE id=?", (retry_id,))).fetchone()
         self.assertEqual(row[0], "retrying")
         self.assertEqual(json.loads(row[1])["queue_task_id"], "public-task")
+        self.assertEqual(row[2], 0)
         await self.task("upstream-id")
         await self.task()
         await self.db.delete_async_task("public-task")
