@@ -33,3 +33,10 @@ class ModelCapabilityTests(unittest.IsolatedAsyncioTestCase):
                       "veo_3_1_i2v_s_fast_fl", "veo_3_1_i2v_s_fast_portrait_fl"):
             self.assertTrue(supports_flow_model(MODEL_CONFIG[model]), model)
         self.assertFalse(supports_flow_model(MODEL_CONFIG["imagen-4.0-generate-preview-portrait"]))
+
+    def test_flash_image_aliases_use_current_flow_model_key(self):
+        flash_models = {name: value for name, value in MODEL_CONFIG.items()
+                        if name.startswith("gemini-3.1-flash-image-")}
+        self.assertEqual(len(flash_models), 15)
+        self.assertTrue(all(value["model_name"] == "BELUGA"
+                            and supports_flow_model(value) for value in flash_models.values()))

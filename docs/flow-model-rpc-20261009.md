@@ -7,6 +7,7 @@ prompts, media IDs, cookies, tokens, and image bodies were discarded.
 | Operation | RPC | Captured upstream result | Relevant request fields |
 | --- | --- | --- | --- |
 | Base image | `ogiZ0b` | HTTP 200 | `GEM_PIX_2` |
+| Gemini 3.1 Flash base image | `ogiZ0b` | HTTP 200 | `BELUGA` |
 | Image upscale to 2K | `SPrCad` | HTTP 200 | `[sourceMediaId, 1, projectContext]` |
 | Veo 3.1 Fast text, portrait | `YhhmEf` | HTTP 200 | `veo_3_1_t2v_fast_portrait`, aspect `1` |
 | Veo 3.1 Fast text, landscape | `YhhmEf` | HTTP 200 | `veo_3_1_t2v_fast`, aspect `2` |
@@ -18,6 +19,12 @@ media ID may differ from the source media ID, so the response is bound by
 project ID and checked for valid JPEG bytes. The 4K enum value `2` is also
 documented by the independent FlowKit protocol implementation; no 4K page
 submission was made in this capture.
+
+The current Gemini 3.1 Flash image key is `BELUGA` (manually captured on
+2026-10-09). The service still used the older `NARWHAL` key, which received
+gRPC 5 / HTTP 404 in a live 3.5 pre request. Older September captures of
+`NARWHAL` remain historical evidence; the public Flash aliases now select
+`BELUGA`.
 
 The native Flow path must fail an upscale request if the requested resolution
 cannot be delivered. Returning the original 1K image as a successful 2K or

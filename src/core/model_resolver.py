@@ -21,7 +21,7 @@ from ..core.logger import debug_logger
 IMAGE_BASE_MODELS = {
     # Gemini 3.0 Pro (GEM_PIX_2)
     "gemini-3.0-pro-image": "gemini-3.0-pro-image",
-    # Gemini 3.1 Flash (NARWHAL)
+    # Gemini 3.1 Flash (BELUGA on the current Flow page)
     "gemini-3.1-flash-image": "gemini-3.1-flash-image",
     # Imagen 4.0 (IMAGEN_3_5)
     "imagen-4.0-generate-preview": "imagen-4.0-generate-preview",
