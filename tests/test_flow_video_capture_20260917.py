@@ -189,7 +189,9 @@ class CapturedVideoWireTests(unittest.TestCase):
                     'clientContext': {'projectId': ctx[5], 'recaptchaContext': {'token': ctx[10][0]}},
                     'mediaGenerationContext': {'batchId': payload[4][0]}}
             with self.subTest(name=name), patch('src.services.flow_angular.uuid.uuid4', side_effect=entry[12:14]):
-                self.assertEqual(build_image_rpc(rest), ('ogiZ0b', payload))
+                expected = copy.deepcopy(payload)
+                expected[1][0][12:14] = [value.upper() for value in entry[12:14]]
+                self.assertEqual(build_image_rpc(rest), ('ogiZ0b', expected))
                 result = image_result(case['result'], ctx[5])
                 self.assertEqual(len(result['media']), 1)
 

@@ -255,6 +255,7 @@ class FlowAccountWireTests(unittest.TestCase):
         self.assertIsNone(payload[1][0][2])
         self.assertEqual(payload[1][0][3:6],[12,3,"GEM_PIX_2"])
         self.assertEqual(payload[1][0][8],[[["test"]]])
+        self.assertTrue(all(value == value.upper() for value in payload[1][0][12:14]))
         rendition = [None]*14
         rendition[13]="https://flow-content.google/image/media?Expires=x&KeyName=y&Signature=z"
         reply = [[["media",None,"workflow",None,None,None,[rendition]]],[["workflow",None,None,None,"project"]]]

@@ -1991,7 +1991,7 @@ class FlowClient:
             # 新版图片接口使用结构化提示词 + new media 开关
             request_data = {
                 "clientContext": client_context,
-                "seed": random.randint(1, 999999),
+                "seed": random.randint(1, 2**31 - 1),
                 "imageModelName": model_name,
                 "imageAspectRatio": aspect_ratio,
                 "structuredPrompt": {
@@ -2005,7 +2005,7 @@ class FlowClient:
             json_data = {
                 "clientContext": client_context,
                 "mediaGenerationContext": {
-                    "batchId": str(uuid.uuid4())
+                    "batchId": str(uuid.uuid4()).upper()
                 },
                 "useNewMedia": True,
                 "requests": [request_data]

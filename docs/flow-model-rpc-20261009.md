@@ -42,6 +42,19 @@ are actual reference images. A live service request using the old empty-array
 shape received `PUBLIC_ERROR_UNSAFE_GENERATION`; the upstream response alone
 does not prove this field caused that verdict.
 
+Account #50 provided a same-account and same-project comparison on 3.5 pre.
+The Flow webpage returned image media for a text-only `BELUGA` request, while
+the deployed service's direct `ogiZ0b` request received gRPC 3 /
+`PUBLIC_ERROR_UNSAFE_GENERATION` with an innocuous prompt. A direct RPC made
+from that account's own Chrome project page also received gRPC 3. The current
+page's successful request did not include the historical `x-browser-validation`
+header, so adding that header is not supported by this comparison. The webpage
+used a 32-bit-range seed and uppercase UUIDs for request IDs; the service
+encoder now matches these observed fields. Their individual effect on the
+upstream verdict is not established. Subsequent repeated webpage submissions
+also began receiving gRPC 3, so further paid canaries should wait for the
+account to cool down.
+
 The native Flow path must fail an upscale request if the requested resolution
 cannot be delivered. Returning the original 1K image as a successful 2K or
 4K result would mislead the caller.
