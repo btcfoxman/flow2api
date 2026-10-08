@@ -26,6 +26,15 @@ gRPC 5 / HTTP 404 in a live 3.5 pre request. Older September captures of
 `NARWHAL` remain historical evidence; the public Flash aliases now select
 `BELUGA`.
 
+The 3.5 pre account #20 page currently labels this selection "Nano Banana
+2.1". Three text-only `BELUGA` submissions from that browser returned an
+HTTP 200 batchexecute envelope containing gRPC status 7 rather than image
+media. A visible task card alone is therefore not proof of a successful
+generation. The same account did successfully return media for `GEM_PIX_2`
+with one reference image. The precise public reason for the `BELUGA` denial
+was not retained by the sanitized listener, so this does not establish a
+general model outage.
+
 For text-only `ogiZ0b`, the current Flow page sends `null` in the reference
 image slot (entry field 3). The service had sent an empty array. The encoder
 now matches the captured page request; the field remains an array when there
