@@ -26,6 +26,13 @@ gRPC 5 / HTTP 404 in a live 3.5 pre request. Older September captures of
 `NARWHAL` remain historical evidence; the public Flash aliases now select
 `BELUGA`.
 
+For text-only `ogiZ0b`, the current Flow page sends `null` in the reference
+image slot (entry field 3). The service had sent an empty array. The encoder
+now matches the captured page request; the field remains an array when there
+are actual reference images. A live service request using the old empty-array
+shape received `PUBLIC_ERROR_UNSAFE_GENERATION`; the upstream response alone
+does not prove this field caused that verdict.
+
 The native Flow path must fail an upscale request if the requested resolution
 cannot be delivered. Returning the original 1K image as a successful 2K or
 4K result would mislead the caller.

@@ -565,7 +565,7 @@ def build_image_rpc(rest):
             raise AngularProtocolError("Unsupported Flow image reference")
         refs.append([item["name"],None,None,None,1])
     ctx = project_context(project,captcha)
-    entry = [None,None,refs,request.get("seed"),aspect,request["imageModelName"],None,ctx,
+    entry = [None,None,refs or None,request.get("seed"),aspect,request["imageModelName"],None,ctx,
              [[["".join(p["text"] for p in parts)]]],None,None,None,str(uuid.uuid4()),str(uuid.uuid4())]
     batch = (rest.get("mediaGenerationContext") or {}).get("batchId") or str(uuid.uuid4())
     return "ogiZ0b", [None,[entry],1,ctx,[batch]]

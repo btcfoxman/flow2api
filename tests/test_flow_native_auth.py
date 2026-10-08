@@ -252,6 +252,7 @@ class FlowAccountWireTests(unittest.TestCase):
                 "structuredPrompt":{"parts":[{"text":"test"}]}}]}
         rpc, payload = build_image_rpc(request)
         self.assertEqual(rpc,"ogiZ0b")
+        self.assertIsNone(payload[1][0][2])
         self.assertEqual(payload[1][0][3:6],[12,3,"GEM_PIX_2"])
         self.assertEqual(payload[1][0][8],[[["test"]]])
         rendition = [None]*14
