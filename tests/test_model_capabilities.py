@@ -12,7 +12,7 @@ class ModelCapabilityTests(unittest.IsolatedAsyncioTestCase):
         db = SimpleNamespace(get_active_tokens=AsyncMock(return_value=[SimpleNamespace(auth_mode="flow")]),
                              enqueue_async_task=AsyncMock())
         handler = SimpleNamespace(db=db)
-        normalized = routes.NormalizedGenerationRequest(model="veo_3_1_t2v_fast_landscape", prompt="test", images=[])
+        normalized = routes.NormalizedGenerationRequest(model="veo_3_1_t2v_landscape", prompt="test", images=[])
         with patch("src.services.model_capabilities.config", SimpleNamespace(captcha_method="native_cdp")), \
              patch.object(routes, "generation_handler", handler):
             result = await routes._create_deferred_async_video_task(normalized)
@@ -28,4 +28,8 @@ class ModelCapabilityTests(unittest.IsolatedAsyncioTestCase):
     def test_360_and_720_reference_video_remain_supported(self):
         for model in ("abra_r2v_4s_360p", "abra_r2v_10s", "abra_r2v_4s_720p"):
             self.assertTrue(supports_flow_model(MODEL_CONFIG[model]))
-        self.assertFalse(supports_flow_model(MODEL_CONFIG["gemini-3.0-pro-image-portrait-2k"]))
+        self.assertTrue(supports_flow_model(MODEL_CONFIG["gemini-3.0-pro-image-portrait-2k"]))
+        for model in ("veo_3_1_t2v_fast_landscape", "veo_3_1_t2v_fast_portrait",
+                      "veo_3_1_i2v_s_fast_fl", "veo_3_1_i2v_s_fast_portrait_fl"):
+            self.assertTrue(supports_flow_model(MODEL_CONFIG[model]), model)
+        self.assertFalse(supports_flow_model(MODEL_CONFIG["imagen-4.0-generate-preview-portrait"]))

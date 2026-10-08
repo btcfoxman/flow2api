@@ -281,6 +281,78 @@ class AsyncTaskQueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(queued["upstream_task_id"])
         self.assertEqual(await self.db.get_async_task_position("upload-timeout"), 1)
 
+    async def test_upstream_unusual_activity_stops_after_three_submissions(self):
+        normalized = routes.NormalizedGenerationRequest(
+            model="abra_t2v_4s_360p", prompt="risk retry limit", images=[],
+        )
+        payload = routes._serialize_normalized_generation_request(normalized)
+        await self.db.enqueue_async_task(
+            task_id="risk-limited", task_type="video", model=normalized.model,
+            prompt=normalized.prompt, request_payload=payload,
+            base_url_override=None, capacity=50,
+        )
+        handler = SimpleNamespace(db=self.db, load_balancer=SimpleNamespace(
+            select_token=AsyncMock(return_value=SimpleNamespace(id=43)),
+        ))
+        collect = AsyncMock(return_value={"error": {
+            "status_code": 429,
+            "code": "upstream_unusual_activity",
+            "message": "upstream rejected request",
+        }})
+        with (patch.object(routes, "generation_handler", handler),
+              patch.object(routes, "_collect_async_video_task_result", collect)):
+            for attempt in range(1, 4):
+                claimed = await self.db.claim_next_async_task()
+                self.assertIsNotNone(claimed)
+                delay = await routes._process_async_video_queue_item(claimed)
+                current = await self.db.get_async_task("risk-limited")
+                self.assertEqual(current["attempt_count"], attempt)
+                if attempt < 3:
+                    self.assertGreater(delay, 0)
+                    self.assertEqual(current["status"], "queued")
+                    self.assertEqual(current["request_payload"], payload)
+                    async with self.db._connect(write=True) as connection:
+                        await connection.execute(
+                            "UPDATE async_task_queue SET next_attempt_at = 0 WHERE task_id = ?",
+                            ("risk-limited",),
+                        )
+                        await connection.commit()
+                else:
+                    self.assertEqual(delay, 0)
+                    self.assertEqual(current["status"], "failed")
+                    self.assertEqual(current["request_payload"], "{}")
+        self.assertEqual(collect.await_count, 3)
+
+    async def test_other_429_remains_retryable_after_three_attempts(self):
+        normalized = routes.NormalizedGenerationRequest(
+            model="abra_t2v_4s_360p", prompt="ordinary 429", images=[],
+        )
+        payload = routes._serialize_normalized_generation_request(normalized)
+        await self.db.enqueue_async_task(
+            task_id="ordinary-429", task_type="video", model=normalized.model,
+            prompt=normalized.prompt, request_payload=payload,
+            base_url_override=None, capacity=50,
+        )
+        async with self.db._connect(write=True) as connection:
+            await connection.execute(
+                "UPDATE async_task_queue SET attempt_count = 2 WHERE task_id = ?",
+                ("ordinary-429",),
+            )
+            await connection.commit()
+        claimed = await self.db.claim_next_async_task()
+        handler = SimpleNamespace(db=self.db, load_balancer=SimpleNamespace(
+            select_token=AsyncMock(return_value=SimpleNamespace(id=43)),
+        ))
+        with (patch.object(routes, "generation_handler", handler),
+              patch.object(routes, "_collect_async_video_task_result", AsyncMock(
+                  return_value={"error": {"status_code": 429, "message": "HTTP 429"}},
+              ))):
+            delay = await routes._process_async_video_queue_item(claimed)
+        current = await self.db.get_async_task("ordinary-429")
+        self.assertGreater(delay, 0)
+        self.assertEqual(current["status"], "queued")
+        self.assertEqual(current["attempt_count"], 3)
+
     async def test_successful_submission_moves_item_to_normal_task_table(self):
         token_id = await self.db.add_token(
             Token(st="st-queue", at="at-queue", email="queue@example.com")

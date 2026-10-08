@@ -23,7 +23,8 @@ from ..core.media_errors import is_media_policy_error, is_media_traffic_error
 from .browser_cookie_utils import serialize_cookie_header
 from .flow_angular import (AngularProtocolError, AngularSubmissionUncertain, AngularRpcRejected, build_video_rpc,
                           use_angular_video, video_operations, build_image_rpc, image_result, FLOW_RPC_URL,
-                          build_create_project_rpc, created_project, build_image_upload_rpc, uploaded_image_id)
+                          build_create_project_rpc, created_project, build_image_upload_rpc, uploaded_image_id,
+                          build_image_upsample_rpc, upscaled_image)
 
 try:
     import httpx
@@ -2071,7 +2072,27 @@ class FlowClient:
             base64 编码的图片数据
         """
         if await self.uses_flow_session(token_id):
-            raise NativeSessionError("flow_upsample_transport_unavailable", protocol="angular", stage="model_preflight")
+            await self._flow_submission_account(token_id)
+            recaptcha_token, browser_id = await self._get_recaptcha_token(
+                project_id, action="IMAGE_GENERATION", token_id=token_id,
+            )
+            if not recaptcha_token:
+                raise NativeSessionError("flow_image_captcha_unavailable", protocol="angular", stage="image_upsample")
+            try:
+                from .browser_captcha_native_cdp import BrowserCaptchaService
+
+                service = await BrowserCaptchaService.get_instance(self.db)
+                rpc_id, payload = build_image_upsample_rpc(
+                    project_id, recaptcha_token, media_id, target_resolution,
+                )
+                response = await service.fetch_json(
+                    token_id=token_id, project_id=project_id, url=FLOW_RPC_URL,
+                    json_data={"rpc_id": rpc_id, "payload": payload},
+                    timeout=config.upsample_timeout,
+                )
+                return upscaled_image(response["rpc_payload"], project_id, media_id)
+            finally:
+                await self._notify_browser_captcha_request_finished(browser_id)
         url = f"{self.api_base_url}/flow/upsampleImage"
 
         # 403/reCAPTCHA/500 重试逻辑 - 使用配置的最大重试次数
@@ -2931,6 +2952,7 @@ class FlowClient:
         model_key: str,
         aspect_ratio: str,
         start_media_id: str,
+        start_crop: Optional[Dict[str, float]] = None,
         use_v2_model_config: bool = False,
         output_resolution: Optional[str] = None,
         user_paygate_tier: str = "PAYGATE_TIER_ONE",
@@ -3016,6 +3038,8 @@ class FlowClient:
                     "sceneId": scene_id
                 }
             }
+            if start_crop is not None:
+                request_data["startImage"]["cropCoordinates"] = start_crop
             if output_resolution:
                 request_data["outputSpec"] = {"resolution": output_resolution}
             json_data = {

@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 from src.services.generation_handler import GenerationHandler
+from src.services.flow_angular import AngularRpcRejected
 
 
 TRAFFIC_ERROR = (
@@ -13,7 +14,7 @@ TRAFFIC_ERROR = (
 
 
 class TrafficAccountSwitchingTests(unittest.IsolatedAsyncioTestCase):
-    def _make_handler(self, *, failing_token_ids, token_ids=(1, 2, 3)):
+    def _make_handler(self, *, failing_token_ids, token_ids=(1, 2, 3), failing_error=None):
         handler = GenerationHandler.__new__(GenerationHandler)
         handler.db = SimpleNamespace(get_active_tokens=AsyncMock(return_value=[]))
         handler._background_tasks = set()
@@ -58,7 +59,7 @@ class TrafficAccountSwitchingTests(unittest.IsolatedAsyncioTestCase):
         async def generate_video(token, *args, **kwargs):
             attempted.append(token.id)
             if token.id in failing_token_ids:
-                raise RuntimeError(TRAFFIC_ERROR)
+                raise failing_error() if failing_error else RuntimeError(TRAFFIC_ERROR)
             handler._mark_generation_succeeded(kwargs["generation_result"])
             yield handler._create_completion_response(
                 "https://example.com/video.mp4",
@@ -110,6 +111,28 @@ class TrafficAccountSwitchingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(exclusions, [set()])
         payload = json.loads(chunks[-1])
         self.assertEqual(payload["error"]["status_code"], 429)
+
+    async def test_definitive_unusual_activity_sets_queue_retry_code(self):
+        for public_error in (
+            "PUBLIC_ERROR_UNUSUAL_ACTIVITY",
+            "PUBLIC_ERROR_UNUSUAL_ACTIVITY_TOO_MUCH_TRAFFIC",
+        ):
+            with self.subTest(public_error=public_error):
+                handler, attempted, _ = self._make_handler(
+                    failing_token_ids={1},
+                    failing_error=lambda: AngularRpcRejected({
+                        "grpc_code": 7, "public_error": public_error,
+                    }),
+                )
+                chunks = [
+                    chunk async for chunk in handler.handle_generation(
+                        model="abra_t2v_10s", prompt="hello", stream=False,
+                    )
+                ]
+                error = json.loads(chunks[-1])["error"]
+                self.assertEqual(attempted, [1])
+                self.assertEqual(error["status_code"], 429)
+                self.assertEqual(error["code"], "upstream_unusual_activity")
 
     async def test_external_v2v_media_id_does_not_switch_accounts(self):
         handler, attempted, exclusions = self._make_handler(failing_token_ids={1})

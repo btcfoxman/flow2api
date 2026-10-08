@@ -1,18 +1,20 @@
 """Protocol capability checks independent of current account availability."""
 from ..core.config import config
 from ..core.logger import debug_logger
-from .flow_angular import IMAGE_MODELS, resolve_video_model
+from .flow_angular import IMAGE_MODELS, IMAGE_UPSAMPLE_RESOLUTIONS, resolve_video_model
 
 UNSUPPORTED_MODEL_MESSAGE = "当前服务暂不支持此模型的生成方式，请选择其他已支持的模型。"
 
 
 def supports_flow_model(model_config):
-    # Do not charge for a base generation when its requested upsample stage
-    # has no verified native transport yet.
+    if model_config.get("type") == "image":
+        upsample = model_config.get("upsample")
+        return (model_config.get("model_name") in IMAGE_MODELS
+                and (upsample is None or upsample in IMAGE_UPSAMPLE_RESOLUTIONS))
+    # Video upsample still has no verified native transport. Do not charge for
+    # the base video when the requested final resolution cannot be delivered.
     if model_config.get("upsample"):
         return False
-    if model_config.get("type") == "image":
-        return model_config.get("model_name") in IMAGE_MODELS
     return resolve_video_model(model_config.get("model_key")) is not None
 
 

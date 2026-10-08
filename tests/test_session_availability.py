@@ -104,7 +104,7 @@ class SessionSchedulingTests(unittest.IsolatedAsyncioTestCase):
         balancer._check_extension_route=AsyncMock(return_value=(True,''))
         with patch('src.services.load_balancer.config',SimpleNamespace(captcha_method='native_cdp',call_logic_mode='random')), \
              patch('src.services.load_balancer.local_session_state',return_value={'version':1}):
-            selected=await balancer.select_token(for_image_generation=True,model='gemini-3.0-pro-image-portrait-2k',minimum_credits=4)
+            selected=await balancer.select_token(for_image_generation=True,model='imagen-4.0-generate-preview-portrait',minimum_credits=4)
         self.assertEqual(selected.id,2)
 
     async def test_missing_snapshot_is_not_sent_to_browser_after_restart(self):

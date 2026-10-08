@@ -1906,6 +1906,18 @@ class GenerationHandler:
             raise
         except Exception as e:
             raw_error_msg = str(e)
+            # Preserve the definitive upstream verdict for the async submit
+            # queue. The public message is intentionally generic and cannot
+            # distinguish this risk rejection from a transient HTTP 429.
+            error_code = (
+                "upstream_unusual_activity"
+                if isinstance(e, AngularRpcRejected)
+                and e.public_error in {
+                    "PUBLIC_ERROR_UNUSUAL_ACTIVITY",
+                    "PUBLIC_ERROR_UNUSUAL_ACTIVITY_TOO_MUCH_TRAFFIC",
+                }
+                else "generation_failed"
+            )
             if isinstance(e, AsyncQueueExpired):
                 error_msg = QUEUE_TIMEOUT_MESSAGE
                 response_status_code = 408
@@ -2050,7 +2062,9 @@ class GenerationHandler:
             )
             if stream:
                 yield self._create_stream_chunk(f"❌ {error_msg}\n")
-            yield self._create_error_response(error_msg, status_code=response_status_code)
+            yield self._create_error_response(
+                error_msg, status_code=response_status_code, error_code=error_code
+            )
         finally:
             if pending_token_state.get("active") and token and self.load_balancer:
                 await self.load_balancer.release_pending(
@@ -2186,6 +2200,10 @@ class GenerationHandler:
 
             # 检查是否需要 upsample
             upsample_resolution = model_config.get("upsample")
+            if upsample_resolution and not media_id:
+                self._mark_generation_failed(generation_result, "Flow image result has no media ID for upscale", status_code=502)
+                yield self._create_error_response("图片已生成，但缺少放大所需的媒体 ID；请勿立即重复提交。", status_code=502)
+                return
             if upsample_resolution and media_id:
                 upsample_started_at = time.time()
                 resolution_name = "4K" if "4K" in upsample_resolution else "2K"
@@ -2299,6 +2317,11 @@ class GenerationHandler:
                             break
                 if image_trace is not None:
                     image_trace["upsample_ms"] = int((time.time() - upsample_started_at) * 1000)
+                self._mark_generation_failed(generation_result, "Flow image upscale did not return the requested resolution", status_code=502)
+                yield self._create_error_response(
+                    f"图片已生成，但放大到 {resolution_name} 失败；请勿立即重复提交。", status_code=502,
+                )
+                return
 
             local_url = image_url
             cache_started_at = time.time()
@@ -2475,12 +2498,11 @@ class GenerationHandler:
 
             # ========== 上传图片 ==========
             frame_crops = {}
-            if (video_type == "i2v" and model_key.startswith("omni_flash_i2v_")
-                    and image_count == 2 and await self.flow_client.uses_flow_session(token.id)):
-                frame_crops = {
-                    "start_crop": video_frame_crop(images[0], model_config["aspect_ratio"]),
-                    "end_crop": video_frame_crop(images[1], model_config["aspect_ratio"]),
-                }
+            if (video_type == "i2v" and image_count in (1, 2)
+                    and await self.flow_client.uses_flow_session(token.id)):
+                frame_crops["start_crop"] = video_frame_crop(images[0], model_config["aspect_ratio"])
+                if image_count == 2:
+                    frame_crops["end_crop"] = video_frame_crop(images[1], model_config["aspect_ratio"])
             start_media_id = None
             end_media_id = None
             reference_images = []
@@ -2688,6 +2710,7 @@ class GenerationHandler:
                         model_key=actual_model_key,
                         aspect_ratio=model_config["aspect_ratio"],
                         start_media_id=start_media_id,
+                        **frame_crops,
                         use_v2_model_config=use_v2_model_config,
                         output_resolution=model_config.get("output_resolution"),
                         user_paygate_tier=normalized_tier,
@@ -3738,7 +3761,10 @@ class GenerationHandler:
             message = _video_generation_failure_response(message)[0]
         return sanitize_public_error_message(message)
 
-    def _create_error_response(self, error_message: str, status_code: int = 500) -> str:
+    def _create_error_response(
+        self, error_message: str, status_code: int = 500,
+        error_code: str = "generation_failed",
+    ) -> str:
         """创建错误响应"""
         import json
 
@@ -3747,7 +3773,7 @@ class GenerationHandler:
             "error": {
                 "message": error_message,
                 "type": "server_error" if status_code >= 500 else "invalid_request_error",
-                "code": "generation_failed",
+                "code": error_code,
                 "status_code": status_code,
             }
         }

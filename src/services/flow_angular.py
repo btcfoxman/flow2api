@@ -45,11 +45,15 @@ class AngularRpcRejected(AngularProtocolError):
                          f"{self.public_error or 'RPC_REJECTED'}", diagnostics=diagnostic)
 
 
-VIDEO_GENERATION_RPC_IDS = frozenset({"YhhmEf", "MZZa6b", "jIps6", "nprQif"})
-GENERATION_RPC_IDS = VIDEO_GENERATION_RPC_IDS | {"ogiZ0b"}
+VIDEO_GENERATION_RPC_IDS = frozenset({"YhhmEf", "eb1hJf", "MZZa6b", "jIps6", "nprQif"})
+GENERATION_RPC_IDS = VIDEO_GENERATION_RPC_IDS | {"ogiZ0b", "SPrCad"}
 MUTATING_RPC_IDS = GENERATION_RPC_IDS | {"jHPbke", "maseQ"}
 RPC_IDS = MUTATING_RPC_IDS | {"jwpduf", "as29s", "ngNC2", "UpteDb", "nzlxg"}
 IMAGE_MODELS = frozenset({"GEM_PIX_2", "NARWHAL"})
+IMAGE_UPSAMPLE_RESOLUTIONS = {
+    "UPSAMPLE_IMAGE_RESOLUTION_2K": 1,
+    "UPSAMPLE_IMAGE_RESOLUTION_4K": 2,
+}
 IMAGE_ASPECT_RATIOS = {"IMAGE_ASPECT_RATIO_SQUARE": 1, "IMAGE_ASPECT_RATIO_PORTRAIT": 2,
                       "IMAGE_ASPECT_RATIO_LANDSCAPE": 3, "IMAGE_ASPECT_RATIO_PORTRAIT_THREE_FOUR": 4,
                       "IMAGE_ASPECT_RATIO_LANDSCAPE_FOUR_THREE": 5}
@@ -137,6 +141,15 @@ def resolve_video_model(model):
     if (model == "veo_3_1_r2v_lite"
             or re.fullmatch(r"veo_3_1_r2v_fast_(?:landscape|portrait)(?:_ultra)?", model)):
         return VideoModel(model, "veo_reference", "MZZa6b", 1)
+    # Both current Flow aspect variants use YhhmEf; the landscape key has no
+    # suffix and the portrait key ends in _portrait (captured 2026-10-09).
+    if re.fullmatch(r"veo_3_1_t2v_fast(?:_portrait|_[46]s)?", model):
+        return VideoModel(model, "veo_text", "YhhmEf", 1)
+    # Single first frame, captured from the Flow page on 2026-10-09.
+    if re.fullmatch(r"veo_3_1_i2v_s_fast(?:_portrait|_[46]s)?", model):
+        return VideoModel(model, "veo_first", "eb1hJf", 1)
+    if re.fullmatch(r"veo_3_1_i2v_s_fast(?:_portrait|_[46]s)?_fl", model):
+        return VideoModel(model, "veo_first_last", "nprQif", 1)
     match = re.fullmatch(r"(omni_flash_i2v_(?:4|6|8|10)s_first_last)(?:_(360p|720p))?", model)
     if match:
         base, resolution = match.groups()
@@ -313,7 +326,7 @@ def video_frame(image):
     """Start/end image message, including normalized crop (field 6)."""
     if (not isinstance(image, dict) or set(image) - {"mediaId", "cropCoordinates"}
             or not isinstance(image.get("mediaId"), str) or not image["mediaId"]):
-        raise AngularProtocolError("First/last video requires both frame media IDs")
+        raise AngularProtocolError("Video frame requires a media ID")
     crop = image.get("cropCoordinates", {"top": 0, "left": 0, "bottom": 1, "right": 1})
     if not isinstance(crop, dict) or set(crop) != {"top", "left", "bottom", "right"}:
         raise AngularProtocolError("Invalid video frame crop")
@@ -332,7 +345,7 @@ def build_video_rpc(rest):
     spec = resolve_video_model(request.get("videoModelKey"))
     if spec is None:
         raise AngularProtocolError("Angular model wire shape is not verified")
-    if spec.family == "abra_t2v" and any(request.get(key) for key in
+    if spec.family in {"abra_t2v", "veo_text"} and any(request.get(key) for key in
             ("referenceImages", "videoInput", "startImage", "endImage", "imageInputs")):
         raise AngularProtocolError("Text video RPC does not accept image or video inputs")
     output = request.get("outputSpec")
@@ -350,6 +363,8 @@ def build_video_rpc(rest):
     if spec.family == "veo_reference" and "_fast_" in spec.model_key:
         if aspect != (1 if "_portrait" in spec.model_key else 2):
             raise AngularProtocolError("Angular aspect ratio does not match the model")
+    if spec.family in {"veo_text", "veo_first", "veo_first_last"} and "_portrait" in spec.model_key and aspect != 1:
+        raise AngularProtocolError("Angular aspect ratio does not match the model")
     context = rest.get("clientContext") or {}
     project = context.get("projectId")
     captcha = (context.get("recaptchaContext") or {}).get("token")
@@ -374,12 +389,18 @@ def build_video_rpc(rest):
     batch = (rest.get("mediaGenerationContext") or {}).get("batchId") or str(uuid.uuid4())
     ids = [None, None, None, None, str(uuid.uuid4()), str(uuid.uuid4())]
     text_input = [None, None, [[[prompt]]]]
-    if spec.family == "abra_t2v":
+    if spec.family in {"abra_t2v", "veo_text"}:
         # YhhmEf / BatchAsyncGenerateVideoText, captured 2026-09-15.
         # Text/model/aspect/metadata are fields 1/2/3/5; no reference slot.
         item = [text_input, spec.model_key, aspect, None, ids]
         output_index = 7
-    elif spec.family == "omni_first_last":
+    elif spec.family == "veo_first":
+        if refs or request.get("endImage") or request.get("videoInput") or request.get("imageInputs"):
+            raise AngularProtocolError("First-frame video RPC accepts one start image only")
+        item = [text_input, spec.model_key, aspect, None,
+                video_frame(request.get("startImage")), ids]
+        output_index = None
+    elif spec.family in {"omni_first_last", "veo_first_last"}:
         if refs or request.get("videoInput") or request.get("imageInputs"):
             raise AngularProtocolError("First/last video RPC does not accept reference inputs")
         # nprQif / BatchAsyncGenerateVideoStartAndEndImage. Unlike Abra
@@ -410,11 +431,46 @@ def build_video_rpc(rest):
 
 def media_rows(payload):
     if isinstance(payload, list):
-        if len(payload) >= 8 and payload[3] == "CAE" and isinstance(payload[5], list):
+        # Current Flow submit receipts may omit sceneId while still returning
+        # the project, workflow, media id, and a valid generation status.
+        status = payload[5] if len(payload) >= 8 else None
+        wire_status = status[8] if isinstance(status, list) and len(status) > 8 else None
+        if (len(payload) >= 8 and isinstance(payload[0], str)
+                and isinstance(payload[1], str) and isinstance(payload[2], str)
+                and (payload[3] == "CAE" or payload[3] is None)
+                and isinstance(wire_status, list) and wire_status
+                and type(wire_status[0]) is int and wire_status[0] in range(1, 8)):
             yield payload
         else:
             for child in payload:
                 yield from media_rows(child)
+
+
+def media_candidate_shapes(payload, project_id):
+    """Describe possible media rows without retaining ids, prompts, or URLs."""
+    candidates = []
+
+    def visit(value):
+        if not isinstance(value, list) or len(candidates) >= 4:
+            return
+        if len(value) >= 8:
+            status = value[5] if len(value) > 5 else None
+            wire_status = status[8] if isinstance(status, list) and len(status) > 8 else None
+            candidates.append({
+                "field_shapes": [wire_shape(field) for field in value[:8]],
+                "project_matches": isinstance(value[1], str) and value[1] == project_id,
+                "scene_is_cae": value[3] == "CAE",
+                "status_shape": wire_shape(wire_status),
+                "status_code": (wire_status[0] if isinstance(wire_status, list)
+                                and wire_status and type(wire_status[0]) is int
+                                and wire_status[0] in range(1, 8) else None),
+            })
+        else:
+            for child in value:
+                visit(child)
+
+    visit(payload)
+    return candidates
 
 
 def signed_video_url(media):
@@ -474,7 +530,14 @@ def video_operations(payload, *, token_id, project_id, expected_ids=None):
                            "workflowId": media[2], "sceneId": media[3], "status": "MEDIA_GENERATION_STATUS_" + status_name,
                            "transport": "angular", "tokenId": token_id})
     if not operations:
-        raise AngularProtocolError("Flow RPC returned no matching media")
+        raise AngularProtocolError(
+            "Flow RPC returned no matching media",
+            diagnostics={
+                "parse_reason": "media_rows_missing",
+                "wire_shape": wire_shape(payload),
+                "media_candidate_shapes": media_candidate_shapes(payload, project_id),
+            },
+        )
     if expected_ids is not None and {op["mediaName"] for op in operations} != set(expected_ids):
         raise AngularProtocolError("Flow polling response is incomplete")
     return {"operations": operations}
@@ -535,6 +598,36 @@ def image_result(payload, project_id):
     if not images:
         raise AngularSubmissionUncertain("Flow image response contains no generated images")
     return {"media":images,"transport":"angular"}
+
+
+def build_image_upsample_rpc(project_id, captcha, media_id, target_resolution):
+    """SPrCad / FlowService.UpsampleImage, captured on the current Flow page."""
+    resolution = IMAGE_UPSAMPLE_RESOLUTIONS.get(target_resolution)
+    if resolution is None or not project_id or not captcha or not isinstance(media_id, str) or not media_id:
+        raise AngularProtocolError("Invalid Flow image upscale request")
+    return "SPrCad", [media_id, resolution, project_context(project_id, captcha)]
+
+
+def upscaled_image(payload, project_id, media_id):
+    """Accept a project-bound result and a decodable JPEG."""
+    if not isinstance(payload, list) or len(payload) < 2:
+        raise AngularSubmissionUncertain("Flow image upscale response is unrecognized")
+    media, encoded = payload[:2]
+    # Upsampling can create a new media ID.  Bind by project; the RPC request
+    # already contains the source media ID and has a single response row.
+    if (not isinstance(media, list) or len(media) < 2
+            or not isinstance(media[0], str) or not media[0]
+            or media[1] != project_id):
+        raise AngularSubmissionUncertain("Flow image upscale media binding is unconfirmed")
+    if not isinstance(encoded, str) or len(encoded) < 100:
+        raise AngularSubmissionUncertain("Flow image upscale result is empty")
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except (ValueError, base64.binascii.Error):
+        raise AngularSubmissionUncertain("Flow image upscale result is invalid") from None
+    if len(raw) < 100 or not raw.startswith(b"\xff\xd8\xff"):
+        raise AngularSubmissionUncertain("Flow image upscale result is not JPEG")
+    return encoded
 
 
 def rpc_fetch_expression(rpc_id, payload, timeout):

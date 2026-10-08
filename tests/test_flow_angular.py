@@ -88,6 +88,20 @@ class AngularCodecTests(unittest.TestCase):
         with self.assertRaises(AngularProtocolError):
             video_operations([media(3)], token_id=9, project_id="project-test", expected_ids=["missing"])
 
+    def test_submit_receipt_with_null_scene_remains_pollable(self):
+        receipt = media(6)
+        receipt[3] = None
+        payload = [None, 12, [["workflow", None, None, None, None]], [receipt]]
+        operation = video_operations(payload, token_id=9, project_id="project-test")["operations"][0]
+        self.assertEqual(operation["mediaName"], "media-test")
+        self.assertEqual(operation["status"], "MEDIA_GENERATION_STATUS_PENDING")
+        self.assertIsNone(operation["sceneId"])
+        self.assertEqual(operation["operation"]["name"], "media-test")
+
+        receipt[5][8] = [99]
+        with self.assertRaises(AngularProtocolError):
+            video_operations(payload, token_id=9, project_id="project-test")
+
     def test_model_specific_wire_tail_and_unverified_models(self):
         rest = {"clientContext":{"projectId":"project-test", "recaptchaContext":{"token":"captcha"}},
                 "requests":[{"videoModelKey":"abra_r2v_4s_360p", "textInput":{"structuredPrompt":{"parts":[{"text":"prompt"}]}},
@@ -101,6 +115,58 @@ class AngularCodecTests(unittest.TestCase):
         rest["requests"][0]["videoModelKey"] = "abra_r2v_4s_1080p"
         with self.assertRaises(AngularProtocolError):
             build_video_rpc(rest)
+
+    def test_veo_fast_text_uses_captured_portrait_and_landscape_keys(self):
+        rest = {"clientContext": {"projectId": "project-test", "recaptchaContext": {"token": "captcha"}},
+                "requests": [{"videoModelKey": "veo_3_1_t2v_fast_portrait",
+                              "aspectRatio": "VIDEO_ASPECT_RATIO_PORTRAIT",
+                              "textInput": {"structuredPrompt": {"parts": [{"text": "prompt"}]}}}]}
+        rpc, payload = build_video_rpc(rest)
+        self.assertEqual(rpc, "YhhmEf")
+        self.assertEqual(payload[0][0][1:3], ["veo_3_1_t2v_fast_portrait", 1])
+        self.assertEqual(len(payload[0][0]), 5)
+        rest["requests"][0].update(videoModelKey="veo_3_1_t2v_fast",
+                                     aspectRatio="VIDEO_ASPECT_RATIO_LANDSCAPE")
+        rpc, payload = build_video_rpc(rest)
+        self.assertEqual(rpc, "YhhmEf")
+        self.assertEqual(payload[0][0][1:3], ["veo_3_1_t2v_fast", 2])
+        rest["requests"][0]["startImage"] = {"mediaId": "image-test"}
+        with self.assertRaises(AngularProtocolError):
+            build_video_rpc(rest)
+
+    def test_veo_fast_first_frame_uses_captured_rpc_and_crop(self):
+        rest = {"clientContext": {"projectId": "project-test", "recaptchaContext": {"token": "captcha"}},
+                "requests": [{"videoModelKey": "veo_3_1_i2v_s_fast_portrait",
+                              "aspectRatio": "VIDEO_ASPECT_RATIO_PORTRAIT",
+                              "textInput": {"structuredPrompt": {"parts": [{"text": "prompt"}]}},
+                              "startImage": {"mediaId": "image-test", "cropCoordinates": {
+                                  "top": 0, "left": 0.2, "bottom": 1, "right": 0.8,
+                              }}}]}
+        rpc, payload = build_video_rpc(rest)
+        self.assertEqual(rpc, "eb1hJf")
+        self.assertEqual(payload[0][0][1:3], ["veo_3_1_i2v_s_fast_portrait", 1])
+        self.assertEqual(payload[0][0][4], [None, "image-test", None, None, None,
+                                            [None, 0.2, 1, 0.8]])
+        self.assertEqual(len(payload[0][0]), 6)
+        rest["requests"][0]["endImage"] = {"mediaId": "second"}
+        with self.assertRaises(AngularProtocolError):
+            build_video_rpc(rest)
+
+    def test_veo_fast_first_last_uses_captured_rpc_and_two_crops(self):
+        rest = {"clientContext": {"projectId": "project-test", "recaptchaContext": {"token": "captcha"}},
+                "requests": [{"videoModelKey": "veo_3_1_i2v_s_fast_fl",
+                              "aspectRatio": "VIDEO_ASPECT_RATIO_LANDSCAPE",
+                              "textInput": {"structuredPrompt": {"parts": [{"text": "prompt"}]}},
+                              "startImage": {"mediaId": "first", "cropCoordinates": {
+                                  "top": 0.1, "left": 0, "bottom": 0.9, "right": 1}},
+                              "endImage": {"mediaId": "last", "cropCoordinates": {
+                                  "top": 0.2, "left": 0, "bottom": 0.8, "right": 1}}}]}
+        rpc, payload = build_video_rpc(rest)
+        self.assertEqual(rpc, "nprQif")
+        self.assertEqual(payload[0][0][1:3], ["veo_3_1_i2v_s_fast_fl", 2])
+        self.assertEqual(payload[0][0][4][1], "first")
+        self.assertEqual(payload[0][0][5][1], "last")
+        self.assertEqual(len(payload[0][0]), 7)
 
     def test_never_returns_unsigned_or_foreign_video_urls(self):
         for url in ["https://flow-content.google/video/media-test", "https://evil.test/video/media-test?Expires=1&KeyName=k&Signature=s"]:

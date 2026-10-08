@@ -82,6 +82,7 @@ ROUTE_BACKGROUND_TASKS: Set[asyncio.Task] = set()
 ASYNC_TASK_QUEUE_WORKER: Optional[asyncio.Task] = None
 ASYNC_TASK_QUEUE_WAKE_EVENT: Optional[asyncio.Event] = None
 ASYNC_TASK_QUEUE_RETRY_SECONDS = 2.0
+ASYNC_TASK_QUEUE_UNUSUAL_ACTIVITY_MAX_ATTEMPTS = 3
 REMOTE_MEDIA_DOWNLOAD_MAX_ATTEMPTS = 3
 REMOTE_MEDIA_DOWNLOAD_RETRY_DELAYS = (0.5, 1.0)
 IMAGE_LOAD_FAILURE_MESSAGE = "参考图片下载失败，请确认素材链接有效且可公开访问，或稍后重试"
@@ -261,10 +262,6 @@ def _get_model_alias_catalog(*, flow_only: bool = False) -> Dict[str, str]:
         resolved = resolve_model_name(alias, model_config=MODEL_CONFIG)
         model_config = MODEL_CONFIG.get(resolved)
         if model_config and supports_flow_model(model_config):
-            # Base aliases remain usable at native output size; do not advertise
-            # 2K/4K upsampling that this protocol cannot execute.
-            if model_config.get("type") == "image":
-                description = description.split("; sizes:", 1)[0] + "; native output only"
             result[alias] = description
     return result
 
@@ -1552,8 +1549,29 @@ async def _process_async_video_queue_item(queue_item: Dict[str, Any]) -> float:
     if "error" in result:
         status_code = _get_error_status_code(result)
         error_message = _extract_error_message(result)
+        error = result.get("error")
+        error_code = error.get("code") if isinstance(error, dict) else None
+        attempt = int(queue_item.get("attempt_count") or 0) + 1
+        if (
+            status_code == 429
+            and error_code == "upstream_unusual_activity"
+            and attempt >= ASYNC_TASK_QUEUE_UNUSUAL_ACTIVITY_MAX_ATTEMPTS
+        ):
+            # A definitive Google risk verdict is safe to retry on another
+            # account briefly, but repeated queue-wide fanout makes it worse.
+            await handler.db.update_async_task(
+                local_task_id,
+                status="failed",
+                last_error=error_message,
+                request_payload="{}",
+                increment_attempt=True,
+            )
+            debug_logger.log_warning(
+                f"[ASYNC QUEUE] upstream unusual activity task={local_task_id} "
+                f"ended after {attempt} submissions"
+            )
+            return 0.0
         if status_code in {429, 503}:
-            attempt = int(queue_item.get("attempt_count") or 0) + 1
             retry_delay = min(
                 30.0,
                 ASYNC_TASK_QUEUE_RETRY_SECONDS * (2 ** min(attempt - 1, 4)),

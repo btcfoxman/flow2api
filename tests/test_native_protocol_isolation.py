@@ -222,7 +222,7 @@ class FailureAccountingTests(unittest.IsolatedAsyncioTestCase):
                                 user_paygate_tier='PAYGATE_TIER_ONE')
         handler.load_balancer.select_token = AsyncMock(return_value=token)
         handler.token_manager.native_sessions = SessionAvailability()
-        chunks = [c async for c in handler.handle_generation('veo_3_1_t2v_fast_portrait', 'test')]
+        chunks = [c async for c in handler.handle_generation('veo_3_1_t2v_portrait', 'test')]
         result = json.loads(chunks[-1])
         self.assertEqual(result['error']['status_code'], 501)
         self.assertEqual(attempted, [])

@@ -90,7 +90,7 @@ class CapturedVideoWireTests(unittest.TestCase):
                     self.assertFalse(use_angular_video(model, families=['abra_r2v', 'abra_t2v']))
                     self.assertTrue(use_angular_video(model, models=[model]))
         for model in ('omni_flash_i2v_5s_first_last', 'omni_flash_i2v_4s_first_last_1080p',
-                      'veo_3_1_r2v_fast_landscape_ultra_relaxed', 'veo_3_1_t2v_fast', 'veo_3_1_i2v_s_fast'):
+                      'veo_3_1_r2v_fast_landscape_ultra_relaxed', 'veo_3_1_t2v_future', 'veo_3_1_i2v_s_future'):
             self.assertIsNone(resolve_video_model(model))
         self.assertEqual(resolve_video_model('omni_flash_i2v_4s_first_last_720p'),
                          resolve_video_model('omni_flash_i2v_4s_first_last'))

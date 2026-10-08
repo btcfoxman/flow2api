@@ -8,6 +8,7 @@ import json
 import os
 import platform
 import random
+import re
 import shutil
 import subprocess
 import time
@@ -24,7 +25,10 @@ from ..core.config import config
 from ..core.flow_cookies import normalize_google_cookies, has_complete_flow_cookies
 from ..core.logger import debug_logger
 from ..core.generation_errors import NativeSessionError
-from ..core.native_session_state import local_session_state, validate_local_session_proxy
+from ..core.native_session_state import (
+    local_session_state,
+    validate_local_session_proxy,
+)
 from ..core.browser_profile import configure_web_only_profile
 from ..core.media_errors import is_media_traffic_error
 from .flow_angular import (AngularProtocolError, AngularSubmissionUncertain, AngularRpcRejected, parse_rpc_response,
@@ -639,8 +643,6 @@ class NativeCdpAccountBrowser:
             "--remote-debugging-port=0",
             "--no-first-run",
             "--no-default-browser-check",
-            "--disable-component-update",
-            "--disable-features=Translate,OptimizationHints",
             "--disable-blink-features=AutomationControlled",
             "--window-size=1440,900",
             "about:blank",
@@ -785,22 +787,6 @@ class NativeCdpAccountBrowser:
         await self.connection.send("Page.enable", session_id=session_id)
         await self.connection.send("Runtime.enable", session_id=session_id)
         await self.connection.send("Network.enable", session_id=session_id)
-        await self.connection.send(
-            "Page.addScriptToEvaluateOnNewDocument",
-            {
-                "source": """
-                    (() => {
-                      try {
-                        Object.defineProperty(Navigator.prototype, 'webdriver', {
-                          get: () => undefined,
-                          configurable: true
-                        });
-                      } catch (_) {}
-                    })();
-                """,
-            },
-            session_id=session_id,
-        )
         return target_id, session_id
 
     async def _evaluate(
@@ -1144,6 +1130,120 @@ class NativeCdpAccountBrowser:
             await asyncio.sleep(0.5)
         raise TimeoutError("grecaptcha.enterprise did not become ready")
 
+    async def _execute_recaptcha(self, session_id: str, website_key: str, action: str) -> Optional[str]:
+        if not self.connection:
+            raise ConnectionError("native CDP browser is not connected")
+
+        # Flow keeps the original execute binding for its own submissions and
+        # replaces the public function with one that forces the action to
+        # extension_hijack_detected. Calling that public function produces a
+        # captcha for the wrong action, even when VIDEO_GENERATION was passed.
+        entry = await self.connection.send(
+            "Runtime.evaluate",
+            {"expression": "window.grecaptcha?.enterprise?.execute", "returnByValue": False},
+            session_id=session_id,
+            timeout=5,
+        )
+        exposed = entry.get("result") or {}
+        if entry.get("exceptionDetails") or exposed.get("type") != "function":
+            raise NativeSessionError("captcha_site_binding_unavailable", protocol="angular")
+
+        if "extension_hijack_detected" not in str(exposed.get("description") or ""):
+            return await self._evaluate(
+                session_id,
+                f"""new Promise((resolve, reject) => {{
+                  const timer = setTimeout(() => reject(new Error('captcha timeout')), 30000);
+                  grecaptcha.enterprise.ready(() => {{
+                    grecaptcha.enterprise.execute({json.dumps(website_key)}, {{
+                      action: {json.dumps(action)}
+                    }}).then(value => {{ clearTimeout(timer); resolve(value); }}).catch(error => {{
+                      clearTimeout(timer); reject(error);
+                    }});
+                  }});
+                }})""",
+                await_promise=True,
+                timeout=35,
+            )
+
+        source = str(exposed.get("description") or "")
+        binding_name = re.search(r"=>\s*([A-Za-z_$][\w$]*)\s*\(", source)
+        if not binding_name or "Object.assign" not in source or not exposed.get("objectId"):
+            raise NativeSessionError("captcha_site_binding_unavailable", protocol="angular")
+        handles = [exposed["objectId"]]
+        try:
+            properties = await self.connection.send(
+                "Runtime.getProperties",
+                {"objectId": handles[0], "ownProperties": True},
+                session_id=session_id,
+                timeout=5,
+            )
+            scopes = next(
+                (item.get("value") or {}).get("objectId")
+                for item in properties.get("internalProperties") or []
+                if item.get("name") == "[[Scopes]]"
+            )
+            if not scopes:
+                raise ValueError("site wrapper has no closure scopes")
+            handles.append(scopes)
+            scope_properties = await self.connection.send(
+                "Runtime.getProperties",
+                {"objectId": scopes, "ownProperties": True},
+                session_id=session_id,
+                timeout=5,
+            )
+            original = None
+            for item in scope_properties.get("result") or []:
+                scope_value = item.get("value") or {}
+                closure = scope_value.get("objectId")
+                if not closure or not str(scope_value.get("description") or "").startswith("Closure"):
+                    continue
+                handles.append(closure)
+                closure_properties = await self.connection.send(
+                    "Runtime.getProperties",
+                    {"objectId": closure, "ownProperties": True},
+                    session_id=session_id,
+                    timeout=5,
+                )
+                original = next(
+                    ((entry.get("value") or {}).get("objectId")
+                     for entry in closure_properties.get("result") or []
+                     if entry.get("name") == binding_name.group(1)
+                     and (entry.get("value") or {}).get("type") == "function"),
+                    None,
+                )
+                if original:
+                    break
+            if not original:
+                raise ValueError("site original execute binding changed")
+            handles.append(original)
+            response = await self.connection.send(
+                "Runtime.callFunctionOn",
+                {
+                    "objectId": original,
+                    "functionDeclaration": "function(siteKey, captchaAction) { return this(siteKey, {action: captchaAction}); }",
+                    "arguments": [{"value": website_key}, {"value": action}],
+                    "awaitPromise": True,
+                    "returnByValue": True,
+                },
+                session_id=session_id,
+                timeout=35,
+            )
+            if response.get("exceptionDetails"):
+                raise NativeSessionError("captcha_site_execution_failed", protocol="angular")
+            return (response.get("result") or {}).get("value")
+        except (StopIteration, ValueError) as exc:
+            raise NativeSessionError("captcha_site_binding_unavailable", protocol="angular") from exc
+        finally:
+            for object_id in reversed(handles):
+                if object_id:
+                    try:
+                        await self.connection.send(
+                            "Runtime.releaseObject", {"objectId": object_id},
+                            session_id=session_id, timeout=2,
+                        )
+                    except Exception:
+                        pass
+
     async def _capture_fingerprint(self, session_id: str) -> Dict[str, Any]:
         value = await self._evaluate(
             session_id,
@@ -1449,41 +1549,8 @@ class NativeCdpAccountBrowser:
                 except TimeoutError as exc:
                     raise NativeSessionError("captcha_script_not_ready", protocol=page_protocol) from exc
                 await asyncio.sleep(0.8 + random.random())
-                await self._evaluate(
-                    session_id,
-                    """(() => {
-                      window.focus();
-                      window.dispatchEvent(new Event('focus'));
-                      document.dispatchEvent(new MouseEvent('mousemove', {
-                        bubbles: true,
-                        clientX: 180 + Math.floor(Math.random() * 120),
-                        clientY: 120 + Math.floor(Math.random() * 90)
-                      }));
-                      window.scrollTo(0, 1);
-                      return true;
-                    })()""",
-                    timeout=5,
-                )
                 await self._capture_fingerprint(session_id)
-                token = await self._evaluate(
-                    session_id,
-                    f"""new Promise((resolve, reject) => {{
-                      const timer = setTimeout(() => reject(new Error('captcha timeout')), 30000);
-                      grecaptcha.enterprise.ready(() => {{
-                        grecaptcha.enterprise.execute({json.dumps(website_key)}, {{
-                          action: {json.dumps(action)}
-                        }}).then(value => {{
-                          clearTimeout(timer);
-                          resolve(value);
-                        }}).catch(error => {{
-                          clearTimeout(timer);
-                          reject(error);
-                        }});
-                      }});
-                    }})""",
-                    await_promise=True,
-                    timeout=35,
-                )
+                token = await self._execute_recaptcha(session_id, website_key, action)
                 if not isinstance(token, str) or not token.strip():
                     raise RuntimeError("native_cdp returned an empty captcha token")
                 settle_seconds = float(getattr(config, "browser_recaptcha_settle_seconds", 3) or 3)

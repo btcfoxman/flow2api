@@ -150,6 +150,64 @@ class NativeCdpProxyTests(unittest.IsolatedAsyncioTestCase):
             await browser._resolve_proxy()
 
 
+class NativeCdpRecaptchaBindingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_uses_site_original_when_public_execute_changes_action(self):
+        browser = NativeCdpAccountBrowser(7, _FakeDatabase())
+        calls = []
+
+        async def send(method, params=None, **kwargs):
+            calls.append((method, params or {}))
+            if method == "Runtime.evaluate":
+                return {"result": {"type": "function", "objectId": "public",
+                                   "description": '(e,f)=>d(e,Object.assign({},f,{action:"extension_hijack_detected"}))'}}
+            if method == "Runtime.getProperties":
+                return {
+                    "public": {"internalProperties": [{"name": "[[Scopes]]", "value": {"objectId": "scopes"}}]},
+                    "scopes": {"result": [{"name": "0", "value": {"description": "Closure (z2a)",
+                                                           "objectId": "closure"}}]},
+                    "closure": {"result": [{"name": "d", "value": {"type": "function",
+                                                            "objectId": "original"}}]},
+                }[params["objectId"]]
+            if method == "Runtime.callFunctionOn":
+                return {"result": {"type": "string", "value": "correct-action-token"}}
+            if method == "Runtime.releaseObject":
+                return {}
+            self.fail(f"unexpected CDP method {method}")
+
+        browser.connection = SimpleNamespace(send=send)
+        with patch.object(browser, "_evaluate", new_callable=AsyncMock) as direct:
+            token = await browser._execute_recaptcha("session", "site-key", "VIDEO_GENERATION")
+        self.assertEqual(token, "correct-action-token")
+        direct.assert_not_awaited()
+        call = next(params for method, params in calls if method == "Runtime.callFunctionOn")
+        self.assertEqual(call["objectId"], "original")
+        self.assertEqual(call["arguments"], [{"value": "site-key"}, {"value": "VIDEO_GENERATION"}])
+
+    async def test_fails_closed_if_site_original_binding_changes(self):
+        browser = NativeCdpAccountBrowser(7, _FakeDatabase())
+
+        async def send(method, params=None, **kwargs):
+            if method == "Runtime.evaluate":
+                return {"result": {"type": "function", "objectId": "public",
+                                   "description": '(e,f)=>d(e,Object.assign({},f,{action:"extension_hijack_detected"}))'}}
+            if method == "Runtime.getProperties" and params["objectId"] == "public":
+                return {"internalProperties": [{"name": "[[Scopes]]", "value": {"objectId": "scopes"}}]}
+            if method == "Runtime.getProperties" and params["objectId"] == "scopes":
+                return {"result": [{"name": "0", "value": {"description": "Closure (changed)",
+                                                         "objectId": "other"}}]}
+            if method == "Runtime.getProperties" and params["objectId"] == "other":
+                return {"result": []}
+            if method == "Runtime.releaseObject":
+                return {}
+            self.fail(f"unexpected CDP method {method}")
+
+        browser.connection = SimpleNamespace(send=send)
+        with patch.object(browser, "_evaluate", new_callable=AsyncMock) as direct:
+            with self.assertRaisesRegex(RuntimeError, "captcha_site_binding_unavailable"):
+                await browser._execute_recaptcha("session", "site-key", "VIDEO_GENERATION")
+        direct.assert_not_awaited()
+
+
 class _FakeAccountBrowser:
     instances = {}
     blocked_tokens = set()

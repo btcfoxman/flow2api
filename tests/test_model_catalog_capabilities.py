@@ -42,7 +42,7 @@ class ModelCatalogCapabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("gemini-3.0-pro-image", aliases)
         self.assertIn("gemini-3.1-flash-image", aliases)
         self.assertNotIn("imagen-4.0-generate-preview", aliases)
-        self.assertNotIn("sizes: 2k", json.dumps(alias_response.json()))
+        self.assertIn("sizes: 2k", json.dumps(alias_response.json()))
         for path in ("/v1beta/models", "/models"):
             response = await self.client.get(path)
             self.assertEqual(response.status_code, 200)
@@ -54,13 +54,12 @@ class ModelCatalogCapabilityTests(unittest.IsolatedAsyncioTestCase):
                       "abra_t2v_4s_360p", "abra_t2v_10s", "abra_t2v_4s_720p"):
             self.assertIn(model, expected)
 
-    async def test_filtered_gemini_model_cannot_be_discovered_individually(self):
+    async def test_upscaled_gemini_model_is_discoverable_but_imagen_is_filtered(self):
         for path in ("/v1beta/models/", "/models/"):
-            rejected = await self.client.get(path + "gemini-3.0-pro-image-landscape-2k")
+            rejected = await self.client.get(path + "imagen-4.0-generate-preview-landscape")
             self.assertEqual(rejected.status_code, 404)
-            accepted = await self.client.get(path + "gemini-3.0-pro-image")
+            accepted = await self.client.get(path + "gemini-3.0-pro-image-landscape-2k")
             self.assertEqual(accepted.status_code, 200)
-            self.assertNotIn("sizes: 2k", accepted.text)
 
     async def test_mixed_or_empty_accounts_preserve_catalog_and_update_without_restart(self):
         for accounts in ([], [SimpleNamespace(auth_mode="flow"), SimpleNamespace(auth_mode="labs")],
@@ -72,7 +71,8 @@ class ModelCatalogCapabilityTests(unittest.IsolatedAsyncioTestCase):
                               MODEL_CONFIG["gemini-3.0-pro-image-landscape-2k"]))
         self.db.get_active_tokens.return_value = [SimpleNamespace(auth_mode="flow")]
         response = await self.client.get("/v1/models")
-        self.assertNotIn("gemini-3.0-pro-image-landscape-2k", {m["id"] for m in response.json()["data"]})
+        self.assertIn("gemini-3.0-pro-image-landscape-2k", {m["id"] for m in response.json()["data"]})
+        self.assertNotIn("imagen-4.0-generate-preview-landscape", {m["id"] for m in response.json()["data"]})
 
     async def test_non_native_mode_does_not_query_account_health(self):
         with patch("src.services.model_capabilities.config", SimpleNamespace(captcha_method="remote")):
@@ -82,8 +82,8 @@ class ModelCatalogCapabilityTests(unittest.IsolatedAsyncioTestCase):
         self.db.get_active_tokens.assert_not_awaited()
 
     async def test_responses_rejection_logs_canonical_model_without_creating_task(self):
-        payload = {"model": "gemini-3.1-flash-image", "input": "private prompt must not be logged",
-                   "generationConfig": {"imageConfig": {"imageSize": "2K"}}}
+        payload = {"model": "imagen-4.0-generate-preview-landscape",
+                   "input": "private prompt must not be logged"}
         with patch.object(routes, "_create_async_image_response_task", new_callable=AsyncMock) as create, \
              patch("src.services.model_capabilities.debug_logger.log_runtime_event") as logged:
             response = await self.client.post("/v1/responses", json=payload)
@@ -91,7 +91,7 @@ class ModelCatalogCapabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["error"]["code"], "model_not_supported")
         create.assert_not_awaited()
         logged.assert_called_once_with("generation_capability_rejected", stage="image_response_entry",
-            reason="model_transport_unavailable", status_code=501, model="gemini-3.1-flash-image-landscape-2k")
+            reason="model_transport_unavailable", status_code=501, model="imagen-4.0-generate-preview-landscape")
         self.assertNotIn("private prompt", str(logged.call_args))
 
     async def test_responses_supported_model_still_creates_async_task(self):
@@ -108,7 +108,7 @@ class ModelCatalogCapabilityTests(unittest.IsolatedAsyncioTestCase):
     async def test_video_rejection_uses_same_safe_diagnostic_and_never_enqueues(self):
         self.db.enqueue_async_task = AsyncMock()
         normalized = routes.NormalizedGenerationRequest(
-            model="veo_3_1_t2v_fast_landscape", prompt="private prompt", images=[])
+            model="veo_3_1_t2v_landscape", prompt="private prompt", images=[])
         with patch("src.services.model_capabilities.debug_logger.log_runtime_event") as logged:
             result = await routes._create_deferred_async_video_task(normalized)
         self.assertEqual(result["error"]["status_code"], 501)

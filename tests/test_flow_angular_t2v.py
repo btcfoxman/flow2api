@@ -82,7 +82,7 @@ class TextVideoWireTests(unittest.TestCase):
             self.assertTrue(use_angular_video(model + "_360p", models=[model + "_360p"]))
             self.assertFalse(use_angular_video(model, models=[model + "_360p"]))
             self.assertFalse(use_angular_video(model + "_360p", models=[model + "_720p"]))
-        for model in ("abra_t2v_5s", "abra_t2v_4s_1080p", "abra_t2v_future", "veo_3_1_t2v_fast"):
+        for model in ("abra_t2v_5s", "abra_t2v_4s_1080p", "abra_t2v_future", "veo_3_1_t2v_future"):
             self.assertIsNone(resolve_video_model(model))
 
     def test_invalid_input_is_rejected_before_submission(self):
