@@ -74,6 +74,16 @@ class TextVideoWireTests(unittest.TestCase):
             self.assertEqual(item[2], 2)
             self.assertEqual(len(item), 8 if model.endswith("_360p") else 5)
 
+    def test_legacy_service_prompt_encodes_to_same_native_rpc(self):
+        rest = request(aspect="VIDEO_ASPECT_RATIO_LANDSCAPE")
+        rest["requests"][0]["videoModelKey"] = "veo_3_1_t2v_fast"
+        rest["requests"][0].pop("outputSpec")
+        structured = build_video_rpc(rest)
+        rest["requests"][0]["textInput"] = {"prompt": "A dog digging."}
+        legacy = build_video_rpc(rest)
+        self.assertEqual(legacy[0], "YhhmEf")
+        self.assertEqual(legacy[1][0][0][:4], structured[1][0][0][:4])
+
     def test_exact_opt_in_stays_resolution_specific(self):
         for seconds in (4, 6, 8, 10):
             model = f"abra_t2v_{seconds}s"
@@ -94,6 +104,7 @@ class TextVideoWireTests(unittest.TestCase):
             ("outputSpec", {"resolution": "VIDEO_RESOLUTION_1080P"}),
             ("outputSpec", {"unverified": True}), ("aspectRatio", "VIDEO_ASPECT_RATIO_SQUARE"),
             ("textInput", {"structuredPrompt": {"parts": [{"text": 123}]}}),
+            ("textInput", {"prompt": 123}),
         ]:
             with self.subTest(key=key, value=value):
                 rest = request()
@@ -169,6 +180,16 @@ class TextVideoRoutingTests(unittest.IsolatedAsyncioTestCase):
                 self.client._get_recaptcha_token.assert_awaited_with(
                     "project-test", action="VIDEO_GENERATION", token_id=9, model_key=model)
         self.client._make_request.assert_not_awaited()
+
+    async def test_veo_service_default_prompt_reaches_native_rpc(self):
+        result = await self.client.generate_video_text(
+            at=None, project_id="project-test", prompt="A dog digging.",
+            model_key="veo_3_1_t2v_fast", aspect_ratio="VIDEO_ASPECT_RATIO_LANDSCAPE",
+            token_id=9)
+        sent = self.service.fetch_json.await_args.kwargs
+        self.assertEqual(sent["json_data"]["rpc_id"], "YhhmEf")
+        self.assertEqual(sent["json_data"]["payload"][0][0][0], [None, None, [[["A dog digging."]]]])
+        self.assertEqual(result["operations"][0]["transport"], "angular")
 
     async def test_unknown_response_is_not_retried_or_fallen_back(self):
         self.service.fetch_json.return_value = {"rpc_payload": []}

@@ -370,11 +370,21 @@ def build_video_rpc(rest):
     captcha = (context.get("recaptchaContext") or {}).get("token")
     if not project or not captcha:
         raise AngularProtocolError("Flow project and fresh captcha are required")
-    parts = request.get("textInput", {}).get("structuredPrompt", {}).get("parts", [])
-    if not parts or any(not isinstance(part, dict) or set(part) != {"text"}
-                        or not isinstance(part["text"], str) for part in parts):
+    text_input = request.get("textInput")
+    if not isinstance(text_input, dict):
         raise AngularProtocolError("Unsupported Angular prompt shape")
-    prompt = "".join(part["text"] for part in parts)
+    if set(text_input) == {"prompt"} and isinstance(text_input["prompt"], str):
+        # Older service model configs still build the Labs REST text shape.
+        # Both shapes encode to the same verified Flow Angular text slot.
+        prompt = text_input["prompt"]
+    else:
+        if set(text_input) != {"structuredPrompt"} or not isinstance(text_input["structuredPrompt"], dict):
+            raise AngularProtocolError("Unsupported Angular prompt shape")
+        parts = text_input["structuredPrompt"].get("parts", [])
+        if not parts or any(not isinstance(part, dict) or set(part) != {"text"}
+                            or not isinstance(part["text"], str) for part in parts):
+            raise AngularProtocolError("Unsupported Angular prompt shape")
+        prompt = "".join(part["text"] for part in parts)
     reference_images = request.get("referenceImages", [])
     if not isinstance(reference_images, list) or any(
             not isinstance(item, dict) or not isinstance(item.get("mediaId"), str)
