@@ -305,6 +305,43 @@ class LoadBalancerCreditsTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNotNone(available_again)
 
+    async def test_native_image_skips_cooling_proxy_but_ignores_video_pending(self):
+        config.set_captcha_method("native_cdp")
+        cooled = make_token(1, 30, "http://127.0.0.1:18080")
+        healthy = make_token(2, 30, "http://127.0.0.1:18081")
+        balancer = LoadBalancer(FakeTokenManager([cooled, healthy]))
+        balancer._get_native_video_proxy_state = AsyncMock(side_effect=lambda token: {
+            "available": token.id == 2,
+            "proxy_key": str(token.id),
+            "proxy_fingerprint": str(token.id),
+            "cooldown_remaining_seconds": 120 if token.id == 1 else 0,
+        })
+        balancer._video_proxy_pending["2"] = 1
+
+        selected = await balancer.select_token(
+            for_image_generation=True, minimum_credits=15,
+        )
+        self.assertEqual(selected.id, 2)
+
+    async def test_native_image_reports_proxy_cooldown_when_all_exits_blocked(self):
+        config.set_captcha_method("native_cdp")
+        balancer = LoadBalancer(FakeTokenManager([
+            make_token(1, 30, "http://127.0.0.1:18080"),
+        ]))
+        balancer._get_native_video_proxy_state = AsyncMock(return_value={
+            "available": False,
+            "proxy_key": "cooled",
+            "cooldown_remaining_seconds": 120,
+        })
+
+        self.assertIsNone(await balancer.select_token(
+            for_image_generation=True, minimum_credits=15,
+        ))
+        reason = await balancer.get_unavailable_reason(
+            for_image_generation=True, minimum_credits=15,
+        )
+        self.assertIn("120", reason)
+
     async def test_select_token_excludes_accounts_already_tried_by_request(self):
         first = make_token(1, get_minimum_generation_credits())
         second = make_token(2, get_minimum_generation_credits())

@@ -396,6 +396,20 @@ class LoadBalancer:
                     filtered_reasons[token.id] = "图片生成已禁用"
                     continue
 
+                # Image RPCs share the browser/proxy risk state with video RPCs.
+                # A definitive upstream 429 quarantines the exit for both.
+                if str(getattr(config, "captcha_method", "") or "").strip().lower() == "native_cdp":
+                    try:
+                        image_proxy_state = await self._get_native_video_proxy_state(token)
+                    except Exception as exc:
+                        filtered_reasons[token.id] = f"native proxy route unavailable: {exc}"
+                        continue
+                    if not bool(image_proxy_state.get("available", True)):
+                        retry_after = int(image_proxy_state.get("cooldown_remaining_seconds") or 0)
+                        fingerprint = str(image_proxy_state.get("proxy_fingerprint") or "")
+                        filtered_reasons[token.id] = f"proxy {fingerprint} cooling down ({retry_after}s)"
+                        continue
+
                 route_ok, route_reason = await self._check_extension_route(token)
                 if not route_ok:
                     filtered_reasons[token.id] = route_reason
@@ -647,7 +661,7 @@ class LoadBalancer:
             )
 
         if (
-            for_video_generation
+            (for_image_generation or for_video_generation)
             and funded_tokens
             and str(getattr(config, "captcha_method", "") or "").strip().lower() == "native_cdp"
         ):
@@ -660,7 +674,10 @@ class LoadBalancer:
                     continue
                 proxy_key = str(state.get("proxy_key") or "")
                 cooling_down = not bool(state.get("available", True))
-                proxy_pending = await self._is_video_proxy_pending(proxy_key)
+                proxy_pending = (
+                    await self._is_video_proxy_pending(proxy_key)
+                    if for_video_generation else False
+                )
                 blocked_states.append(
                     (
                         cooling_down or proxy_pending,
@@ -672,6 +689,8 @@ class LoadBalancer:
                     (seconds for _, seconds in blocked_states if seconds > 0),
                     default=0,
                 )
+                if for_image_generation and not retry_after:
+                    return "当前可用账号的代理出口暂不可用，请稍后重试。"
                 if retry_after:
                     return f"当前可用账号的代理出口正在风险冷却，请约 {retry_after} 秒后重试。"
                 return "当前可用账号的代理出口已有视频任务，任务结束后即可继续提交。"

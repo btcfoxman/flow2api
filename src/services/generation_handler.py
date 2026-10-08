@@ -1634,7 +1634,7 @@ class GenerationHandler:
         debug_logger.log_info(f"[GENERATION] 已选择Token: {token.id} ({token.email})")
         request_context["last_token_id"] = token.id
         pending_token_state["active"] = True
-        if generation_type == "video" and hasattr(
+        if generation_type in {"image", "video"} and hasattr(
             self.load_balancer,
             "get_video_proxy_diagnostics",
         ):

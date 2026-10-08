@@ -520,7 +520,7 @@ class NativeCdpServiceTests(unittest.IsolatedAsyncioTestCase):
                     "updated_at": (now - timedelta(minutes=3)).isoformat(),
                 },
                 {
-                    "operation": "generate_video",
+                    "operation": "generate_image",
                     "token_id": 2,
                     "status_code": 429,
                     "updated_at": (now - timedelta(seconds=10)).isoformat(),

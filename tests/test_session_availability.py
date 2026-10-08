@@ -102,6 +102,7 @@ class SessionSchedulingTests(unittest.IsolatedAsyncioTestCase):
             needs_at_refresh=lambda value:False,ensure_valid_token=AsyncMock(side_effect=lambda value:value))
         balancer=LoadBalancer(manager)
         balancer._check_extension_route=AsyncMock(return_value=(True,''))
+        balancer._get_native_video_proxy_state=AsyncMock(return_value={"available":True,"proxy_key":"healthy"})
         with patch('src.services.load_balancer.config',SimpleNamespace(captcha_method='native_cdp',call_logic_mode='random')), \
              patch('src.services.load_balancer.local_session_state',return_value={'version':1}):
             selected=await balancer.select_token(for_image_generation=True,model='imagen-4.0-generate-preview-portrait',minimum_credits=4)
@@ -130,6 +131,7 @@ class SessionSchedulingTests(unittest.IsolatedAsyncioTestCase):
                                   needs_at_refresh=lambda value: False, ensure_valid_token=AsyncMock(side_effect=lambda value:value))
         balancer = LoadBalancer(manager)
         balancer._check_extension_route=AsyncMock(return_value=(True,''))
+        balancer._get_native_video_proxy_state=AsyncMock(return_value={"available":True,"proxy_key":"healthy"})
         with patch('src.services.load_balancer.config', SimpleNamespace(captcha_method='native_cdp',call_logic_mode='random')), \
              patch('src.services.load_balancer.local_session_state',return_value={'version':1}):
             selected=await balancer.select_token(for_image_generation=True,minimum_credits=4)

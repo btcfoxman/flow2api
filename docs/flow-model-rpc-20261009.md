@@ -55,6 +55,15 @@ upstream verdict is not established. Subsequent repeated webpage submissions
 also began receiving gRPC 3, so further paid canaries should wait for the
 account to cool down.
 
+After aligning the ID and seed fields, a 3.5 pre service request for a 1K
+text-only `BELUGA` image completed on account #6. The next 2K request was
+assigned to account #52 on a different proxy exit and was rejected before
+upscaling with gRPC 7 / `PUBLIC_ERROR_UNUSUAL_ACTIVITY` (HTTP 429). This does
+not establish an upscale protocol failure. The native browser recorded the
+proxy risk, but image account selection had only applied that cooldown to
+video requests. Image routing now filters cooling exits, and restart recovery
+also replays image request results when rebuilding proxy risk history.
+
 The native Flow path must fail an upscale request if the requested resolution
 cannot be delivered. Returning the original 1K image as a successful 2K or
 4K result would mislead the caller.

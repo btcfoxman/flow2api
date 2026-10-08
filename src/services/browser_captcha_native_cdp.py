@@ -1854,7 +1854,7 @@ class BrowserCaptchaService:
             cutoff = now - 6 * 3600
             events = []
             for log in logs or []:
-                if str(log.get("operation") or "") != "generate_video":
+                if str(log.get("operation") or "") not in {"generate_video", "generate_image"}:
                     continue
                 token_id = log.get("token_id")
                 try:
