@@ -29,6 +29,22 @@ def check_metrics(body):
         raise RuntimeError("Missing generation metrics; deployment refused")
 
 
+def check_database(db):
+    submitting = db.execute("SELECT count(*) FROM async_task_queue WHERE status='submitting'").fetchone()[0]
+    processing = db.execute("SELECT count(*) FROM tasks WHERE status='processing' AND created_at > datetime('now','-2 hours')").fetchone()[0]
+    if submitting or processing:
+        raise RuntimeError("Submission or accepted task is still active; deployment refused")
+    has_image_queue = db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='image_response_tasks'"
+    ).fetchone()
+    if has_image_queue:
+        image_processing = db.execute(
+            "SELECT count(*) FROM image_response_tasks WHERE status='in_progress'"
+        ).fetchone()[0]
+        if image_processing:
+            raise RuntimeError("Image response generation is still in flight; deployment refused")
+
+
 def main():
     state_path = Path('/app/tmp/native-login-43/state.json')
     if state_path.exists():
@@ -44,10 +60,7 @@ def main():
     with opener.open('http://127.0.0.1:4020/metrics', timeout=10) as response:
         check_metrics(response.read().decode())
     with sqlite3.connect('file:/app/data/flow.db?mode=ro', uri=True) as db:
-        submitting = db.execute("SELECT count(*) FROM async_task_queue WHERE status='submitting'").fetchone()[0]
-        processing = db.execute("SELECT count(*) FROM tasks WHERE status='processing' AND created_at > datetime('now','-2 hours')").fetchone()[0]
-        if submitting or processing:
-            raise RuntimeError("Submission or accepted task is still active; deployment refused")
+        check_database(db)
     print('Pre restart checks passed (not a media-generation health verdict)')
 
 

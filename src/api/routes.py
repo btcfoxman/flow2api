@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 import mimetypes
+import os
 import re
 import time
 import uuid
@@ -76,8 +77,10 @@ VIDEO_VIDEO_PAYLOAD_KEYS = [
     "reference_video",
     "reference_video_url",
 ]
-IMAGE_RESPONSE_TASKS: Dict[str, Dict[str, Any]] = {}
-IMAGE_RESPONSE_TASKS_LOCK = asyncio.Lock()
+IMAGE_RESPONSE_WORKER: Optional[asyncio.Task] = None
+IMAGE_RESPONSE_WAKE_EVENT: Optional[asyncio.Event] = None
+IMAGE_RESPONSE_REQUEST_MAX_BYTES = 128 * 1024
+IMAGE_RESPONSE_MAX_REFERENCES = 8
 ROUTE_BACKGROUND_TASKS: Set[asyncio.Task] = set()
 ASYNC_TASK_QUEUE_WORKER: Optional[asyncio.Task] = None
 ASYNC_TASK_QUEUE_WAKE_EVENT: Optional[asyncio.Event] = None
@@ -144,6 +147,7 @@ class NormalizedGenerationRequest:
     video_file_name: Optional[str] = None
     aspect_ratio_override: Optional[str] = None
     watermark: bool = False
+    image_uris: Optional[List[str]] = None
 
 
 class WatermarkRemovalRequest(BaseModel):
@@ -190,6 +194,7 @@ async def start_async_task_queue() -> None:
     ASYNC_TASK_QUEUE_WORKER = _spawn_route_background_task(
         _run_async_task_queue_workers(worker_count)
     )
+    await start_image_response_queue()
 
 
 async def stop_async_task_queue() -> None:
@@ -206,6 +211,83 @@ async def stop_async_task_queue() -> None:
         except asyncio.CancelledError:
             pass
     ASYNC_TASK_QUEUE_WAKE_EVENT = None
+    await stop_image_response_queue()
+
+
+def _image_response_queue_capacity() -> int:
+    try:
+        return max(1, min(1000, int(os.getenv("FLOW_IMAGE_RESPONSE_QUEUE_CAPACITY", "50"))))
+    except ValueError:
+        return 50
+
+
+def _image_response_worker_count() -> int:
+    try:
+        return max(1, min(4, int(os.getenv("FLOW_IMAGE_RESPONSE_WORKERS", "1"))))
+    except ValueError:
+        return 1
+
+
+async def start_image_response_queue() -> None:
+    global IMAGE_RESPONSE_WORKER, IMAGE_RESPONSE_WAKE_EVENT
+    if IMAGE_RESPONSE_WORKER is not None and not IMAGE_RESPONSE_WORKER.done():
+        IMAGE_RESPONSE_WAKE_EVENT.set()
+        return
+    handler = _ensure_generation_handler()
+    recovered = await handler.db.fail_interrupted_image_response_tasks()
+    await handler.db.prune_image_response_tasks()
+    if recovered:
+        debug_logger.log_warning(
+            f"[RESPONSES IMAGE] Marked {recovered} interrupted task(s) as uncertain"
+        )
+    IMAGE_RESPONSE_WAKE_EVENT = asyncio.Event()
+    IMAGE_RESPONSE_WORKER = _spawn_route_background_task(
+        _run_image_response_workers(_image_response_worker_count())
+    )
+
+
+async def stop_image_response_queue() -> None:
+    global IMAGE_RESPONSE_WORKER, IMAGE_RESPONSE_WAKE_EVENT
+    worker = IMAGE_RESPONSE_WORKER
+    IMAGE_RESPONSE_WORKER = None
+    if IMAGE_RESPONSE_WAKE_EVENT is not None:
+        IMAGE_RESPONSE_WAKE_EVENT.set()
+    if worker is not None and not worker.done():
+        worker.cancel()
+        try:
+            await worker
+        except asyncio.CancelledError:
+            pass
+    IMAGE_RESPONSE_WAKE_EVENT = None
+
+
+async def _run_image_response_workers(count: int) -> None:
+    await asyncio.gather(*(_run_image_response_worker() for _ in range(count)))
+
+
+async def _run_image_response_worker() -> None:
+    handler = _ensure_generation_handler()
+    while True:
+        try:
+            item = await handler.db.claim_next_image_response_task()
+            if item is not None:
+                await _run_async_image_response_task(item)
+                continue
+            event = IMAGE_RESPONSE_WAKE_EVENT
+            if event is None:
+                return
+            try:
+                await asyncio.wait_for(event.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                pass
+            event.clear()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            debug_logger.log_error(
+                f"[RESPONSES IMAGE] Queue worker failed: {type(exc).__name__}: {exc}"
+            )
+            await asyncio.sleep(2.0)
 
 
 def _notify_async_task_queue() -> None:
@@ -1922,21 +2004,41 @@ async def _normalize_responses_image_request(
     if not prompt_text:
         raise HTTPException(status_code=400, detail="Prompt cannot be empty")
 
-    unique_image_uris = list(dict.fromkeys([uri for uri in image_uris if uri]))
+    unique_image_uris = list(dict.fromkeys(uri for uri in image_uris if uri))
+    if len(unique_image_uris) > IMAGE_RESPONSE_MAX_REFERENCES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"At most {IMAGE_RESPONSE_MAX_REFERENCES} reference images are supported",
+        )
+    if any(not uri.startswith(("https://", "http://")) for uri in unique_image_uris):
+        raise HTTPException(
+            status_code=400,
+            detail="Background image input must use HTTP(S) URLs",
+        )
+    if _responses_image_output_format(payload) != "url":
+        raise HTTPException(
+            status_code=400,
+            detail="Background image output must use URL format",
+        )
     content: List[Dict[str, Any]] = [{"type": "text", "text": prompt_text}]
     for uri in unique_image_uris:
         content.append({"type": "image_url", "image_url": {"url": uri}})
-
     request_payload = dict(payload)
     request_payload["model"] = model
-    request_payload["messages"] = [
-        {
-            "role": "user",
-            "content": content if len(content) > 1 else prompt_text,
-        }
-    ]
-    request_payload["stream"] = False
-    return await _normalize_openai_request(ChatCompletionRequest.model_validate(request_payload))
+    request_payload["messages"] = [{
+        "role": "user",
+        "content": content if len(content) > 1 else prompt_text,
+    }]
+    request = ChatCompletionRequest.model_validate(request_payload)
+    resolved_model = _resolve_request_model(model, request)
+    return NormalizedGenerationRequest(
+        model=resolved_model,
+        prompt=_sanitize_media_prompt(prompt_text),
+        images=[],
+        image_uris=unique_image_uris,
+        aspect_ratio_override=_video_aspect_override_from_request(request),
+        watermark=_coerce_bool(getattr(request, "watermark", None), False),
+    )
 
 
 def _build_responses_image_payload(task: Dict[str, Any]) -> Dict[str, Any]:
@@ -1957,10 +2059,11 @@ def _build_responses_image_payload(task: Dict[str, Any]) -> Dict[str, Any]:
             "id": f"ig_{response_id}_0",
             "type": "image_generation_call",
             "status": "completed",
-            "result": task.get("b64_json"),
+            "result": None,
         }
-        if task.get("url"):
-            item["url"] = task["url"]
+        image_url = task.get("result_url") or task.get("url")
+        if image_url:
+            item["url"] = image_url
         output.append(item)
 
     return {
@@ -1992,91 +2095,72 @@ def _build_responses_image_payload(task: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-async def _update_image_response_task(response_id: str, **fields: Any) -> None:
-    async with IMAGE_RESPONSE_TASKS_LOCK:
-        task = IMAGE_RESPONSE_TASKS.get(response_id)
-        if task is not None:
-            task.update(fields)
-
-
-async def _image_url_to_b64_json(image_url: str) -> Optional[str]:
-    if image_url.startswith("data:image"):
-        match = DATA_URL_RE.match(image_url)
-        if match:
-            return match.group("data")
-        return None
-    image_bytes = await retrieve_image_data(image_url)
-    if not image_bytes:
-        return None
-    return base64.b64encode(image_bytes).decode("ascii")
+def _image_response_task_from_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    request_payload = json.loads(row["request_payload"])
+    return {
+        "id": row["id"],
+        "created_at": row["created_at"],
+        "status": row["status"],
+        "model": row["model"],
+        "tools": request_payload.get("tools"),
+        "result_url": row.get("result_url"),
+        "error": row.get("error"),
+    }
 
 
 async def _run_async_image_response_task(
-    *,
-    response_id: str,
-    normalized: NormalizedGenerationRequest,
-    response_format: str,
-    base_url_override: Optional[str],
+    item: Dict[str, Any],
 ) -> None:
-    await _update_image_response_task(response_id, status="in_progress")
+    response_id = item["id"]
+    db = _ensure_generation_handler().db
     try:
+        request_payload = json.loads(item["request_payload"])
+        image_uris = request_payload.get("image_uris") or []
+        images = [await _load_image_bytes_from_uri(uri) for uri in image_uris]
         payload = _enrich_payload_with_direct_url(
             _parse_handler_result(
                 await _collect_non_stream_result(
-                    normalized.model,
-                    normalized.prompt,
-                    normalized.images,
-                    base_url_override=base_url_override,
-                    aspect_ratio_override=normalized.aspect_ratio_override,
-                    watermark=normalized.watermark,
+                    item["model"],
+                    request_payload["prompt"],
+                    images,
+                    base_url_override=request_payload.get("base_url_override"),
+                    aspect_ratio_override=request_payload.get("aspect_ratio_override"),
+                    watermark=bool(request_payload.get("watermark")),
                 )
             )
         )
         if "error" in payload:
-            await _update_image_response_task(
+            await db.finish_image_response_task(
                 response_id,
                 status="failed",
                 error=_extract_error_message(payload),
-                completed_at=int(time.time()),
             )
             return
 
         image_url = _extract_url_from_openai_payload(payload)
-        if not image_url:
-            await _update_image_response_task(
+        if not image_url or not image_url.startswith(("https://", "http://")):
+            await db.finish_image_response_task(
                 response_id,
                 status="failed",
-                error="Image task completed without an image URL",
-                completed_at=int(time.time()),
+                error="Image task completed without a downloadable image URL",
             )
             return
 
-        b64_json = None
-        if response_format == "b64_json":
-            b64_json = await _image_url_to_b64_json(image_url)
-            if not b64_json:
-                await _update_image_response_task(
-                    response_id,
-                    status="failed",
-                    error="Image task completed but base64 conversion failed",
-                    completed_at=int(time.time()),
-                )
-                return
-
-        await _update_image_response_task(
+        await db.finish_image_response_task(
             response_id,
             status="completed",
-            url=image_url,
-            b64_json=b64_json,
-            completed_at=int(time.time()),
+            result_url=image_url,
         )
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:
-        debug_logger.log_error(f"[RESPONSES IMAGE] task failed id={response_id}: {exc}")
-        await _update_image_response_task(
+        debug_logger.log_error(
+            f"[RESPONSES IMAGE] task failed id={response_id}: {type(exc).__name__}"
+        )
+        await db.finish_image_response_task(
             response_id,
             status="failed",
             error=sanitize_public_error_message(str(exc) or exc.__class__.__name__),
-            completed_at=int(time.time()),
         )
 
 
@@ -2086,29 +2170,31 @@ async def _create_async_image_response_task(
     base_url_override: Optional[str],
 ) -> Dict[str, Any]:
     response_id = _new_image_response_id()
-    task = {
-        "id": response_id,
-        "object": "response",
-        "created_at": int(time.time()),
-        "status": "queued",
-        "model": normalized.model,
-        "tools": payload.get("tools"),
-        "response_format": _responses_image_output_format(payload),
-        "url": None,
-        "b64_json": None,
-        "error": None,
-    }
-    async with IMAGE_RESPONSE_TASKS_LOCK:
-        IMAGE_RESPONSE_TASKS[response_id] = task
-    _spawn_route_background_task(
-        _run_async_image_response_task(
-            response_id=response_id,
-            normalized=normalized,
-            response_format=task["response_format"],
-            base_url_override=base_url_override,
-        )
+    request_payload = json.dumps(
+        {
+            "prompt": normalized.prompt,
+            "image_uris": normalized.image_uris or [],
+            "aspect_ratio_override": normalized.aspect_ratio_override,
+            "watermark": normalized.watermark,
+            "base_url_override": base_url_override,
+            "tools": payload.get("tools"),
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
     )
-    return _build_responses_image_payload(task)
+    db = _ensure_generation_handler().db
+    accepted = await db.enqueue_image_response_task(
+        response_id=response_id,
+        model=normalized.model,
+        request_payload=request_payload,
+        capacity=_image_response_queue_capacity(),
+    )
+    if not accepted:
+        raise HTTPException(status_code=429, detail="Image generation queue is full")
+    if IMAGE_RESPONSE_WAKE_EVENT is not None:
+        IMAGE_RESPONSE_WAKE_EVENT.set()
+    task = await db.get_image_response_task(response_id)
+    return _build_responses_image_payload(_image_response_task_from_row(task))
 
 
 def _build_gemini_error_payload(status_code: int, message: str) -> Dict[str, Any]:
@@ -2496,7 +2582,17 @@ async def create_image_response(
     api_key: str = Depends(verify_api_key_flexible),
 ):
     try:
-        payload = await _read_request_payload(raw_request)
+        raw_body = bytearray()
+        async for chunk in raw_request.stream():
+            if len(raw_body) + len(chunk) > IMAGE_RESPONSE_REQUEST_MAX_BYTES:
+                raise HTTPException(status_code=413, detail="Image response request is too large; use image URLs")
+            raw_body.extend(chunk)
+        try:
+            payload = json.loads(raw_body) if raw_body else {}
+        except (ValueError, UnicodeDecodeError):
+            raise HTTPException(status_code=400, detail="Invalid JSON body")
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Request body must be a JSON object")
         normalized = await _normalize_responses_image_request(payload)
         if MODEL_CONFIG.get(normalized.model, {}).get("type") != "image":
             raise HTTPException(status_code=400, detail=f"Model is not an image model: {normalized.model}")
@@ -2523,11 +2619,10 @@ async def get_image_response(
     api_key: str = Depends(verify_api_key_flexible),
 ):
     response_id = unquote(response_id)
-    async with IMAGE_RESPONSE_TASKS_LOCK:
-        task = dict(IMAGE_RESPONSE_TASKS.get(response_id) or {})
+    task = await _ensure_generation_handler().db.get_image_response_task(response_id)
     if not task:
         raise HTTPException(status_code=404, detail=f"Response not found: {response_id}")
-    return JSONResponse(content=_build_responses_image_payload(task))
+    return JSONResponse(content=_build_responses_image_payload(_image_response_task_from_row(task)))
 
 
 @router.post("/v1/videos")

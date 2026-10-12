@@ -595,6 +595,23 @@ class Database:
                     ON async_task_queue (status, id)
                 """)
 
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS image_response_tasks (
+                    id TEXT PRIMARY KEY,
+                    model TEXT NOT NULL,
+                    request_payload TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    result_url TEXT,
+                    error TEXT,
+                    created_at REAL NOT NULL,
+                    completed_at REAL
+                )
+            """)
+            await db.execute("""
+                CREATE INDEX IF NOT EXISTS idx_image_response_tasks_queue
+                ON image_response_tasks (status, created_at)
+            """)
+
             if not await self._table_exists(db, "generation_outcomes"):
                 print("  Creating missing table: generation_outcomes")
                 await db.execute("""
@@ -965,6 +982,23 @@ class Database:
             await db.execute("""
                 CREATE INDEX IF NOT EXISTS idx_async_task_queue_fifo
                 ON async_task_queue (status, id)
+            """)
+
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS image_response_tasks (
+                    id TEXT PRIMARY KEY,
+                    model TEXT NOT NULL,
+                    request_payload TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    result_url TEXT,
+                    error TEXT,
+                    created_at REAL NOT NULL,
+                    completed_at REAL
+                )
+            """)
+            await db.execute("""
+                CREATE INDEX IF NOT EXISTS idx_image_response_tasks_queue
+                ON image_response_tasks (status, created_at)
             """)
 
             # Request logs table
@@ -1688,6 +1722,110 @@ class Database:
             await db.commit()
 
     # Task operations
+    async def enqueue_image_response_task(
+        self, *, response_id: str, model: str, request_payload: str,
+        capacity: int,
+    ) -> bool:
+        """Persist a small URL-based request before acknowledging it to the caller."""
+        normalized_capacity = max(1, min(1000, int(capacity)))
+        async with self._connect(write=True) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM image_response_tasks WHERE status IN ('queued', 'in_progress')"
+            )
+            active_count = int((await cursor.fetchone())[0] or 0)
+            if active_count >= normalized_capacity:
+                await db.commit()
+                return False
+            await db.execute(
+                """INSERT INTO image_response_tasks
+                   (id, model, request_payload, status, created_at)
+                   VALUES (?, ?, ?, 'queued', ?)""",
+                (response_id, model, request_payload, time.time()),
+            )
+            await db.commit()
+            return True
+
+    async def claim_next_image_response_task(self) -> Optional[Dict[str, Any]]:
+        async with self._connect(write=True) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN IMMEDIATE")
+            cursor = await db.execute(
+                """SELECT * FROM image_response_tasks
+                   WHERE status = 'queued' ORDER BY created_at, rowid LIMIT 1"""
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                await db.commit()
+                return None
+            await db.execute(
+                "UPDATE image_response_tasks SET status = 'in_progress' WHERE id = ?",
+                (row["id"],),
+            )
+            await db.commit()
+            result = dict(row)
+            result["status"] = "in_progress"
+            return result
+
+    async def get_image_response_task(self, response_id: str) -> Optional[Dict[str, Any]]:
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM image_response_tasks WHERE id = ?", (response_id,)
+            )
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    async def finish_image_response_task(
+        self, response_id: str, *, status: str, result_url: Optional[str] = None,
+        error: Optional[str] = None,
+    ) -> None:
+        if status not in {"completed", "failed"}:
+            raise ValueError("image response task must finish as completed or failed")
+        async with self._connect(write=True) as db:
+            cursor = await db.execute(
+                "SELECT request_payload FROM image_response_tasks WHERE id = ?",
+                (response_id,),
+            )
+            row = await cursor.fetchone()
+            try:
+                tools = json.loads(row[0]).get("tools") if row else None
+            except (TypeError, ValueError, AttributeError):
+                tools = None
+            await db.execute(
+                """UPDATE image_response_tasks
+                   SET status = ?, result_url = ?, error = ?, completed_at = ?,
+                       request_payload = ?
+                   WHERE id = ? AND status = 'in_progress'""",
+                (status, result_url, error, time.time(),
+                 json.dumps({"tools": tools}, separators=(",", ":")), response_id),
+            )
+            await db.commit()
+
+    async def fail_interrupted_image_response_tasks(self) -> int:
+        """Do not resubmit work whose upstream outcome is unknown after a restart."""
+        async with self._connect(write=True) as db:
+            cursor = await db.execute(
+                """UPDATE image_response_tasks
+                   SET status = 'failed',
+                       error = 'Image task outcome unknown after service restart; automatic resubmission stopped',
+                       completed_at = ?, request_payload = '{}'
+                   WHERE status = 'in_progress'""",
+                (time.time(),),
+            )
+            await db.commit()
+            return cursor.rowcount
+
+    async def prune_image_response_tasks(self, max_age_seconds: int = 30 * 86400) -> int:
+        async with self._connect(write=True) as db:
+            cursor = await db.execute(
+                """DELETE FROM image_response_tasks
+                   WHERE status IN ('completed', 'failed') AND completed_at < ?""",
+                (time.time() - max_age_seconds,),
+            )
+            await db.commit()
+            return cursor.rowcount
+
     async def enqueue_async_task(
         self,
         *,

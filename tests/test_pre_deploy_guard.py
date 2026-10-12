@@ -1,4 +1,5 @@
 import importlib.util
+import sqlite3
 from pathlib import Path
 import unittest
 from types import SimpleNamespace
@@ -12,6 +13,17 @@ spec.loader.exec_module(guard)
 
 
 class DeployGuardTests(unittest.TestCase):
+    def test_image_response_in_progress_blocks_restart(self):
+        with sqlite3.connect(":memory:") as db:
+            db.execute("CREATE TABLE async_task_queue (status TEXT)")
+            db.execute("CREATE TABLE tasks (status TEXT, created_at TEXT)")
+            db.execute("CREATE TABLE image_response_tasks (status TEXT)")
+            db.execute("INSERT INTO image_response_tasks (status) VALUES ('queued')")
+            guard.check_database(db)
+            db.execute("INSERT INTO image_response_tasks (status) VALUES ('in_progress')")
+            with self.assertRaisesRegex(RuntimeError, "Image response generation"):
+                guard.check_database(db)
+
     def test_zero_metrics_pass(self):
         guard.check_metrics("flow2api_image_inflight_total 0.0\nflow2api_video_inflight_total 0.0\n")
 
