@@ -36,7 +36,10 @@ class FlowImageResponsesQueueTests(unittest.IsolatedAsyncioTestCase):
         app.dependency_overrides[routes.verify_api_key_flexible] = lambda: "test-key"
         self.client = AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
         self.addAsyncCleanup(self.client.aclose)
-        self.addAsyncCleanup(routes.stop_image_response_queue)
+        self.addAsyncCleanup(self._stop_worker)
+
+    async def _stop_worker(self):
+        await asyncio.wait_for(routes.stop_image_response_queue(), timeout=10)
 
     async def test_url_input_is_fetched_after_submission_and_result_survives_restart(self):
         image_url = "https://example.test/reference.png"
@@ -54,16 +57,20 @@ class FlowImageResponsesQueueTests(unittest.IsolatedAsyncioTestCase):
                           return_value=b"small image") as download, \
              patch.object(routes, "_collect_non_stream_result", new_callable=AsyncMock,
                           return_value=json.dumps({"url": result_url})) as generate:
-            submitted = await self.client.post("/v1/responses", json=request)
+            submitted = await asyncio.wait_for(
+                self.client.post("/v1/responses", json=request), timeout=10
+            )
             self.assertEqual(submitted.status_code, 200, submitted.text)
             response_id = submitted.json()["id"]
             self.assertEqual(submitted.json()["status"], "queued")
             download.assert_not_awaited()
             generate.assert_not_awaited()
 
-            await routes.start_image_response_queue()
+            await asyncio.wait_for(routes.start_image_response_queue(), timeout=10)
             for _ in range(100):
-                result = await self.client.get(f"/v1/responses/{response_id}")
+                result = await asyncio.wait_for(
+                    self.client.get(f"/v1/responses/{response_id}"), timeout=10
+                )
                 if result.json()["status"] == "completed":
                     break
                 await asyncio.sleep(0.02)
@@ -72,10 +79,12 @@ class FlowImageResponsesQueueTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result.json()["output"][0]["url"], result_url)
             self.assertIsNone(result.json()["output"][0]["result"])
 
-            await routes.stop_image_response_queue()
+            await self._stop_worker()
             with patch.object(routes, "generation_handler",
                               SimpleNamespace(db=Database(self.db.db_path))):
-                persisted = await self.client.get(f"/v1/responses/{response_id}")
+                persisted = await asyncio.wait_for(
+                    self.client.get(f"/v1/responses/{response_id}"), timeout=10
+                )
             self.assertEqual(persisted.json()["output"][0]["url"], result_url)
 
     async def test_queue_capacity_and_url_only_contract(self):
