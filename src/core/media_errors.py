@@ -60,6 +60,10 @@ VIDEO_UPLOAD_INVALID_ARGUMENT_MESSAGE = (
 VIDEO_UPLOAD_FAILURE_MESSAGE = (
     "参考图上传失败，请稍后重试；如持续失败，请重新创建该账号的生成项目"
 )
+VIDEO_UPLOAD_TIMEOUT_MESSAGE = "参考图上传超时或中断，视频尚未提交，请稍后重试"
+FLOW_IMAGE_UPLOAD_UNCERTAIN_MARKER = (
+    "flow reference image upload timed out or interrupted before video submission"
+)
 
 
 _PUBLIC_UPSTREAM_PATTERNS = (
@@ -189,11 +193,18 @@ def is_project_image_upload_invalid_argument_error(error_message: Any) -> bool:
 def is_project_image_upload_error(error_message: Any) -> bool:
     """Return True for any project-scoped reference-image upload failure."""
     error_lower = str(error_message or "").strip().lower()
-    return "project-scoped image upload failed via /flow/uploadimage" in error_lower
+    return (
+        "project-scoped image upload failed via /flow/uploadimage" in error_lower
+        or FLOW_IMAGE_UPLOAD_UNCERTAIN_MARKER in error_lower
+    )
 
 
 def project_image_upload_failure_response(error_message: Any) -> tuple[str, int]:
     """Return a safe public response for project-scoped upload failures."""
+    if FLOW_IMAGE_UPLOAD_UNCERTAIN_MARKER in str(error_message or "").lower():
+        # The image asset may exist, but no paid video submission has occurred.
+        # Do not retry the whole queued generation after the bounded asset retry.
+        return VIDEO_UPLOAD_TIMEOUT_MESSAGE, 502
     if is_project_image_upload_invalid_argument_error(error_message):
         return VIDEO_UPLOAD_INVALID_ARGUMENT_MESSAGE, 400
     if is_project_image_upload_error(error_message):

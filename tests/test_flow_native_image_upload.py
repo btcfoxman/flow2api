@@ -106,9 +106,36 @@ class NativeImageTransportTests(unittest.IsolatedAsyncioTestCase):
             await self.client.upload_image(None,PNG,project_id=PROJECT,token_id=7)
         self.service.fetch_json.assert_not_awaited()
 
-    async def test_uncertain_upload_is_not_retried_or_converted_to_legacy(self):
+    async def test_uncertain_asset_upload_retries_once_with_fresh_captcha(self):
+        self.service.get_token.side_effect=[("first-upload","native:7"),("second-upload","native:7")]
+        self.service.fetch_json.side_effect=[
+            AngularSubmissionUncertain("unknown"),
+            {"rpc_payload":UPLOAD_RESPONSE},
+        ]
+        with patch("src.services.flow_client.asyncio.sleep",AsyncMock()) as pause:
+            result=await self.client.upload_image(None,PNG,project_id=PROJECT,token_id=7)
+        self.assertEqual(result,MEDIA)
+        self.assertEqual(self.service.get_token.await_count,2)
+        self.assertEqual(self.service.fetch_json.await_count,2)
+        requests=[call.kwargs["json_data"] for call in self.service.fetch_json.await_args_list]
+        self.assertEqual([item["rpc_id"] for item in requests],["maseQ","maseQ"])
+        self.assertEqual([item["payload"][0][-1][0] for item in requests],["first-upload","second-upload"])
+        self.assertNotEqual(requests[0]["payload"][8],requests[1]["payload"][8])
+        self.assertEqual([call.kwargs["timeout"] for call in self.service.fetch_json.await_args_list],[150,150])
+        pause.assert_awaited_once()
+
+    async def test_exhausted_asset_upload_stops_before_video_submit(self):
         self.service.fetch_json.side_effect=AngularSubmissionUncertain("unknown")
-        with self.assertRaises(AngularSubmissionUncertain):
+        with patch("src.services.flow_client.asyncio.sleep",AsyncMock()):
+            with self.assertRaisesRegex(AngularSubmissionUncertain,"before video submission"):
+                await self.client.upload_image(None,PNG,project_id=PROJECT,token_id=7)
+        self.assertEqual(self.service.fetch_json.await_count,2)
+        self.assertEqual(self.service.get_token.await_count,2)
+
+    async def test_definitive_asset_rejection_is_not_retried(self):
+        from src.services.flow_angular import AngularRpcRejected
+        self.service.fetch_json.side_effect=AngularRpcRejected({"grpc_code":3})
+        with self.assertRaises(AngularRpcRejected):
             await self.client.upload_image(None,PNG,project_id=PROJECT,token_id=7)
         self.service.fetch_json.assert_awaited_once()
 
@@ -144,6 +171,7 @@ class NativeImageTransportTests(unittest.IsolatedAsyncioTestCase):
             ({"status":429,"text":"secret upstream body"}, "rpc_http_rejected", AngularProtocolError),
             ({"status":200,"text":"malformed secret body"}, "rpc_response_unrecognized", AngularSubmissionUncertain),
             ({"fetchError":"secret network details"}, "rpc_fetch_interrupted", AngularSubmissionUncertain),
+            ({"fetchError":"secret network details","timedOut":True}, "rpc_fetch_timeout", AngularSubmissionUncertain),
             (asyncio.TimeoutError(), "rpc_cdp_timeout", AngularSubmissionUncertain),
         ]:
             browser._evaluate=AsyncMock(side_effect=response) if isinstance(response, Exception) else AsyncMock(return_value=response)

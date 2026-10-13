@@ -20,12 +20,20 @@ from src.core.media_errors import (
     MEDIA_TRAFFIC_REASON,
     VIDEO_UPLOAD_FAILURE_MESSAGE,
     VIDEO_UPLOAD_INVALID_ARGUMENT_MESSAGE,
+    VIDEO_UPLOAD_TIMEOUT_MESSAGE,
 )
 from src.services.flow_client import FlowClient
 from src.services.generation_handler import GenerationHandler
 
 
 class MediaPolicyErrorTests(unittest.TestCase):
+    def test_native_image_upload_timeout_is_not_a_video_launch_failure(self):
+        error = "Flow reference image upload timed out or interrupted before video submission"
+        self.assertTrue(is_project_image_upload_error(error))
+        self.assertEqual(project_image_upload_failure_response(error), (VIDEO_UPLOAD_TIMEOUT_MESSAGE, 502))
+        self.assertEqual(GenerationHandler.__new__(GenerationHandler)._normalize_error_message(error),
+                         VIDEO_UPLOAD_TIMEOUT_MESSAGE)
+
     def test_upload_timeout_is_transient_but_generation_timeout_is_not(self):
         for cause in ("TimeoutError", "operation timed out", "curl: (28)"):
             message, status = project_image_upload_failure_response(

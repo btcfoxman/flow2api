@@ -665,6 +665,8 @@ def rpc_fetch_expression(rpc_id, payload, timeout):
           {method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8', 'X-Same-Domain': '1'},
            body, credentials: 'include', signal: controller.signal, redirect: 'error'});
         return {status: response.status, text: await response.text()};
-      } catch (_) { return {fetchError: 'Flow RPC transport interrupted'}; }
+      } catch (_) {
+        return {fetchError: 'Flow RPC transport interrupted', timedOut: controller.signal.aborted};
+      }
       finally { clearTimeout(timer); }
     })()""".replace("ARGS", args)

@@ -1400,7 +1400,10 @@ class NativeCdpAccountBrowser:
                             rpc_failure_reason = "rpc_bootstrap_unavailable"
                             raise AngularProtocolError(rpc_result["preflightError"])
                         if rpc_result.get("fetchError"):
-                            rpc_failure_reason = "rpc_fetch_interrupted"
+                            rpc_failure_reason = (
+                                "rpc_fetch_timeout" if rpc_result.get("timedOut") is True
+                                else "rpc_fetch_interrupted"
+                            )
                             raise AngularSubmissionUncertain("Flow launch result is unconfirmed; automatic resubmission is disabled")
                         if rpc_status == 401:
                             rpc_failure_reason = "upstream_authentication_rejected"

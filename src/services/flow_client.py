@@ -1380,16 +1380,46 @@ class FlowClient:
         extension = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}[mime_type]
         from .browser_captcha_native_cdp import BrowserCaptchaService
         service = await BrowserCaptchaService.get_instance(self.db)
-        captcha, _ = await service.get_token(project_id, action="UPLOAD_IMAGE", token_id=token_id, page_protocol="angular")
-        if not captcha:
-            raise NativeSessionError("flow_upload_captcha_unavailable", protocol="angular", stage="image_upload")
-        rpc_id, payload = build_image_upload_rpc(project_id, captcha, image_bytes, mime_type,
-                                                  f"flow2api_upload_{uuid.uuid4()}.{extension}")
-        response = await service.fetch_json(token_id=token_id, project_id=project_id, url=FLOW_RPC_URL,
-            json_data={"rpc_id": rpc_id, "payload": payload}, timeout=max(30, min(int(self.timeout or 120), 90)))
-        # No legacy acknowledgement, OAuth fallback, or automatic replay on an
-        # uncertain upload. A later generation obtains a fresh IMAGE_GENERATION captcha.
-        return uploaded_image_id(response.get("rpc_payload"), project_id)
+        # The upload is an asset operation, not a paid generation launch. Its
+        # browser fetch previously aborted after 90 s, including requests that
+        # were still uploading through a slow account proxy. Retry one uncertain
+        # asset upload with a fresh captcha; never replay the video launch here.
+        upload_timeout = max(150, min(int(self.timeout or 150), 300))
+        for attempt in range(2):
+            captcha, _ = await service.get_token(
+                project_id, action="UPLOAD_IMAGE", token_id=token_id,
+                page_protocol="angular",
+            )
+            if not captcha:
+                raise NativeSessionError("flow_upload_captcha_unavailable", protocol="angular", stage="image_upload")
+            rpc_id, payload = build_image_upload_rpc(
+                project_id, captcha, image_bytes, mime_type,
+                f"flow2api_upload_{uuid.uuid4()}.{extension}",
+            )
+            try:
+                response = await service.fetch_json(
+                    token_id=token_id, project_id=project_id, url=FLOW_RPC_URL,
+                    json_data={"rpc_id": rpc_id, "payload": payload},
+                    timeout=upload_timeout,
+                )
+            except AngularSubmissionUncertain:
+                if attempt == 0:
+                    debug_logger.log_runtime_event(
+                        "native_image_upload_retry", token_id=token_id,
+                        stage="image_upload", reason="result_unconfirmed",
+                        timeout_seconds=upload_timeout, attempt=2,
+                        image_bytes=len(image_bytes),
+                    )
+                    await asyncio.sleep(1)
+                    continue
+                raise AngularSubmissionUncertain(
+                    "Flow reference image upload timed out or interrupted before video submission",
+                    diagnostics={"stage": "image_upload", "attempts": 2,
+                                 "timeout_seconds": upload_timeout},
+                ) from None
+            # Binding is checked before the media ID is used by generation.
+            return uploaded_image_id(response.get("rpc_payload"), project_id)
+        raise AssertionError("unreachable Flow image upload retry state")
 
     async def upload_image(
         self,
