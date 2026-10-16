@@ -2260,7 +2260,9 @@ class Database:
             cursor = await db.execute(
                 """SELECT rl.id, rl.operation, rl.token_id, rl.status_code, rl.duration,
                           rl.status_text, rl.progress, rl.created_at, rl.updated_at,
-                          rl.request_body, rl.response_body,
+                          CASE WHEN rl.status_code >= 400
+                               THEN substr(COALESCE(rl.response_body, ''), 1, 8192)
+                               ELSE NULL END AS response_body,
                           tok.email AS token_email, tok.name AS token_name
                    FROM request_logs rl LEFT JOIN tokens tok ON tok.id = rl.token_id
                    WHERE (json_valid(rl.request_body) AND (
