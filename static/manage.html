@@ -46,6 +46,7 @@
             <nav class="flex space-x-8">
                 <button onclick="switchTab('tokens')" id="tabTokens" class="tab-btn border-b-2 border-primary text-sm font-medium py-3 px-1">Token 管理</button>
                 <button onclick="switchTab('settings')" id="tabSettings" class="tab-btn border-b-2 border-transparent text-sm font-medium py-3 px-1">系统配置</button>
+                <button onclick="switchTab('tasks')" id="tabTasks" class="tab-btn border-b-2 border-transparent text-sm font-medium py-3 px-1">任务日志</button>
                 <button onclick="switchTab('logs')" id="tabLogs" class="tab-btn border-b-2 border-transparent text-sm font-medium py-3 px-1">请求日志</button>
                 <a href="/test" id="tabTestPage" class="tab-btn inline-flex items-center border-b-2 border-transparent text-sm font-medium py-3 px-1">测试页面</a>
             </nav>
@@ -801,6 +802,46 @@
             </div>
         </div>
 
+        <!-- 任务日志面板 -->
+        <div id="panelTasks" class="hidden">
+            <div class="rounded-lg border border-border bg-background overflow-hidden">
+                <div class="flex flex-wrap items-center justify-between gap-3 p-4 border-b border-border">
+                    <div>
+                        <p class="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Task history</p>
+                        <h3 class="text-lg font-semibold">任务日志</h3>
+                        <p class="text-xs text-muted-foreground mt-1">按对外任务 ID 归并排队、提交重试与最终结果</p>
+                    </div>
+                    <div class="flex flex-wrap items-center gap-2 text-sm">
+                        <input id="taskSearch" type="search" placeholder="搜索任务 ID 或模型" oninput="renderTaskList()" class="h-9 w-48 rounded-md border border-input bg-background px-3 outline-none focus:ring-2 focus:ring-primary/20" aria-label="搜索任务">
+                        <select id="taskStatusFilter" onchange="renderTaskList()" class="h-9 rounded-md border border-input bg-background px-2" aria-label="筛选任务状态">
+                            <option value="">全部状态</option><option value="queued">排队中</option><option value="submitting">提交中</option><option value="processing">生成中</option><option value="completed">已完成</option><option value="failed">失败</option>
+                        </select>
+                        <label class="text-muted-foreground">最近 <input id="taskLimit" type="number" min="1" max="500" value="50" onchange="loadTasks()" class="h-9 w-16 rounded-md border border-input bg-background px-2 text-center text-foreground" aria-label="任务数量"> 条</label>
+                        <button onclick="loadTasks()" class="h-9 rounded-md border border-input px-3 hover:bg-accent">刷新</button>
+                    </div>
+                </div>
+                <div id="taskListSummary" class="px-4 py-2 text-xs text-muted-foreground border-b border-border bg-muted/20">加载中…</div>
+                <div class="w-full overflow-auto max-h-[650px]">
+                    <table class="w-full min-w-[920px] text-sm">
+                        <thead class="sticky top-0 bg-background z-10"><tr class="border-b border-border text-left text-xs text-muted-foreground">
+                            <th class="px-4 py-3 font-medium">任务 ID</th><th class="px-3 py-3 font-medium">模型</th><th class="px-3 py-3 font-medium">账号</th><th class="px-3 py-3 font-medium">状态</th><th class="px-3 py-3 font-medium">进度</th><th class="px-3 py-3 font-medium">创建时间</th><th class="px-4 py-3 font-medium text-right">操作</th>
+                        </tr></thead>
+                        <tbody id="taskTableBody" class="divide-y divide-border"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <div id="taskDetailModal" class="hidden fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="taskDetailTitle">
+            <div class="bg-background rounded-lg border border-border w-full max-w-4xl shadow-xl max-h-[85vh] flex flex-col">
+                <div class="flex items-center justify-between gap-3 p-5 border-b border-border">
+                    <div><p class="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Task trace</p><h3 id="taskDetailTitle" class="text-lg font-semibold">任务详情</h3></div>
+                    <button onclick="closeTaskDetail()" class="h-8 w-8 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground" aria-label="关闭任务详情">✕</button>
+                </div>
+                <div id="taskDetailContent" class="p-5 overflow-y-auto space-y-5"></div>
+            </div>
+        </div>
+
         <!-- 请求日志面板 -->
         <div id="panelLogs" class="hidden">
             <div class="rounded-lg border border-border bg-background">
@@ -1178,7 +1219,49 @@
         closeLogDetailModal=()=>{window.activeLogDetailId=null;resetLogMediaCache();$('logDetailModal').classList.add('hidden')},
         showToast=(m,t='info')=>{const d=document.createElement('div'),bc={success:'bg-green-600',error:'bg-destructive',info:'bg-primary'};d.className=`fixed bottom-4 right-4 ${bc[t]||bc.info} text-white px-4 py-2.5 rounded-lg shadow-lg text-sm font-medium z-50 animate-slide-up`;d.textContent=m;document.body.appendChild(d);setTimeout(()=>{d.style.opacity='0';d.style.transition='opacity .3s';setTimeout(()=>d.parentNode&&document.body.removeChild(d),300)},2000)},
         logout=async()=>{if(!confirm('确定要退出登录吗?'))return;try{await apiRequest('/api/admin/logout',{method:'POST'})}finally{localStorage.removeItem('adminToken');location.href='/login'}},
-        switchTab=t=>{const cap=n=>n.charAt(0).toUpperCase()+n.slice(1);['tokens','settings','logs'].forEach(n=>{const active=n===t;$(`panel${cap(n)}`).classList.toggle('hidden',!active);$(`tab${cap(n)}`).classList.toggle('border-primary',active);$(`tab${cap(n)}`).classList.toggle('text-primary',active);$(`tab${cap(n)}`).classList.toggle('border-transparent',!active);$(`tab${cap(n)}`).classList.toggle('text-muted-foreground',!active)});if(t==='settings'){stopStatsAutoRefresh();stopLogsAutoRefresh();loadAdminConfig();loadProxyConfig();loadCacheConfig();loadWatermarkConfig();loadGenerationTimeout();loadCallLogicConfig();loadCaptchaConfigWithNative();loadPluginConfig();loadATAutoRefreshConfig()}else if(t==='logs'){stopStatsAutoRefresh();startLogsAutoRefresh();loadLogs()}else{stopLogsAutoRefresh();loadStats();startStatsAutoRefresh()}};
+        switchTab=t=>{const cap=n=>n.charAt(0).toUpperCase()+n.slice(1);['tokens','settings','tasks','logs'].forEach(n=>{const active=n===t;$(`panel${cap(n)}`).classList.toggle('hidden',!active);$(`tab${cap(n)}`).classList.toggle('border-primary',active);$(`tab${cap(n)}`).classList.toggle('text-primary',active);$(`tab${cap(n)}`).classList.toggle('border-transparent',!active);$(`tab${cap(n)}`).classList.toggle('text-muted-foreground',!active)});stopStatsAutoRefresh();stopLogsAutoRefresh();if(t==='settings'){loadAdminConfig();loadProxyConfig();loadCacheConfig();loadWatermarkConfig();loadGenerationTimeout();loadCallLogicConfig();loadCaptchaConfigWithNative();loadPluginConfig();loadATAutoRefreshConfig()}else if(t==='logs'){startLogsAutoRefresh();loadLogs()}else if(t==='tasks'){loadTasks()}else{loadStats();startStatsAutoRefresh()}};
+
+        function taskTime(value){if(!value)return'-';const date=new Date(value);return Number.isNaN(date.getTime())?'-':date.toLocaleString('zh-CN')}
+        function taskStatusLabel(status){return({queued:'排队中',submitting:'提交中',in_progress:'生成中',processing:'生成中',completed:'已完成',failed:'失败'})[status]||status||'未知'}
+        function taskStatusClass(status){return status==='completed'?'bg-emerald-50 text-emerald-700 border-emerald-200':status==='failed'?'bg-rose-50 text-rose-700 border-rose-200':'bg-amber-50 text-amber-700 border-amber-200'}
+        async function loadTasks(){
+            try{
+                const limit=Math.max(1,Math.min(500,Number($('taskLimit').value)||50));$('taskLimit').value=String(limit);localStorage.setItem('flowTaskLimit',String(limit));
+                const response=await apiRequest(`/api/admin/tasks?limit=${limit}`);if(!response)return;
+                if(!response.ok)throw new Error(`HTTP ${response.status}`);
+                window.allFlowTasks=await response.json();renderTaskList();
+            }catch(error){$('taskListSummary').textContent='任务日志加载失败';$('taskTableBody').innerHTML=`<tr><td colspan="7" class="px-4 py-8 text-center text-rose-700">${escapeLogHtml(error.message)}</td></tr>`}
+        }
+        function renderTaskList(){
+            const tasks=window.allFlowTasks||[];const query=$('taskSearch').value.trim().toLowerCase();const status=$('taskStatusFilter').value;
+            const filtered=tasks.filter(task=>(!status||task.status===status)&&(!query||`${task.task_id} ${task.model}`.toLowerCase().includes(query)));
+            $('taskListSummary').textContent=`显示 ${filtered.length} 条 · 已读取最近 ${tasks.length} 条任务`;
+            $('taskTableBody').innerHTML=filtered.length?filtered.map(task=>`<tr class="hover:bg-muted/30 transition-colors">
+                <td class="px-4 py-3"><div class="font-mono text-xs max-w-[250px] break-all">${escapeLogHtml(task.task_id)}</div><div class="text-[11px] text-muted-foreground mt-1">${task.task_type==='image'?'图片':'视频'}</div></td>
+                <td class="px-3 py-3 text-xs font-medium">${escapeLogHtml(task.model||'-')}</td>
+                <td class="px-3 py-3 text-xs text-muted-foreground max-w-[170px] truncate" title="${escapeLogHtml(task.token_email||'')}">${escapeLogHtml(task.token_email||'-')}</td>
+                <td class="px-3 py-3"><span class="inline-flex rounded-md border px-2 py-1 text-xs font-medium ${taskStatusClass(task.status)}">${escapeLogHtml(taskStatusLabel(task.status))}</span></td>
+                <td class="px-3 py-3 text-xs tabular-nums">${Number(task.progress||0)}%</td>
+                <td class="px-3 py-3 text-xs text-muted-foreground whitespace-nowrap">${taskTime(task.created_at)}</td>
+                <td class="px-4 py-3 text-right"><button data-task-id="${escapeLogHtml(task.task_id)}" onclick="showTaskDetail(this.dataset.taskId)" class="rounded-md border border-border px-3 py-1.5 text-xs hover:border-primary hover:text-primary">详情</button></td>
+            </tr>`).join(''):'<tr><td colspan="7" class="px-4 py-10 text-center text-sm text-muted-foreground">没有符合条件的任务</td></tr>';
+        }
+        async function showTaskDetail(taskId){
+            const modal=$('taskDetailModal'),content=$('taskDetailContent');modal.classList.remove('hidden');content.textContent='任务详情加载中…';
+            window.activeTaskDetailId=taskId;
+            try{const response=await apiRequest(`/api/admin/tasks/${encodeURIComponent(taskId)}`);if(!response)return;if(!response.ok)throw new Error(`HTTP ${response.status}`);const task=await response.json();if(window.activeTaskDetailId===taskId)renderTaskDetail(task)}
+            catch(error){if(window.activeTaskDetailId===taskId)content.innerHTML=`<div class="rounded-md border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700">${escapeLogHtml(error.message)}</div>`}
+        }
+        function closeTaskDetail(){window.activeTaskDetailId=null;$('taskDetailModal').classList.add('hidden')}
+        function renderTaskDetail(task){
+            const badge=`<span class="inline-flex rounded-md border px-2 py-1 text-xs font-medium ${taskStatusClass(task.status)}">${escapeLogHtml(taskStatusLabel(task.status))}</span>`;
+            const fields=[['对外任务 ID',task.task_id],['模型',task.model],['账号',task.token_email||'-'],['上游任务 ID',task.upstream_task_id||'-'],['创建时间',taskTime(task.created_at)],['完成时间',taskTime(task.completed_at)],['提交次数',task.attempt_count||0],['429/重试记录',task.retry_count||0]];
+            const facts=fields.map(([label,value])=>`<div class="min-w-0"><dt class="text-[11px] text-muted-foreground">${escapeLogHtml(label)}</dt><dd class="mt-1 text-xs font-medium break-all">${escapeLogHtml(value)}</dd></div>`).join('');
+            const error=task.error_message?`<div class="rounded-md border border-rose-200 bg-rose-50 p-3"><p class="text-xs font-semibold text-rose-800">最终错误</p><p class="mt-1 text-xs text-rose-700 break-words">${escapeLogHtml(task.error_message)}</p></div>`:'';
+            const links=(task.result_urls||[]).filter(url=>typeof url==='string'&&/^https?:\/\//i.test(url)).map((url,index)=>`<a href="${escapeLogHtml(url)}" target="_blank" rel="noopener noreferrer" class="block text-xs text-blue-700 hover:underline break-all">结果 ${index+1} · ${escapeLogHtml(url)}</a>`).join('');
+            const attempts=(task.attempts||[]).map((attempt,index)=>{const isRetry=attempt.status_text==='retrying';const code=attempt.status_code??'-';const reason=[attempt.public_error,attempt.grpc_code?`gRPC ${attempt.grpc_code}`:'',attempt.error_summary].filter(Boolean).join(' · ');return`<div class="relative pl-6 pb-5 last:pb-0 border-l border-border ml-2"><span class="absolute -left-[5px] top-1 h-2.5 w-2.5 rounded-full ${isRetry?'bg-amber-500':Number(code)>=400?'bg-rose-500':'bg-emerald-500'}"></span><div class="flex flex-wrap items-center gap-2"><span class="text-xs font-semibold">${index+1}. ${escapeLogHtml(attempt.operation||'请求')}</span><span class="rounded bg-muted px-1.5 py-0.5 text-[11px]">HTTP ${escapeLogHtml(code)}</span>${isRetry?'<span class="text-[11px] font-medium text-amber-700">将重试</span>':''}<span class="text-[11px] text-muted-foreground">${taskTime(attempt.created_at)}</span></div><p class="mt-1 text-xs text-muted-foreground">${escapeLogHtml(attempt.token_email||'未分配账号')} · ${Number(attempt.duration||0).toFixed(2)} 秒 · 日志 #${escapeLogHtml(attempt.id)}</p>${reason?`<p class="mt-1 text-xs ${isRetry?'text-amber-700':'text-rose-700'} break-words">${escapeLogHtml(reason)}</p>`:''}</div>`}).join('');
+            $('taskDetailContent').innerHTML=`<div class="flex items-center gap-3">${badge}<span class="text-xs text-muted-foreground">进度 ${Number(task.progress||0)}%</span></div><dl class="grid grid-cols-2 md:grid-cols-4 gap-4 rounded-md border border-border bg-muted/20 p-4">${facts}</dl>${error}${links?`<div class="space-y-1"><h4 class="text-sm font-semibold">结果链接</h4>${links}</div>`:''}<section><h4 class="text-sm font-semibold mb-3">请求与重试时间线</h4>${attempts||'<p class="text-xs text-muted-foreground">暂无关联的请求日志；历史请求日志可能已清理。</p>'}</section>`;
+        }
 
         function escapeLogHtml(text){
             if(text===null||text===undefined) return '';
@@ -1457,7 +1540,7 @@
             const detailContent=$('logDetailContent');detailContent.dataset.logId=String(log.id??'');detailContent.innerHTML=detailHtml;syncLogDetailViewState();
         }
 
-        window.addEventListener('DOMContentLoaded',()=>{checkAuth();refreshTokens();startStatsAutoRefresh();loadATAutoRefreshConfig()});
+        window.addEventListener('DOMContentLoaded',()=>{checkAuth();refreshTokens();startStatsAutoRefresh();loadATAutoRefreshConfig();$('taskLimit').value=localStorage.getItem('flowTaskLimit')||'50'});
     </script>
 </body>
 </html>

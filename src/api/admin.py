@@ -1585,6 +1585,73 @@ async def get_stats(token: str = Depends(verify_admin_token)):
     }
 
 
+@router.get("/api/admin/tasks")
+async def list_admin_tasks(
+    limit: int = 50,
+    token: str = Depends(verify_admin_token),
+):
+    """Task-centric history, including waiting and completed async requests."""
+    return await db.list_admin_tasks(limit=max(1, min(limit, 500)))
+
+
+@router.get("/api/admin/tasks/{task_id}")
+async def get_admin_task_detail(
+    task_id: str,
+    token: str = Depends(verify_admin_token),
+):
+    task = await db.get_admin_task_record(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    upstream_id = task.get("upstream_task_id")
+    logs = await db.get_admin_task_request_logs(task_id, upstream_id)
+    attempts = []
+    for log in logs:
+        response = _parse_log_json(log.get("response_body"))
+        response = response if isinstance(response, dict) else {}
+        diagnostic = response.get("rpc_diagnostic")
+        diagnostic = diagnostic if isinstance(diagnostic, dict) else {}
+        attempts.append({
+            "id": log["id"],
+            "operation": log["operation"],
+            "token_id": log.get("token_id"),
+            "token_email": log.get("token_email"),
+            "status_code": log.get("status_code"),
+            "status_text": log.get("status_text") or "",
+            "progress": log.get("progress") or 0,
+            "duration": log.get("duration"),
+            "created_at": log.get("created_at"),
+            "updated_at": log.get("updated_at"),
+            "error_summary": _extract_error_summary(response) if (log.get("status_code") or 0) >= 400 else "",
+            "grpc_code": diagnostic.get("grpc_code"),
+            "public_error": diagnostic.get("public_error"),
+        })
+    result_urls = task.get("result_urls")
+    if isinstance(result_urls, str):
+        try:
+            result_urls = json.loads(result_urls)
+        except (TypeError, ValueError):
+            result_urls = []
+    if not isinstance(result_urls, list):
+        result_urls = [task["result_url"]] if task.get("result_url") else []
+    return {
+        "task_id": task_id,
+        "task_type": task.get("task_type") or "video",
+        "model": task.get("model"),
+        "status": task.get("status"),
+        "progress": task.get("progress") or 0,
+        "token_id": task.get("token_id"),
+        "token_email": task.get("token_email"),
+        "upstream_task_id": upstream_id or task.get("upstream_task_id"),
+        "error_message": task.get("error_message"),
+        "created_at": task.get("created_at"),
+        "completed_at": task.get("completed_at"),
+        "result_urls": result_urls,
+        "attempt_count": max(int(task.get("attempt_count") or 0), len([a for a in attempts if a["operation"] == "generate_video"])),
+        "retry_count": len([a for a in attempts if a["status_text"] == "retrying"]),
+        "attempts": attempts,
+    }
+
+
 @router.get("/api/logs")
 async def get_logs(
     limit: int = 100,

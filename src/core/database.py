@@ -2170,6 +2170,109 @@ class Database:
                 return Task(**task_dict)
             return None
 
+    async def list_admin_tasks(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """List caller-visible tasks without duplicating their upstream task rows."""
+        limit = max(1, min(int(limit), 500))
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                WITH recent_video AS (
+                    SELECT * FROM tasks ORDER BY id DESC LIMIT ?
+                ), public_tasks AS (
+                    SELECT task_id, 'video' AS task_type, model, status, progress,
+                           token_id, error_message, created_at, completed_at,
+                           0 AS attempt_count, operations, result_urls
+                    FROM recent_video t
+                    WHERE t.task_id NOT IN (
+                        SELECT COALESCE(json_extract(alias.operations, '$[0].operation.name'), '')
+                        FROM tasks alias
+                        WHERE alias.task_id LIKE 'flow2api-submit-%'
+                          AND json_valid(alias.operations)
+                    )
+                    UNION ALL
+                    SELECT task_id, task_type, model, status, 0, NULL, last_error,
+                           created_at, NULL, attempt_count, NULL, NULL
+                    FROM (SELECT * FROM async_task_queue ORDER BY id DESC LIMIT ?)
+                    UNION ALL
+                    SELECT id, 'image', model, status,
+                           CASE WHEN status IN ('completed', 'failed') THEN 100 ELSE 0 END,
+                           NULL, error, datetime(created_at, 'unixepoch'),
+                           datetime(completed_at, 'unixepoch'), 0, NULL, result_url
+                    FROM (SELECT * FROM image_response_tasks ORDER BY created_at DESC LIMIT ?)
+                )
+                SELECT p.task_id, p.task_type, p.model, p.status, p.progress,
+                       p.token_id, p.error_message, p.created_at, p.completed_at,
+                       p.attempt_count, tok.email AS token_email, tok.name AS token_name
+                FROM public_tasks p LEFT JOIN tokens tok ON tok.id = p.token_id
+                ORDER BY p.created_at DESC, p.task_id DESC LIMIT ?
+                """,
+                (limit * 3, limit, limit, limit),
+            )
+            return [dict(row) for row in await cursor.fetchall()]
+
+    async def get_admin_task_record(self, task_id: str) -> Optional[Dict[str, Any]]:
+        """Get one public video or image task with account and result metadata."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """SELECT t.*, tok.email AS token_email, tok.name AS token_name
+                   FROM tasks t LEFT JOIN tokens tok ON tok.id = t.token_id
+                   WHERE t.task_id = ?""",
+                (task_id,),
+            )
+            row = await cursor.fetchone()
+            if row:
+                result = dict(row)
+                result['task_type'] = 'video'
+                result['upstream_task_id'] = self._async_video_canonical_id(result)
+                return result
+            cursor = await db.execute(
+                """SELECT * FROM async_task_queue WHERE task_id = ?""", (task_id,)
+            )
+            row = await cursor.fetchone()
+            if row:
+                result = dict(row)
+                result['error_message'] = result.get('last_error')
+                result['progress'] = 0
+                return result
+            cursor = await db.execute(
+                """SELECT id AS task_id, model, status, result_url, error AS error_message,
+                          datetime(created_at, 'unixepoch') AS created_at,
+                          datetime(completed_at, 'unixepoch') AS completed_at
+                   FROM image_response_tasks WHERE id = ?""",
+                (task_id,),
+            )
+            row = await cursor.fetchone()
+            if row:
+                result = dict(row)
+                result['task_type'] = 'image'
+                result['progress'] = 100 if result['status'] in ('completed', 'failed') else 0
+                return result
+            return None
+
+    async def get_admin_task_request_logs(
+        self, task_id: str, upstream_task_id: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Load all matching attempt logs; the admin API redacts their payloads."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """SELECT rl.id, rl.operation, rl.token_id, rl.status_code, rl.duration,
+                          rl.status_text, rl.progress, rl.created_at, rl.updated_at,
+                          rl.request_body, rl.response_body,
+                          tok.email AS token_email, tok.name AS token_name
+                   FROM request_logs rl LEFT JOIN tokens tok ON tok.id = rl.token_id
+                   WHERE (json_valid(rl.request_body) AND (
+                       json_extract(rl.request_body, '$.queue_task_id') = ?
+                       OR json_extract(rl.request_body, '$.task_id') IN (?, ?)
+                       OR json_extract(rl.request_body, '$.response_id') = ?
+                   ))
+                   ORDER BY rl.id ASC LIMIT 200""",
+                (task_id, task_id, upstream_task_id or task_id, task_id),
+            )
+            return [dict(row) for row in await cursor.fetchall()]
+
     async def update_task(self, task_id: str, **kwargs):
         """Update task"""
         async with self._connect(write=True) as db:
