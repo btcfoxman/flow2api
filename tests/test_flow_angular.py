@@ -236,3 +236,44 @@ eval(fs.readFileSync(0,'utf8')).then(result=>process.stdout.write(JSON.stringify
             result = await FlowClient(None).check_video_status("unused", ops)
         self.assertIn("Signature=", result["operations"][0]["operation"]["metadata"]["video"]["fifeUrl"])
         self.assertEqual([c.kwargs["json_data"]["rpc_id"] for c in service.fetch_json.await_args_list], ["jwpduf", "as29s"])
+
+    async def test_uploaded_reference_video_can_be_ready_without_download_url(self):
+        row = media(3)
+        row[7] = []
+        service = SimpleNamespace(fetch_json=AsyncMock(return_value={"rpc_payload": [row]}))
+        with patch("src.services.browser_captcha_native_cdp.BrowserCaptchaService.get_instance",
+                   AsyncMock(return_value=service)):
+            result = await FlowClient(None).wait_uploaded_video_ready(
+                "unused", "project-test", "media-test", token_id=9,
+                transport="angular", max_attempts=1,
+            )
+        self.assertEqual(result["operations"][0]["status"], "MEDIA_GENERATION_STATUS_SUCCESSFUL")
+        self.assertNotIn("fifeUrl", result["operations"][0]["operation"]["metadata"]["video"])
+        self.assertEqual([call.kwargs["json_data"]["rpc_id"] for call in service.fetch_json.await_args_list], ["jwpduf"])
+
+    async def test_generated_video_waits_for_signed_url_after_success_status(self):
+        row = media(3)
+        row[7] = []
+        service = SimpleNamespace(fetch_json=AsyncMock(side_effect=[
+            {"rpc_payload": [row]}, {"rpc_payload": [row]},
+        ]))
+        ops = video_operations([media(6)], token_id=9, project_id="project-test")["operations"]
+        with patch("src.services.browser_captcha_native_cdp.BrowserCaptchaService.get_instance",
+                   AsyncMock(return_value=service)):
+            result = await FlowClient(None).check_video_status("unused", ops)
+        self.assertEqual(result["operations"][0]["status"], "MEDIA_GENERATION_STATUS_ACTIVE")
+        self.assertTrue(result["operations"][0]["downloadUrlPending"])
+        self.assertEqual([call.kwargs["json_data"]["rpc_id"] for call in service.fetch_json.await_args_list], ["jwpduf", "as29s"])
+
+    async def test_detail_failure_overrides_initial_success_without_signed_url(self):
+        row = media(3)
+        row[7] = []
+        service = SimpleNamespace(fetch_json=AsyncMock(side_effect=[
+            {"rpc_payload": [row]}, {"rpc_payload": [media(4)]},
+        ]))
+        ops = video_operations([media(6)], token_id=9, project_id="project-test")["operations"]
+        with patch("src.services.browser_captcha_native_cdp.BrowserCaptchaService.get_instance",
+                   AsyncMock(return_value=service)):
+            result = await FlowClient(None).check_video_status("unused", ops)
+        self.assertEqual(result["operations"][0]["status"], "MEDIA_GENERATION_STATUS_FAILED")
+        self.assertNotIn("downloadUrlPending", result["operations"][0])

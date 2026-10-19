@@ -20,7 +20,7 @@ class FakeResponse:
 
 
 class FakeAsyncSession:
-    def __init__(self, outcomes, calls):
+    def __init__(self, outcomes, calls, **kwargs):
         self.outcomes = outcomes
         self.calls = calls
 
@@ -63,7 +63,7 @@ class ReferenceMediaDownloadTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch(
                 "src.api.routes.AsyncSession",
-                side_effect=lambda: FakeAsyncSession(outcomes, calls),
+                side_effect=lambda **kwargs: FakeAsyncSession(outcomes, calls, **kwargs),
             ),
             patch("src.api.routes.asyncio.sleep", new=AsyncMock()) as sleep_mock,
         ):
@@ -86,15 +86,14 @@ class ReferenceMediaDownloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(call["allow_redirects"] for call in calls))
         self.assertEqual(sleep_mock.await_count, 2)
 
-    async def test_non_retryable_client_error_stops_immediately(self):
-        outcomes = [FakeResponse(404, b"not found", "text/plain")]
+    async def test_non_retryable_client_error_on_only_route_stops_immediately(self):
+        outcomes = [FakeResponse(410, b"gone", "text/plain")]
         calls = []
-        file_cache = self._file_cache(media_proxy="http://media-proxy:8080")
 
         with (
             patch(
                 "src.api.routes.AsyncSession",
-                side_effect=lambda: FakeAsyncSession(outcomes, calls),
+                side_effect=lambda **kwargs: FakeAsyncSession(outcomes, calls, **kwargs),
             ),
             patch("src.api.routes.asyncio.sleep", new=AsyncMock()) as sleep_mock,
         ):
@@ -102,12 +101,49 @@ class ReferenceMediaDownloadTests(unittest.IsolatedAsyncioTestCase):
                 "https://media.example/missing.jpg",
                 "image",
                 60,
-                file_cache,
+                None,
             )
 
         self.assertIsNone(result)
         self.assertEqual(len(calls), 1)
         sleep_mock.assert_not_awaited()
+
+    async def test_forbidden_media_proxy_falls_back_to_direct_route(self):
+        outcomes = [
+            FakeResponse(403, b"blocked", "text/plain"),
+            FakeResponse(200, b"\xff\xd8\xffimage", "image/jpeg"),
+        ]
+        calls = []
+        file_cache = self._file_cache(media_proxy="http://media-proxy:8080")
+        with (
+            patch("src.api.routes.AsyncSession",
+                  side_effect=lambda **kwargs: FakeAsyncSession(outcomes, calls, **kwargs)),
+            patch("src.api.routes.asyncio.sleep", new=AsyncMock()) as sleep_mock,
+        ):
+            result = await _download_remote_media_data(
+                "https://media.example/reference.jpg", "image", 60, file_cache,
+            )
+        self.assertEqual(result, b"\xff\xd8\xffimage")
+        self.assertEqual([call["proxy"] for call in calls], ["http://media-proxy:8080", None])
+        sleep_mock.assert_not_awaited()
+
+    async def test_new_image_url_retries_after_short_lived_404(self):
+        outcomes = [
+            FakeResponse(404, b"not ready", "text/plain"),
+            FakeResponse(200, b"\x89PNG\r\n\x1a\nimage", "image/png"),
+        ]
+        calls = []
+        with (
+            patch("src.api.routes.AsyncSession",
+                  side_effect=lambda **kwargs: FakeAsyncSession(outcomes, calls, **kwargs)),
+            patch("src.api.routes.asyncio.sleep", new=AsyncMock()) as sleep_mock,
+        ):
+            result = await _download_remote_media_data(
+                "https://media.example/new.png", "image", 60, None,
+            )
+        self.assertEqual(result, b"\x89PNG\r\n\x1a\nimage")
+        self.assertEqual(len(calls), 2)
+        sleep_mock.assert_awaited_once()
 
     async def test_html_success_response_is_rejected_and_retried(self):
         outcomes = [
@@ -119,7 +155,7 @@ class ReferenceMediaDownloadTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch(
                 "src.api.routes.AsyncSession",
-                side_effect=lambda: FakeAsyncSession(outcomes, calls),
+                side_effect=lambda **kwargs: FakeAsyncSession(outcomes, calls, **kwargs),
             ),
             patch("src.api.routes.asyncio.sleep", new=AsyncMock()),
         ):

@@ -1899,7 +1899,11 @@ class FlowClient:
         last_result: Dict[str, Any] = {}
         attempts = max(1, int(max_attempts or 1))
         for attempt in range(attempts):
-            last_result = await self.check_video_status(at, operations)
+            # Uploaded reference media can be ready for generation without a
+            # downloadable rendition. Only generated output needs a signed URL.
+            last_result = await self.check_video_status(
+                at, operations, require_download_url=False,
+            )
             checked_operations = last_result.get("operations") if isinstance(last_result, dict) else None
             operation = checked_operations[0] if isinstance(checked_operations, list) and checked_operations else {}
             status = str(operation.get("status") or "").strip()
@@ -3509,7 +3513,9 @@ class FlowClient:
 
     # ========== 任务轮询 (使用AT) ==========
 
-    async def check_video_status(self, at: str, operations: List[Dict]) -> dict:
+    async def check_video_status(
+        self, at: str, operations: List[Dict], *, require_download_url: bool = True,
+    ) -> dict:
         """查询视频生成状态
 
         Args:
@@ -3543,7 +3549,8 @@ class FlowClient:
                 timeout=self._get_video_poll_timeout())
             result = video_operations(response["rpc_payload"], token_id=account, project_id=project, expected_ids=ids)
             for index, operation in enumerate(result["operations"]):
-                if operation["status"] != "MEDIA_GENERATION_STATUS_SUCCESSFUL":
+                if (not require_download_url
+                        or operation["status"] != "MEDIA_GENERATION_STATUS_SUCCESSFUL"):
                     continue
                 if operation["operation"].get("metadata", {}).get("video", {}).get("fifeUrl"):
                     continue
@@ -3555,8 +3562,16 @@ class FlowClient:
                     timeout=self._get_video_poll_timeout())
                 resolved = video_operations(response["rpc_payload"], token_id=account, project_id=project,
                                             expected_ids=[operation["mediaName"]])["operations"][0]
+                if resolved["status"] in {"MEDIA_GENERATION_STATUS_FAILED", "MEDIA_GENERATION_STATUS_CANCELLED"}:
+                    result["operations"][index] = resolved
+                    continue
                 if not resolved["operation"].get("metadata", {}).get("video", {}).get("fifeUrl"):
-                    raise AngularProtocolError("Flow media download URL is not ready")
+                    # A completed generation can precede rendition signing.
+                    # Keep polling the same media instead of treating this as
+                    # three protocol errors and failing an accepted task.
+                    operation["status"] = "MEDIA_GENERATION_STATUS_ACTIVE"
+                    operation["downloadUrlPending"] = True
+                    continue
                 result["operations"][index] = resolved
             return result
         url = f"{self.api_base_url}/video:batchCheckAsyncVideoGenerationStatus"

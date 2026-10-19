@@ -479,7 +479,9 @@ def _remote_media_payload_is_valid(response: Any, media_type: str) -> bool:
 
 
 def _remote_media_status_is_retryable(status_code: int) -> bool:
-    return status_code in {408, 425, 429} or 500 <= status_code <= 599
+    # A newly created media URL can return 404 briefly while the object is
+    # propagating. Retrying also gives another egress route a chance to work.
+    return status_code in {404, 408, 425, 429} or 500 <= status_code <= 599
 
 
 async def _resolve_remote_media_proxy_candidates(
@@ -537,7 +539,8 @@ async def _download_remote_media_data(
     for attempt_index, (route_label, proxy_url) in enumerate(attempt_candidates, start=1):
         started_at = time.monotonic()
         try:
-            async with AsyncSession() as session:
+            # Keep the direct candidate independent of process-wide proxy vars.
+            async with AsyncSession(trust_env=False) as session:
                 response = await session.get(
                     url,
                     timeout=timeout,
@@ -565,7 +568,15 @@ async def _download_remote_media_data(
                 f"invalid_payload={invalid_payload}, elapsed_ms={elapsed_ms}"
             )
             if not invalid_payload and not _remote_media_status_is_retryable(status_code):
-                return None
+                # A 403 from one proxy does not prove the public URL is
+                # inaccessible from the request proxy or direct route.
+                alternative_route = any(
+                    later_proxy != proxy_url
+                    for _, later_proxy in attempt_candidates[attempt_index:]
+                )
+                if not alternative_route:
+                    return None
+                continue
         except Exception as exc:
             elapsed_ms = int((time.monotonic() - started_at) * 1000)
             debug_logger.log_warning(
