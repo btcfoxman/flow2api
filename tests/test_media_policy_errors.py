@@ -4,6 +4,7 @@ from src.core.media_errors import (
     is_media_invalid_argument_error,
     is_media_transport_error,
     is_media_traffic_error,
+    is_media_unusual_activity_error,
     is_media_policy_error,
     is_project_image_upload_error,
     is_project_image_upload_invalid_argument_error,
@@ -18,6 +19,7 @@ from src.core.media_errors import (
     MEDIA_TRANSPORT_FAILURE_MESSAGE,
     MEDIA_TRANSPORT_REASON,
     MEDIA_TRAFFIC_REASON,
+    MEDIA_UNUSUAL_ACTIVITY_REASON,
     VIDEO_UPLOAD_FAILURE_MESSAGE,
     VIDEO_UPLOAD_INVALID_ARGUMENT_MESSAGE,
     VIDEO_UPLOAD_TIMEOUT_MESSAGE,
@@ -96,6 +98,19 @@ class MediaPolicyErrorTests(unittest.TestCase):
         self.assertNotIn("风控", message)
         self.assertNotIn("异常活动", message)
         self.assertNotIn("内容安全", message)
+
+    def test_distinct_unusual_activity_is_not_reported_as_high_traffic(self):
+        error = "PUBLIC_ERROR_UNUSUAL_ACTIVITY: reCAPTCHA evaluation failed"
+        self.assertTrue(is_media_unusual_activity_error(error))
+        self.assertTrue(is_media_traffic_error(error))
+        self.assertEqual(media_generation_failure_reason(error), MEDIA_UNUSUAL_ACTIVITY_REASON)
+        message, status_code = media_generation_failure_response("video", error)
+        self.assertEqual(status_code, 429)
+        self.assertEqual(message, "视频生成请求受到服务限制，请稍后重试")
+        self.assertNotIn("UNUSUAL_ACTIVITY", message)
+        self.assertFalse(is_media_unusual_activity_error(
+            "PUBLIC_ERROR_UNUSUAL_ACTIVITY_TOO_MUCH_TRAFFIC"
+        ))
 
     def test_generic_invalid_argument_is_not_policy_error(self):
         error = "HTTP Error 400: Request contains an invalid argument."

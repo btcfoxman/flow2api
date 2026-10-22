@@ -24,6 +24,7 @@ MEDIA_POLICY_REASON_MINOR = "minor_filter"
 MEDIA_POLICY_REASON_AUDIO = "audio_filter"
 MEDIA_POLICY_REASON_SEXUAL = "sexual_filter"
 MEDIA_TRAFFIC_REASON = "upstream_traffic_control"
+MEDIA_UNUSUAL_ACTIVITY_REASON = "upstream_unusual_activity"
 MEDIA_INVALID_ARGUMENT_REASON = "invalid_argument"
 MEDIA_TRANSPORT_REASON = "transport_error"
 
@@ -49,6 +50,9 @@ MEDIA_PROMINENT_PEOPLE_FAILURE_MESSAGE = (
 )
 UPSTREAM_TRAFFIC_FAILURE_MESSAGE = (
     "媒体生成服务当前请求较多，请稍后重试"
+)
+UPSTREAM_UNUSUAL_ACTIVITY_FAILURE_MESSAGE = (
+    "媒体生成请求受到服务限制，请稍后重试"
 )
 IMAGE_SERVICE_UNAVAILABLE_MESSAGE = "图片生成服务暂时不可用，请稍后重试"
 VIDEO_SERVICE_UNAVAILABLE_MESSAGE = "视频生成服务暂时不可用，请稍后重试"
@@ -151,6 +155,14 @@ def is_media_traffic_error(error_message: Any) -> bool:
     return any(keyword in error_lower for keyword in MEDIA_TRAFFIC_ERROR_KEYWORDS)
 
 
+def is_media_unusual_activity_error(error_message: Any) -> bool:
+    """Identify the upstream's distinct unusual-activity verdict."""
+    return bool(re.search(
+        r"\bpublic_error_unusual_activity\b(?!_too_much_traffic)",
+        str(error_message or "").lower(),
+    ))
+
+
 def is_media_invalid_argument_error(error_message: Any) -> bool:
     """Return True for a generic generation-submit invalid-argument rejection."""
     error_lower = str(error_message or "").strip().lower()
@@ -172,6 +184,8 @@ def media_generation_failure_reason(error_message: Any) -> Optional[str]:
     policy_reason = media_policy_reason(error_message)
     if policy_reason:
         return policy_reason
+    if is_media_unusual_activity_error(error_message):
+        return MEDIA_UNUSUAL_ACTIVITY_REASON
     if is_media_traffic_error(error_message):
         return MEDIA_TRAFFIC_REASON
     if is_media_invalid_argument_error(error_message):
@@ -240,6 +254,12 @@ def media_generation_failure_response(
     text = str(error_message or "").strip() or "\u672a\u77e5\u9519\u8bef"
     if is_media_policy_error(text):
         return media_policy_failure_message(media_type, text), 400
+    if is_media_unusual_activity_error(text):
+        media_label = {"image": "图片", "video": "视频"}.get(media_type, "媒体")
+        return (
+            UPSTREAM_UNUSUAL_ACTIVITY_FAILURE_MESSAGE.replace("媒体", media_label, 1),
+            429,
+        )
     if is_media_traffic_error(text):
         media_label = {
             "image": "\u56fe\u7247",
